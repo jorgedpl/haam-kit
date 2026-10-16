@@ -1,0 +1,31 @@
+---
+name: next
+description: Pick the next most valuable unclaimed work item from the three streams (bugs, ready features, ideas needing assessment/spec) and start it. Use when asked "what's next", "pick something up", "work on the backlog" or when running unattended.
+argument-hint: "[bugs|features|ideas]  (optional: restrict to one stream)"
+---
+
+# /next: pull the next work item
+
+Filter: $ARGUMENTS (empty = all streams)
+
+## 1. Build the queue (Linear, team `APP`, unassigned or assigned to the current user, not In Progress)
+
+Take the first match, in this order:
+
+1. **Bugs**: label `stream:bug`, status `Ready`, priority Urgent or High.
+2. **Features**: status `Ready`, label `agent-ready`, by priority (Urgent → Low), then oldest first.
+3. **Bugs**: label `stream:bug`, status `Ready`, priority Medium or Low.
+4. **Specs to write**: status `Backlog`, label `stream:feature`, has a priority, no spec yet → run `/spec`.
+5. **Ideas to assess**: status `Triage`, label `stream:idea` → run `/assess`.
+
+Skip any issue with label `human-only`, any with no priority (except ideas in step 5), and any whose `blocked by` relations are not Done.
+
+## 2. Confirm or go
+- **If a human is present**, show the top 3 candidates (ID, title, priority, stream, size if known) and recommend one. Wait for a choice.
+- **If running unattended** (scheduled task, or the user said "just pick"), take the top one and say which and why in the first line of your output.
+
+## 3. Execute
+Run the matching skill: `/build` for Ready items, `/spec` for Backlog features, `/assess` for ideas, following that skill's steps exactly (including the claim protocol).
+
+## 4. Nothing to do?
+Report: count of items waiting on a human (status `Decision`, `UAT`, spec PRs open), and stop. Never invent work, and never start items that aren't through their gate.

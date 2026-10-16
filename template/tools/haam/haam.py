@@ -1,0 +1,1530 @@
+#!/usr/bin/env python3
+"""
+HAAM setup tool: Human-Agent Agile Methodology.
+
+One tool that any coding agent (Claude Code, Cursor, Codex, Grok, ...) or human can
+run to adopt HAAM in a repository and to onboard new developers.
+
+    python3 tools/haam/haam.py <command> [options]
+
+Admin (first-time adoption and upgrades):
+    install   --target DIR     Copy the HAAM kit into a repository (never overwrites)
+    update    --target DIR     Upgrade a project to this kit version (keeps your customisations)
+    config                     Create/update haam.config.json and apply team key + names
+    agents    [--apply]        Wire up Claude Code, Cursor, Codex, Grok, Gemini, Copilot
+    github    [--apply]        Labels, branch rules, required checks, production env, security
+    linear    [--apply]        Linear team, statuses and labels (needs a Linear API key)
+    invite    --github USER [--linear-email EMAIL] [--apply]
+
+Everyone:
+    version   [--check]                           Kit version here, in the project, and the latest release
+    doctor    [--role admin|developer] [--json]   Check what's done and what's missing
+    dev       [--apply] [--run-checks]            Developer onboarding on this machine
+
+Safety rules built into the tool:
+  * Without --apply nothing is changed: you see the plan first.
+  * Secrets are never stored in the repo, printed, or passed through an agent's chat.
+    Steps that need one are marked [YOU, in your terminal] for the human to run.
+  * Nothing is deleted. Conflicting files are left alone and reported.
+
+Requires: Python 3.8+, git. For github/invite: GitHub CLI (`gh`) logged in as a repo admin.
+
+Part of the HAAM kit: https://github.com/jorgedpl/haam-kit
+MIT licence. Copyright (c) 2026 Jorge del Prado. See docs/setup/HAAM-LICENSE.md.
+"""
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+VERSION = "1.0.0"
+CONFIG_NAME = "haam.config.json"
+LOCK_NAME = "haam.lock.json"
+KIT_REPO = "jorgedpl/haam-kit"
+KIT_URL = f"https://github.com/{KIT_REPO}"
+PLACEHOLDER_KEY = "APP"
+LINEAR_API = "https://api.linear.app/graphql"
+# Test hook: only a local address is accepted, so a stray variable can't send keys elsewhere.
+if os.environ.get("HAAM_LINEAR_API", "").startswith("http://127.0.0.1:"):
+    LINEAR_API = os.environ["HAAM_LINEAR_API"]
+LINEAR_MCP = "https://mcp.linear.app/mcp"
+
+DEFAULT_CONFIG = {
+    "product_name": "",
+    "team_key": PLACEHOLDER_KEY,
+    "linear_team_name": "",
+    "github_repo": "",
+    "default_branch": "main",
+    "product_owner_github": "",
+    "backup_approvers_github": [],
+    "production_url": "",
+    "agents": ["claude", "cursor", "codex", "grok"],
+    "_applied": {"team_key": PLACEHOLDER_KEY, "product_name": ""},
+}
+
+REQUIRED_CHECKS = ["ci", "secrets", "dependencies", "ai-review", "security-review", "release-gate"]
+
+GITHUB_LABELS = [
+    ("uat-passed", "0E8A16", "Gate G4 passed: human UAT OK"),
+    ("gate-override", "B60205", "Human override of G4; needs OVERRIDE: comment"),
+    ("human-review", "FBCA04", "Touches protected area; human code review required"),
+    ("ai-review-overruled", "5319E7", "Human overrules the AI reviews on this PR"),
+]
+
+# (name, Linear state type, colour)
+LINEAR_STATES = [
+    ("Triage", "triage", "#FC7840"),
+    ("Discovery", "backlog", "#BEC2C8"),
+    ("Decision", "backlog", "#F2C94C"),
+    ("Backlog", "backlog", "#95A2B3"),
+    ("Ready", "unstarted", "#E2E2E2"),
+    ("In Progress", "started", "#F2C94C"),
+    ("In Review", "started", "#5E6AD2"),
+    ("UAT", "started", "#26B5CE"),
+    ("Deploying", "started", "#4CB782"),
+    ("Done", "completed", "#5E6AD2"),
+    ("Parked", "canceled", "#95A2B3"),
+    ("Canceled", "canceled", "#95A2B3"),
+]
+
+LINEAR_LABELS = [
+    ("stream:idea", "#BB87FC", "New idea, not yet decided"),
+    ("stream:feature", "#4EA7FC", "Approved work"),
+    ("stream:bug", "#EB5757", "Something is broken"),
+    ("agent-ready", "#4CB782", "Passed G2: agents may build it"),
+    ("human-review", "#F2C94C", "Touches a protected area: human code review required"),
+    ("human-only", "#95A2B3", "Agents must not pick this up"),
+    ("override-followup", "#FC7840", "Created after a gate override"),
+]
+
+# Files the rename step rewrites (team key / product name)
+RENAME_ROOTS = ["AGENTS.md", "CLAUDE.md", ".agents", ".github", "docs"]
+TEXT_SUFFIXES = {".md", ".yml", ".yaml", ".json", ".sh", ".txt", ".toml", ""}
+
+SKILL_LINKS = [".claude/skills", ".grok/skills"]
+GITIGNORE_MARK = "# --- HAAM ---"
+GITIGNORE_END = "# --- /HAAM ---"
+
+# ----------------------------------------------------------------------------- output
+
+USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def c(code, text):
+    return f"\033[{code}m{text}\033[0m" if USE_COLOR else text
+
+
+OK, WARN, BAD, INFO = c("32", "✔"), c("33", "!"), c("31", "✘"), c("36", "•")
+WHO_AGENT = "[agent]"
+WHO_TERMINAL = "[YOU, in your terminal]"
+WHO_BROWSER = "[YOU, in the browser]"
+
+
+class Report:
+    """Collects results so the same data can be printed for humans or as JSON for agents."""
+
+    def __init__(self):
+        self.sections = []
+        self.actions = []
+
+    def section(self, title):
+        self.sections.append({"title": title, "items": []})
+
+    def add(self, status, text, detail=""):
+        if not self.sections:
+            self.section("General")
+        self.sections[-1]["items"].append({"status": status, "text": text, "detail": detail})
+
+    def action(self, who, text, command=""):
+        self.actions.append({"who": who, "text": text, "command": command})
+
+    def counts(self):
+        out = {"ok": 0, "warn": 0, "fail": 0, "info": 0}
+        for s in self.sections:
+            for i in s["items"]:
+                out[i["status"]] = out.get(i["status"], 0) + 1
+        return out
+
+    def print(self, as_json=False):
+        if as_json:
+            print(json.dumps({"version": VERSION, "sections": self.sections,
+                              "next_actions": self.actions, "counts": self.counts()}, indent=2))
+            return
+        sym = {"ok": OK, "warn": WARN, "fail": BAD, "info": INFO}
+        for s in self.sections:
+            print(f"\n{c('1', s['title'])}")
+            for i in s["items"]:
+                line = f"  {sym.get(i['status'], INFO)} {i['text']}"
+                if i["detail"]:
+                    line += c("2", f"  ({i['detail']})")
+                print(line)
+        if self.actions:
+            print(f"\n{c('1', 'Next actions')}")
+            for n, a in enumerate(self.actions, 1):
+                print(f"  {n}. {c('1', a['who'])} {a['text']}")
+                if a["command"]:
+                    print(f"       {c('36', a['command'])}")
+        cnt = self.counts()
+        summary = f"{cnt['ok']} ok · {cnt['warn']} to check · {cnt['fail']} missing"
+        print("\n" + c("2", summary))
+
+
+# ----------------------------------------------------------------------------- helpers
+
+def run(cmd, cwd=None, input_text=None, check=False):
+    """Run a command, return (code, stdout, stderr). Never raises for missing binaries."""
+    try:
+        p = subprocess.run(cmd, cwd=cwd, input=input_text, capture_output=True, text=True)
+    except FileNotFoundError:
+        return 127, "", f"{cmd[0]}: not installed"
+    if check and p.returncode != 0:
+        raise RuntimeError(p.stderr.strip() or p.stdout.strip())
+    return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+
+def have(binary):
+    return shutil.which(binary) is not None
+
+
+def kit_root():
+    return Path(__file__).resolve().parents[2]
+
+
+def find_repo_root(start):
+    code, out, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=start)
+    return Path(out) if code == 0 else Path(start).resolve()
+
+
+def load_config(root):
+    p = root / CONFIG_NAME
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    if p.exists():
+        try:
+            data = json.loads(p.read_text())
+            cfg.update(data)
+            cfg.setdefault("_applied", {"team_key": PLACEHOLDER_KEY, "product_name": ""})
+        except json.JSONDecodeError as e:
+            sys.exit(f"{CONFIG_NAME} is not valid JSON: {e}")
+    return cfg
+
+
+def save_config(root, cfg):
+    (root / CONFIG_NAME).write_text(json.dumps(cfg, indent=2) + "\n")
+
+
+def detect_github_repo(root):
+    code, url, _ = run(["git", "remote", "get-url", "origin"], cwd=root)
+    if code != 0:
+        return ""
+    m = re.search(r"github\.com[:/]+([^/]+/[^/.]+?)(?:\.git)?$", url)
+    return m.group(1) if m else ""
+
+
+def iter_text_files(root, rel_roots):
+    for rel in rel_roots:
+        base = root / rel
+        if base.is_file():
+            yield base
+        elif base.is_dir():
+            for p in base.rglob("*"):
+                if p.is_file() and not p.is_symlink() and p.suffix in TEXT_SUFFIXES:
+                    yield p
+
+
+def todo_count(root):
+    hits = []
+    for p in iter_text_files(root, ["AGENTS.md", "Makefile", "docs", ".github"]):
+        try:
+            for n, line in enumerate(p.read_text(errors="ignore").splitlines(), 1):
+                if "TODO(setup)" in line:
+                    hits.append(f"{p.relative_to(root)}:{n}")
+        except OSError:
+            pass
+    return hits
+
+
+def is_tty():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def ask(prompt, default=""):
+    if not is_tty():
+        return default
+    suffix = f" [{default}]" if default else ""
+    val = input(f"{prompt}{suffix}: ").strip()
+    return val or default
+
+
+# ----------------------------------------------------------------------------- install
+
+def merge_json(dst, src, merger):
+    try:
+        a = json.loads(dst.read_text())
+        b = json.loads(src.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    before = json.dumps(a, sort_keys=True)
+    merged = merger(a, b)
+    if json.dumps(merged, sort_keys=True) == before:
+        return "same"
+    dst.write_text(json.dumps(merged, indent=2) + "\n")
+    return True
+
+
+def merge_mcp(a, b):
+    a.setdefault("mcpServers", {})
+    for k, v in b.get("mcpServers", {}).items():
+        a["mcpServers"].setdefault(k, v)
+    return a
+
+
+def merge_gemini(a, b):
+    ctx = a.setdefault("context", {})
+    names = ctx.get("fileName", [])
+    if isinstance(names, str):
+        names = [names]
+    for n in b.get("context", {}).get("fileName", []):
+        if n not in names:
+            names.append(n)
+    ctx["fileName"] = names
+    return a
+
+
+def merge_claude_settings(a, b):
+    perms_a = a.setdefault("permissions", {})
+    for key, vals in b.get("permissions", {}).items():
+        cur = perms_a.setdefault(key, [])
+        for v in vals:
+            if v not in cur:
+                cur.append(v)
+    for key in ("enabledMcpjsonServers",):
+        cur = a.setdefault(key, [])
+        for v in b.get(key, []):
+            if v not in cur:
+                cur.append(v)
+    a.setdefault("enableAllProjectMcpServers", b.get("enableAllProjectMcpServers", False))
+    hooks_a = a.setdefault("hooks", {})
+    for event, entries in b.get("hooks", {}).items():
+        cur = hooks_a.setdefault(event, [])
+        existing_cmds = {h.get("command", "") for entry in cur for h in entry.get("hooks", [])}
+        for e in entries:
+            cmds = [h.get("command", "") for h in e.get("hooks", [])]
+            if not all(cmd in existing_cmds for cmd in cmds):
+                cur.append(e)
+    return a
+
+
+JSON_MERGERS = {
+    ".mcp.json": merge_mcp,
+    ".cursor/mcp.json": merge_mcp,
+    ".gemini/settings.json": merge_gemini,
+    ".claude/settings.json": merge_claude_settings,
+}
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def load_lock(root):
+    p = root / LOCK_NAME
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            pass
+    return {"kit_version": None, "kit_repo": KIT_REPO, "files": {}}
+
+
+def save_lock(root, lock):
+    lock["files"] = dict(sorted(lock["files"].items()))
+    (root / LOCK_NAME).write_text(json.dumps(lock, indent=2) + "\n")
+
+
+def make_renderer(target):
+    """Return render(path, rel) -> bytes: kit file content as it should look in this project."""
+    tcfg = load_config(target) if (target / CONFIG_NAME).exists() else None
+    applied_key = (tcfg or {}).get("_applied", {}).get("team_key", PLACEHOLDER_KEY)
+    applied_product = (tcfg or {}).get("_applied", {}).get("product_name", "")
+
+    def render(path, rel_s):
+        data = path.read_bytes()
+        in_scope = any(rel_s == r or rel_s.startswith(r + "/") for r in RENAME_ROOTS)
+        if not in_scope or path.suffix not in TEXT_SUFFIXES or (applied_key == PLACEHOLDER_KEY and not applied_product):
+            return data
+        try:
+            text = data.decode()
+        except UnicodeDecodeError:
+            return data
+        if applied_key != PLACEHOLDER_KEY:
+            text = re.sub(rf"\b{PLACEHOLDER_KEY}\b", applied_key, text)
+            text = re.sub(rf"\b{PLACEHOLDER_KEY.lower()}-(\d)", lambda m: f"{applied_key.lower()}-{m.group(1)}", text)
+            text = text.replace(" (`TODO(setup)`: replace with your team key everywhere)", "")
+        if applied_product:
+            text = text.replace("`TODO(setup): product name`", applied_product)
+        return text.encode()
+    return render
+
+
+def kit_files(src):
+    """Files the kit installs, as (path, posix relative path)."""
+    for p in sorted(src.rglob("*")):
+        rel = p.relative_to(src)
+        rel_s = rel.as_posix()
+        if rel.parts[0] in (".git", ".haam") or rel_s in INSTALL_SKIP or "__pycache__" in rel.parts:
+            continue
+        if p.is_symlink() or p.is_dir():
+            continue  # links are created by `agents`; dirs are created as needed
+        if any(rel_s.startswith(l + "/") or rel_s == l for l in SKILL_LINKS):
+            continue
+        yield p, rel_s
+
+
+def sync_gitignore(src, target, dry_run):
+    """Add or refresh the HAAM block in .gitignore. Returns True if it changed."""
+    add_path = src / ".gitignore.additions"
+    if not add_path.exists():
+        return False
+    block = f"{GITIGNORE_MARK}\n{add_path.read_text().rstrip()}\n{GITIGNORE_END}\n"
+    gi = target / ".gitignore"
+    current = gi.read_text() if gi.exists() else ""
+    if GITIGNORE_MARK in current:
+        start = current.index(GITIGNORE_MARK)
+        end = current.find(GITIGNORE_END, start)
+        end = len(current) if end == -1 else end + len(GITIGNORE_END)
+        new = current[:start] + block.rstrip("\n") + current[end:]
+        if not new.endswith("\n"):
+            new += "\n"
+    else:
+        new = current + ("\n" if current and not current.endswith("\n") else "") + ("\n" if current else "") + block
+    if new == current:
+        return False
+    if not dry_run:
+        gi.write_text(new)
+    return True
+
+
+def make_executable(target):
+    for sh in list((target / "scripts").glob("*.sh")) + list((target / ".githooks").glob("*")) + \
+            list((target / ".claude" / "hooks").glob("*.sh")) + [target / "tools/haam/haam.py"]:
+        if sh.exists() and sh.is_file():
+            sh.chmod(sh.stat().st_mode | 0o111)
+
+
+INSTALL_SKIP = {".gitignore.additions", "START-HERE.md"}
+
+
+def cmd_install(args):
+    src = kit_root()
+    target = Path(args.target).resolve()
+    if not (src / "AGENTS.md").exists():
+        sys.exit(f"Can't find the HAAM kit next to this tool (looked in {src}).")
+    if not (target / ".git").exists():
+        sys.exit(f"{target} is not a git repository. Run this against your project's root folder.")
+    if src == target:
+        sys.exit("Source and target are the same folder.")
+    if (target / LOCK_NAME).exists():
+        lv = load_lock(target).get("kit_version")
+        print(f"HAAM {lv} is already installed here. Use `update` to move to {VERSION}; continuing as a re-install check.\n")
+
+    rep = Report()
+    rep.section(f"Installing HAAM {VERSION} into {target}")
+    render = make_renderer(target)
+    lock = load_lock(target)
+    incoming = target / ".haam" / "incoming"
+    created, same, merged, conflicts = [], [], [], []
+
+    for p, rel_s in kit_files(src):
+        dst = target / rel_s
+        content = render(p, rel_s)
+        lock["files"][rel_s] = sha(content)
+        if not dst.exists():
+            if not args.dry_run:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(content)
+                shutil.copymode(p, dst)
+            created.append(rel_s)
+            continue
+        if dst.read_bytes() == content:
+            same.append(rel_s)
+            continue
+        if rel_s in JSON_MERGERS:
+            result = "dry" if args.dry_run else merge_json(dst, p, JSON_MERGERS[rel_s])
+            if result == "same":
+                same.append(rel_s)
+                continue
+            if result:
+                merged.append(rel_s)
+                continue
+        conflicts.append(rel_s)
+        if not args.dry_run:
+            out = incoming / rel_s
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(content)
+
+    if sync_gitignore(src, target, args.dry_run):
+        merged.append(".gitignore")
+    if not args.dry_run:
+        make_executable(target)
+        lock["kit_version"] = VERSION
+        lock["kit_repo"] = KIT_REPO
+        save_lock(target, lock)
+
+    rep.add("ok", f"{len(created)} files added")
+    if merged:
+        rep.add("ok", f"{len(merged)} existing files merged automatically", ", ".join(merged))
+    if same:
+        rep.add("info", f"{len(same)} files already up to date")
+    for cf in conflicts:
+        rep.add("warn", f"Kept your existing {cf}", f"kit version saved to .haam/incoming/{cf}")
+    rep.add("info", f"Kit version {VERSION} recorded in {LOCK_NAME} (commit it)")
+    if conflicts:
+        rep.action(WHO_AGENT, "Merge each conflicting file using the kit version in .haam/incoming/ "
+                   "(rules in docs/setup/HAAM-ADOPTION-GUIDE.md, Phase 1 table). For an existing CLAUDE.md or AGENTS.md: "
+                   "move project-specific content into docs/product/ARCHITECTURE.md (or a 'Project specifics' "
+                   "section at the end of AGENTS.md), then use the kit version. Delete .haam/incoming when done.")
+    rep.action(WHO_AGENT, "Wire up the agent tools (skills links, MCP configs)", "python3 tools/haam/haam.py agents --apply")
+    rep.action(WHO_AGENT, "Create the project config with the human's answers", "python3 tools/haam/haam.py config")
+    if args.dry_run:
+        rep.add("info", "Dry run: nothing was written")
+    rep.print(args.json)
+
+
+def version_tuple(v):
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", v or "")
+    return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+
+def cmd_update(args):
+    src = kit_root()
+    target = Path(args.target).resolve()
+    if not (src / "AGENTS.md").exists():
+        sys.exit(f"Can't find the HAAM kit next to this tool (looked in {src}).")
+    if src == target:
+        sys.exit("Run the NEW kit's tool against your project: python3 <new-kit>/template/tools/haam/haam.py update --target .")
+    if not (target / "AGENTS.md").exists():
+        sys.exit("HAAM isn't installed in that folder. Use `install` first.")
+
+    lock = load_lock(target)
+    old = lock.get("kit_version") or "unknown"
+    rep = Report()
+    rep.section(f"Updating HAAM {old} → {VERSION} in {target}")
+    if old != "unknown" and version_tuple(old) > version_tuple(VERSION):
+        sys.exit(f"The project has HAAM {old}, newer than this kit ({VERSION}). Use a newer kit.")
+    if version_tuple(VERSION)[0] > version_tuple(old)[0] and old != "unknown":
+        rep.add("warn", f"Major version change ({old} → {VERSION})",
+                "read the migration notes in the kit's CHANGELOG before applying")
+
+    render = make_renderer(target)
+    incoming = target / ".haam" / "incoming"
+    added, updated, kept, conflicts, merged, same, skipped = [], [], [], [], [], [], []
+    seen = set()
+    new_lock = dict(lock.get("files", {}))
+
+    for p, rel_s in kit_files(src):
+        seen.add(rel_s)
+        dst = target / rel_s
+        new = render(p, rel_s)
+        base = lock.get("files", {}).get(rel_s)
+        if rel_s in JSON_MERGERS and dst.exists():
+            result = "dry" if args.dry_run or not args.apply else merge_json(dst, p, JSON_MERGERS[rel_s])
+            (same if result == "same" else merged).append(rel_s)
+            new_lock[rel_s] = sha(new)
+            continue
+        if not dst.exists():
+            if base is not None:
+                skipped.append(rel_s)  # project deliberately removed it
+                continue
+            added.append(rel_s)
+            if args.apply:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(new)
+                shutil.copymode(p, dst)
+            new_lock[rel_s] = sha(new)
+            continue
+        cur = dst.read_bytes()
+        if cur == new:
+            same.append(rel_s)
+            new_lock[rel_s] = sha(new)
+        elif base is not None and sha(cur) == base:
+            updated.append(rel_s)  # untouched by the project: safe to replace
+            if args.apply:
+                dst.write_bytes(new)
+                shutil.copymode(p, dst)
+            new_lock[rel_s] = sha(new)
+        elif base is not None and sha(new) == base:
+            kept.append(rel_s)  # project customised it; kit didn't change it
+        else:
+            conflicts.append(rel_s)  # both changed (or no record): needs a merge
+            if args.apply:
+                out = incoming / rel_s
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(new)
+            new_lock[rel_s] = sha(new)
+
+    removed = sorted(r for r in lock.get("files", {}) if r not in seen)
+    for r in removed:
+        new_lock.pop(r, None)
+
+    gi_changed = sync_gitignore(src, target, dry_run=not args.apply)
+
+    rep.add("ok" if added else "info", f"{len(added)} new files", ", ".join(added[:8]) + (" …" if len(added) > 8 else ""))
+    rep.add("ok" if updated else "info", f"{len(updated)} files updated (you hadn't changed them)",
+            ", ".join(updated[:8]) + (" …" if len(updated) > 8 else ""))
+    if merged:
+        rep.add("ok", f"{len(merged)} settings files merged", ", ".join(merged))
+    if gi_changed:
+        rep.add("ok", ".gitignore HAAM block refreshed")
+    rep.add("info", f"{len(same)} files already current")
+    if kept:
+        rep.add("info", f"{len(kept)} of your customised files kept (no kit change)", ", ".join(kept[:8]))
+    for r in skipped:
+        rep.add("info", f"Skipped {r}", "you removed it; not re-added")
+    for r in conflicts:
+        rep.add("warn", f"Needs a merge: {r}", f"you and the kit both changed it; new kit version → .haam/incoming/{r}")
+    for r in removed:
+        rep.add("warn", f"No longer in the kit: {r}", "delete it if you don't use it (nothing is deleted automatically)")
+
+    if args.apply:
+        make_executable(target)
+        lock["files"] = new_lock
+        lock["kit_version"] = VERSION
+        lock["kit_repo"] = KIT_REPO
+        save_lock(target, lock)
+        rep.add("ok", f"{LOCK_NAME} now records {VERSION}")
+    else:
+        rep.add("info", "Plan only. Re-run with --apply (on a branch) to update")
+
+    if conflicts:
+        rep.action(WHO_AGENT, "Merge each file in .haam/incoming/ into the project's version, keeping the project's "
+                   "customisations and adopting the kit's changes. Show the human what changed. Delete .haam/incoming when done.")
+    rep.action(WHO_AGENT, f"Read the kit CHANGELOG entries after {old} for migration steps (e.g. new required checks or "
+               "Linear statuses), then re-run the plans", "python3 tools/haam/haam.py github  ·  python3 tools/haam/haam.py linear")
+    rep.action(WHO_AGENT, "Check everything", "python3 tools/haam/haam.py agents --apply && python3 tools/haam/haam.py doctor")
+    rep.print(args.json)
+
+
+def latest_release():
+    """Latest published kit release tag, or None (no network, rate limit, etc.)."""
+    req = urllib.request.Request(f"https://api.github.com/repos/{KIT_REPO}/releases/latest",
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "haam-tool"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read()).get("tag_name")
+    except Exception:
+        return None
+
+
+def cmd_version(args):
+    root = find_repo_root(Path.cwd())
+    lock = load_lock(root)
+    info = {"tool": VERSION, "project": lock.get("kit_version"), "latest": None}
+    if args.check:
+        info["latest"] = latest_release()
+    if args.json:
+        print(json.dumps(info, indent=2))
+        return
+    print(f"HAAM tool:        {VERSION}")
+    print(f"This project:     {info['project'] or 'not recorded (no haam.lock.json)'}")
+    if args.check:
+        latest = info["latest"]
+        print(f"Latest release:   {latest or 'unknown (offline or not published yet)'}")
+        if latest and info["project"] and version_tuple(latest) > version_tuple(info["project"]):
+            print(f"\nUpdate available. See {KIT_URL}/releases and run /haam-update.")
+
+
+# ----------------------------------------------------------------------------- config
+
+def apply_renames(root, cfg, rep, dry_run=False):
+    old_key = cfg["_applied"].get("team_key", PLACEHOLDER_KEY)
+    new_key = cfg["team_key"].upper()
+    changed = 0
+    key_re = re.compile(rf"\b{re.escape(old_key)}\b")
+    branch_re = re.compile(rf"\b{re.escape(old_key.lower())}-(\d)")
+    product = cfg.get("product_name", "")
+    lock = load_lock(root)
+    lock_changed = False
+    for p in iter_text_files(root, RENAME_ROOTS):
+        try:
+            text = p.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        new = text
+        if old_key != new_key:
+            new = key_re.sub(new_key, new)
+            new = branch_re.sub(lambda m: f"{new_key.lower()}-{m.group(1)}", new)
+        if product:
+            new = new.replace("`TODO(setup): product name`", product)
+        if new_key != PLACEHOLDER_KEY:
+            new = new.replace(" (`TODO(setup)`: replace with your team key everywhere)", "")
+        if new != text:
+            changed += 1
+            if not dry_run:
+                p.write_text(new)
+                rel = p.relative_to(root).as_posix()
+                # Keep the lock in step: a kit file renamed by config is still "unmodified by the project".
+                if lock["files"].get(rel) == sha(text.encode()):
+                    lock["files"][rel] = sha(new.encode())
+                    lock_changed = True
+    if lock_changed:
+        save_lock(root, lock)
+    if not dry_run:
+        cfg["_applied"]["team_key"] = new_key
+        if product:
+            cfg["_applied"]["product_name"] = product
+    if old_key != new_key:
+        rep.add("ok", f"Team key {old_key} → {new_key} applied", f"{changed} files updated")
+    elif changed:
+        rep.add("ok", "Product name applied", f"{changed} files updated")
+
+
+def cmd_config(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    rep.section("Project configuration")
+
+    detected = detect_github_repo(root)
+    fields = [
+        ("product_name", args.product, "Product name (e.g. Acme)"),
+        ("team_key", args.team_key, "Linear team key, 2-5 capital letters (e.g. ACM)"),
+        ("linear_team_name", args.linear_team, "Linear team name"),
+        ("github_repo", args.github_repo or (detected if not cfg["github_repo"] else None), "GitHub repo owner/name"),
+        ("product_owner_github", args.owner, "Product owner's GitHub username (approves deploys)"),
+        ("production_url", args.production_url, "Production URL (for the smoke test; blank if none)"),
+    ]
+    for key, flag_val, prompt in fields:
+        if flag_val is not None and flag_val != "":
+            cfg[key] = flag_val
+        elif not cfg.get(key) and is_tty():
+            default = ""
+            if key == "linear_team_name":
+                default = cfg.get("product_name", "")
+            if key == "team_key":
+                default = cfg.get("team_key", "")
+            cfg[key] = ask(prompt, default)
+    if args.backup_approvers is not None:
+        cfg["backup_approvers_github"] = [x.strip() for x in args.backup_approvers.split(",") if x.strip()]
+    if args.agents is not None:
+        cfg["agents"] = [x.strip().lower() for x in args.agents.split(",") if x.strip()]
+
+    cfg["team_key"] = (cfg.get("team_key") or PLACEHOLDER_KEY).upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9]{1,6}", cfg["team_key"]):
+        sys.exit(f"Team key '{cfg['team_key']}' should be 2-7 capital letters/digits, starting with a letter.")
+    if cfg["github_repo"] and not re.fullmatch(r"[\w.-]+/[\w.-]+", cfg["github_repo"]):
+        sys.exit(f"github_repo should look like owner/name, got '{cfg['github_repo']}'.")
+    if not cfg.get("linear_team_name"):
+        cfg["linear_team_name"] = cfg.get("product_name", "")
+
+    apply_renames(root, cfg, rep, dry_run=args.dry_run)
+    if not args.dry_run:
+        save_config(root, cfg)
+
+    missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
+    for k in ("product_name", "team_key", "linear_team_name", "github_repo", "product_owner_github",
+              "production_url", "agents"):
+        v = cfg.get(k)
+        rep.add("ok" if v else "warn", f"{k}: {v if v else '(not set)'}")
+    if missing:
+        rep.action(WHO_AGENT, "Ask the human for the missing values, then re-run with flags",
+                   "python3 tools/haam/haam.py config --product NAME --team-key KEY --github-repo owner/name --owner USER")
+    rep.add("info", f"Saved to {CONFIG_NAME} (commit it; it holds no secrets)" if not args.dry_run else "Dry run: not saved")
+    rep.print(args.json)
+
+
+# ----------------------------------------------------------------------------- agents
+
+def ensure_skill_link(root, rel, apply, rep):
+    link = root / rel
+    target_rel = os.path.relpath(root / ".agents" / "skills", link.parent)
+    if link.is_symlink():
+        if os.readlink(link) == target_rel and link.resolve() == (root / ".agents/skills").resolve():
+            rep.add("ok", f"{rel} → .agents/skills")
+            return
+        rep.add("warn", f"{rel} is a link to something else", os.readlink(link))
+        return
+    if link.is_dir():
+        # Existing real folder: move its skills into .agents/skills (no overwrite), then link.
+        extra = [d for d in link.iterdir() if not (root / ".agents/skills" / d.name).exists()]
+        clash = [d.name for d in link.iterdir() if (root / ".agents/skills" / d.name).exists()]
+        if not apply:
+            rep.add("warn", f"{rel} is a folder", f"would move {len(extra)} skill(s) to .agents/skills, then link"
+                    + (f"; name clashes kept in place: {', '.join(clash)}" if clash else ""))
+            return
+        if clash:
+            rep.add("fail", f"{rel}: skills with the same name as HAAM skills", ", ".join(clash))
+            rep.action(WHO_AGENT, f"Rename these skills in {rel} so they don't clash, then re-run agents --apply",
+                       ", ".join(clash))
+            return
+        for d in extra:
+            shutil.move(str(d), str(root / ".agents/skills" / d.name))
+        link.rmdir()
+    if not apply:
+        rep.add("warn", f"{rel} missing", "would link to .agents/skills")
+        return
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target_rel, target_is_directory=True)
+        rep.add("ok", f"{rel} → .agents/skills (linked)")
+    except OSError:
+        shutil.copytree(root / ".agents/skills", link)
+        rep.add("warn", f"{rel}: copied (this system can't create links)",
+                "re-run `haam.py agents --apply` after changing any skill")
+
+
+def cmd_agents(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    rep.section("Shared rules and skills")
+    rep.add("ok" if (root / "AGENTS.md").exists() else "fail", "AGENTS.md (rules for every agent)")
+    skills = sorted(p.parent.name for p in (root / ".agents/skills").glob("*/SKILL.md"))
+    rep.add("ok" if skills else "fail", f".agents/skills: {len(skills)} skills", ", ".join(skills))
+    for rel in SKILL_LINKS:
+        ensure_skill_link(root, rel, args.apply, rep)
+
+    hc, hooks_path, _ = run(["git", "config", "core.hooksPath"], cwd=root)
+    rep.add("ok" if hooks_path == ".githooks" else "warn",
+            "Git pre-commit secret hook (works for every agent that commits with git)",
+            "on" if hooks_path == ".githooks" else "off on this machine: run `make hooks`")
+
+    agents = cfg.get("agents") or DEFAULT_CONFIG["agents"]
+    guide = "docs/setup/AGENTS-SETUP.md"
+
+    def present(*names):
+        return any(have(n) for n in names)
+
+    if "claude" in agents:
+        rep.section("Claude Code")
+        cm = root / "CLAUDE.md"
+        points = cm.exists() and "AGENTS.md" in cm.read_text(errors="ignore")
+        rep.add("ok" if points else "fail", "CLAUDE.md points to AGENTS.md",
+                "" if points else ("missing" if not cm.exists() else "it's your old CLAUDE.md: merge it (see .haam/incoming)"))
+        rep.add("ok" if (root / ".claude/settings.json").exists() else "fail",
+                ".claude/settings.json (guard-rails + hooks)")
+        rep.add("ok" if (root / ".mcp.json").exists() else "fail", ".mcp.json declares Linear")
+        rep.add("info", "CLI " + ("found" if present("claude") else "not found on this machine"))
+    if "cursor" in agents:
+        rep.section("Cursor")
+        rep.add("ok", "Reads AGENTS.md and .agents/skills natively")
+        rep.add("ok" if (root / ".cursor/mcp.json").exists() else "fail", ".cursor/mcp.json declares Linear")
+        rep.add("info", "Cursor also reads .claude/skills for compatibility; if skills show twice, "
+                        "disable 'Claude skills' compatibility in Cursor settings", "")
+    if "codex" in agents:
+        rep.section("Codex")
+        rep.add("ok", "Reads AGENTS.md and .agents/skills natively")
+        policies = list((root / ".agents/skills").glob("*/agents/openai.yaml"))
+        rep.add("ok" if len(policies) >= 4 else "warn", f"Human-only skills marked explicit-only: {len(policies)}")
+        rep.add("info", "Linear MCP is configured per user (not per repo) in Codex")
+        rep.action(WHO_TERMINAL, "Each Codex user connects Linear once", f"codex mcp add linear --url {LINEAR_MCP}")
+    if "grok" in agents:
+        rep.section("Grok Build")
+        rep.add("ok" if (root / ".grok/skills").exists() else "warn", ".grok/skills → .agents/skills")
+        rep.add("ok" if (root / ".mcp.json").exists() else "warn", "Linear via .mcp.json (Grok reads it)")
+        rep.add("warn", "Confirm Grok loads AGENTS.md on first run",
+                f"ask it 'what are the hard rules in this repo?'; if it can't answer, see {guide}")
+    if "gemini" in agents or (root / ".gemini/settings.json").exists():
+        rep.section("Gemini CLI")
+        rep.add("ok" if (root / ".gemini/settings.json").exists() else "warn", ".gemini/settings.json → AGENTS.md")
+    rep.section("GitHub Copilot")
+    rep.add("ok", "Reads AGENTS.md natively")
+
+    if not args.apply:
+        rep.add("info", "Plan only. Re-run with --apply to make changes")
+    rep.action(WHO_TERMINAL, "Each developer signs in to Linear from their agent tool (OAuth, one time)",
+               f"see {guide}")
+    rep.print(args.json)
+
+
+# ----------------------------------------------------------------------------- github
+
+def gh_api(method, path, body=None):
+    cmd = ["gh", "api", "-X", method, path, "-H", "Accept: application/vnd.github+json"]
+    if body is not None:
+        cmd += ["--input", "-"]
+    code, out, err = run(cmd, input_text=json.dumps(body) if body is not None else None)
+    data = None
+    if out:
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            data = out
+    return code, data, err
+
+
+def gh_ready(rep, cfg):
+    if not have("gh"):
+        rep.add("fail", "GitHub CLI (gh) not installed")
+        rep.action(WHO_TERMINAL, "Install the GitHub CLI and log in", "https://cli.github.com  then  gh auth login")
+        return False
+    code, _, _ = run(["gh", "auth", "status"])
+    if code != 0:
+        rep.add("fail", "GitHub CLI not logged in")
+        rep.action(WHO_TERMINAL, "Log in to GitHub", "gh auth login")
+        return False
+    if not cfg.get("github_repo"):
+        rep.add("fail", "github_repo not set in haam.config.json")
+        rep.action(WHO_AGENT, "Set the repo", "python3 tools/haam/haam.py config --github-repo owner/name")
+        return False
+    return True
+
+
+def ruleset_body(cfg):
+    return {
+        "name": "HAAM main protection",
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "pull_request", "parameters": {
+                "required_approving_review_count": 1 if cfg.get("backup_approvers_github") else 0,
+                "dismiss_stale_reviews_on_push": True,
+                "require_code_owner_review": False,
+                "require_last_push_approval": False,
+                "required_review_thread_resolution": False,
+            }},
+            {"type": "required_status_checks", "parameters": {
+                "strict_required_status_checks_policy": True,
+                "required_status_checks": [{"context": c_} for c_ in REQUIRED_CHECKS],
+            }},
+        ],
+    }
+
+
+def cmd_github(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    rep.section("GitHub")
+    if not gh_ready(rep, cfg):
+        rep.print(args.json)
+        return
+    repo = cfg["github_repo"]
+    apply = args.apply
+
+    code, info, err = gh_api("GET", f"repos/{repo}")
+    if code != 0:
+        rep.add("fail", f"Can't access {repo}", err)
+        rep.print(args.json)
+        return
+    perms = info.get("permissions", {}) if isinstance(info, dict) else {}
+    rep.add("ok" if perms.get("admin") else "fail", f"Repository {repo}",
+            "you are an admin" if perms.get("admin") else "admin rights needed for this step")
+    if not perms.get("admin"):
+        rep.action(WHO_TERMINAL, "Run `haam.py github` as a repository admin")
+        rep.print(args.json)
+        return
+    private = info.get("private", False)
+
+    # Labels
+    rep.section("Labels")
+    code, out, _ = run(["gh", "label", "list", "-R", repo, "--json", "name", "-L", "200"])
+    existing = {l["name"] for l in json.loads(out)} if code == 0 and out else set()
+    for name, color, desc in GITHUB_LABELS:
+        if name in existing:
+            rep.add("ok", name)
+        elif apply:
+            c2, _, e2 = run(["gh", "label", "create", name, "--color", color, "--description", desc, "-R", repo])
+            rep.add("ok" if c2 == 0 else "fail", f"{name} created" if c2 == 0 else f"{name}", e2)
+        else:
+            rep.add("warn", f"{name} missing", "will create")
+
+    # Ruleset
+    rep.section("Branch rules on the default branch")
+    code, rulesets, err = gh_api("GET", f"repos/{repo}/rulesets")
+    current = None
+    if code == 0 and isinstance(rulesets, list):
+        current = next((r for r in rulesets if r.get("name") == "HAAM main protection"), None)
+    body = ruleset_body(cfg)
+    if code != 0:
+        rep.add("fail", "Can't read rulesets", (err or "")[:160])
+        rep.action(WHO_BROWSER, "Rulesets on private repos need a paid GitHub plan (Pro/Team). Upgrade, "
+                   "or set equivalent classic branch protection manually (docs/setup/GITHUB-SETUP.md §2)")
+    elif apply:
+        if current:
+            c2, _, e2 = gh_api("PUT", f"repos/{repo}/rulesets/{current['id']}", body)
+        else:
+            c2, _, e2 = gh_api("POST", f"repos/{repo}/rulesets", body)
+        rep.add("ok" if c2 == 0 else "fail", "Ruleset 'HAAM main protection' " + ("updated" if current else "created")
+                if c2 == 0 else "Ruleset not applied", (e2 or "")[:200])
+        if c2 != 0 and private:
+            rep.action(WHO_BROWSER, "Rulesets on private repos need GitHub Pro/Team. Upgrade or protect the "
+                       "branch manually (docs/setup/GITHUB-SETUP.md §2)")
+    else:
+        rep.add("ok" if current else "warn", "Ruleset 'HAAM main protection'",
+                "exists (will refresh)" if current else "will create")
+    rep.add("info", "Required checks: " + ", ".join(REQUIRED_CHECKS))
+    rep.add("info", "Admins can bypass (Level 2 emergency override)")
+
+    # Production environment
+    rep.section("Production environment (Gate G5)")
+    approvers = [cfg.get("product_owner_github")] + list(cfg.get("backup_approvers_github") or [])
+    approvers = [a for a in approvers if a]
+    if not approvers:
+        rep.add("fail", "No approver configured", "set product_owner_github")
+        rep.action(WHO_AGENT, "Set the approver", "python3 tools/haam/haam.py config --owner USER")
+    else:
+        code, env, _ = gh_api("GET", f"repos/{repo}/environments/production")
+        exists = code == 0
+        if apply:
+            reviewers = []
+            for a in approvers:
+                c3, uid, _ = run(["gh", "api", f"users/{a}", "--jq", ".id"])
+                if c3 == 0 and uid:
+                    reviewers.append({"type": "User", "id": int(uid)})
+                else:
+                    rep.add("fail", f"GitHub user {a} not found")
+            env_body = {"reviewers": reviewers, "prevent_self_review": False,
+                        "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+            c2, _, e2 = gh_api("PUT", f"repos/{repo}/environments/production", env_body)
+            if c2 == 0:
+                rep.add("ok", "Environment 'production' with required approval", ", ".join(approvers))
+                c4, _, e4 = gh_api("POST", f"repos/{repo}/environments/production/deployment-branch-policies",
+                                   {"name": cfg.get("default_branch", "main"), "type": "branch"})
+                rep.add("ok" if c4 == 0 or "already" in (e4 or "").lower() else "warn",
+                        f"Deploys only from {cfg.get('default_branch', 'main')}", "" if c4 == 0 else (e4 or "")[:120])
+            else:
+                rep.add("fail", "Environment not configured", (e2 or "")[:200])
+                if private:
+                    rep.action(WHO_BROWSER, "Required deploy approvals on private repos may need a paid GitHub "
+                               "plan. Check Settings → Environments, or upgrade")
+            if cfg.get("production_url"):
+                c5, _, _ = run(["gh", "variable", "set", "PRODUCTION_URL", "--env", "production",
+                                "--body", cfg["production_url"], "-R", repo])
+                rep.add("ok" if c5 == 0 else "warn", "PRODUCTION_URL variable set")
+        else:
+            rep.add("ok" if exists else "warn", "Environment 'production'",
+                    "exists (approvers will be refreshed)" if exists else "will create with approvers: " + ", ".join(approvers))
+
+    # Security features
+    rep.section("Security features")
+    sec = info.get("security_and_analysis") or {}
+    for feat, label in (("secret_scanning", "Secret scanning"), ("secret_scanning_push_protection", "Push protection")):
+        on = (sec.get(feat) or {}).get("status") == "enabled"
+        if on:
+            rep.add("ok", label)
+        elif apply:
+            c2, _, e2 = gh_api("PATCH", f"repos/{repo}", {"security_and_analysis": {feat: {"status": "enabled"}}})
+            rep.add("ok" if c2 == 0 else "warn", label + (" enabled" if c2 == 0 else " not available"),
+                    "" if c2 == 0 else "may need a paid plan for private repos; the kit's own `secrets` check still protects you")
+        else:
+            rep.add("warn", label + " off", "will try to enable")
+    if apply:
+        c2, _, _ = gh_api("PUT", f"repos/{repo}/vulnerability-alerts")
+        c3, _, _ = gh_api("PUT", f"repos/{repo}/automated-security-fixes")
+        rep.add("ok" if c2 == 0 else "warn", "Dependabot alerts")
+        rep.add("ok" if c3 == 0 else "warn", "Dependabot security updates")
+    else:
+        rep.add("info", "Dependabot alerts and security updates", "will enable")
+
+    # Secrets
+    rep.section("Secrets (never handled by agents)")
+    code, out, _ = run(["gh", "secret", "list", "-R", repo, "--json", "name"])
+    names = {s["name"] for s in json.loads(out)} if code == 0 and out else set()
+    if "ANTHROPIC_API_KEY" in names:
+        rep.add("ok", "ANTHROPIC_API_KEY (for the reviewer agents)")
+    else:
+        rep.add("fail", "ANTHROPIC_API_KEY missing", "AI reviews can't run without it")
+        rep.action(WHO_TERMINAL, "Create a dedicated API key with a spend limit at console.anthropic.com, then "
+                   "paste it when this command asks (it is not shown or stored anywhere else)",
+                   f"gh secret set ANTHROPIC_API_KEY -R {repo}")
+
+    rep.section("Manual steps GitHub doesn't expose to the tool")
+    rep.add("info", "Fork PRs: Settings → Actions → General → require approval for outside collaborators")
+    rep.action(WHO_BROWSER, "Require approval for workflows from fork PRs",
+               f"https://github.com/{repo}/settings/actions")
+    rep.add("info", "Optional once you have 2+ humans: CODEOWNERS for protected areas (docs/setup/GITHUB-SETUP.md §5)")
+
+    if not apply:
+        rep.add("info", "Plan only. Re-run with --apply to make these changes")
+    rep.print(args.json)
+
+
+# ----------------------------------------------------------------------------- linear
+
+class Linear:
+    def __init__(self, key):
+        self.key = key
+        self._mutations = None
+
+    def q(self, query, variables=None):
+        req = urllib.request.Request(
+            LINEAR_API,
+            data=json.dumps({"query": query, "variables": variables or {}}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": self.key},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="ignore")[:300]
+            raise RuntimeError(f"Linear API HTTP {e.code}: {body}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Can't reach Linear: {e.reason}")
+        if data.get("errors"):
+            raise RuntimeError("; ".join(err.get("message", "") for err in data["errors"]))
+        return data["data"]
+
+    def has_mutation(self, name):
+        if self._mutations is None:
+            d = self.q("{ __schema { mutationType { fields { name } } } }")
+            self._mutations = {f["name"] for f in d["__schema"]["mutationType"]["fields"]}
+        return name in self._mutations
+
+    def input_fields(self, type_name):
+        d = self.q('query($n:String!){ __type(name:$n){ inputFields { name } } }', {"n": type_name})
+        t = d.get("__type") or {}
+        return {f["name"] for f in t.get("inputFields") or []}
+
+
+def linear_key(rep):
+    key = os.environ.get("LINEAR_API_KEY", "").strip()
+    if key:
+        return key
+    if is_tty():
+        print("A Linear personal API key is needed (Linear → Settings → Security & access → Personal API keys).")
+        print("It is used for this run only: not shown, not saved.")
+        key = getpass.getpass("Linear API key: ").strip()
+        return key or None
+    rep.add("fail", "No Linear API key available to this session")
+    rep.action(WHO_TERMINAL, "Agents never handle API keys. Run this step yourself in a terminal; "
+               "it will ask for your Linear personal API key securely",
+               "python3 tools/haam/haam.py linear --apply")
+    return None
+
+
+TEAM_FIELDS = "id key name triageEnabled states { nodes { id name type position } }"
+
+
+def cmd_linear(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    rep.section("Linear")
+    key = linear_key(rep)
+    if not key:
+        rep.print(args.json)
+        return
+    lin = Linear(key)
+    apply = args.apply
+    team_key = cfg["team_key"]
+    team_name = cfg.get("linear_team_name") or cfg.get("product_name") or team_key
+
+    try:
+        me = lin.q("{ viewer { name email organization { name } } }")["viewer"]
+        rep.add("ok", f"Connected as {me['name']}", f"workspace: {me['organization']['name']}")
+
+        teams = lin.q('query($k:String!){ teams(filter:{key:{eq:$k}}) { nodes { %s } } }' % TEAM_FIELDS,
+                      {"k": team_key})["teams"]["nodes"]
+        team = teams[0] if teams else None
+        rep.section(f"Team {team_key}")
+        if team:
+            rep.add("ok", f"Team '{team['name']}' ({team_key}) exists")
+        elif apply:
+            d = lin.q('mutation($i:TeamCreateInput!){ teamCreate(input:$i){ success team { %s } } }' % TEAM_FIELDS,
+                      {"i": {"name": team_name, "key": team_key}})
+            team = d["teamCreate"]["team"]
+            rep.add("ok", f"Team '{team_name}' ({team_key}) created")
+        else:
+            rep.add("warn", f"Team {team_key} not found", f"will create '{team_name}'")
+
+        # Triage
+        if team and not team.get("triageEnabled"):
+            if apply:
+                lin.q('mutation($id:String!,$i:TeamUpdateInput!){ teamUpdate(id:$id,input:$i){ success } }',
+                      {"id": team["id"], "i": {"triageEnabled": True}})
+                rep.add("ok", "Triage turned on")
+                team = lin.q('query($id:String!){ team(id:$id){ %s } }' % TEAM_FIELDS, {"id": team["id"]})["team"]
+            else:
+                rep.add("warn", "Triage off", "will turn on")
+        elif team:
+            rep.add("ok", "Triage on")
+
+        # States
+        rep.section("Workflow statuses")
+        states = {s["name"].lower(): s for s in (team["states"]["nodes"] if team else [])}
+        for pos, (name, typ, color) in enumerate(LINEAR_STATES):
+            s = states.get(name.lower())
+            if s:
+                if s["type"] != typ:
+                    rep.add("warn", f"{name} exists but is type '{s['type']}', expected '{typ}'",
+                            "change it in Linear → Team settings → Workflow")
+                else:
+                    rep.add("ok", name)
+                continue
+            if typ == "triage":
+                rep.add("warn" if not apply else "info", name, "created by turning on Triage")
+                continue
+            # Linear's default 'Todo' becomes our 'Ready'
+            if name == "Ready" and "todo" in states and states["todo"]["type"] == "unstarted":
+                if apply:
+                    lin.q('mutation($id:String!,$i:WorkflowStateUpdateInput!){ workflowStateUpdate(id:$id,input:$i){ success } }',
+                          {"id": states["todo"]["id"], "i": {"name": "Ready"}})
+                    rep.add("ok", "Todo renamed to Ready")
+                else:
+                    rep.add("warn", "Ready missing", "will rename Todo → Ready")
+                continue
+            if apply and team:
+                lin.q('mutation($i:WorkflowStateCreateInput!){ workflowStateCreate(input:$i){ success } }',
+                      {"i": {"teamId": team["id"], "name": name, "type": typ, "color": color, "position": float(pos)}})
+                rep.add("ok", f"{name} created")
+            else:
+                rep.add("warn", f"{name} missing", "will create")
+        wanted = {n.lower() for n, _, _ in LINEAR_STATES} | {"todo"}
+        for n, s in states.items():
+            if n not in wanted:
+                rep.add("warn", f"Extra status '{s['name']}'", "not used by HAAM: archive it in Linear if no issues use it")
+
+        # Labels
+        rep.section("Labels")
+        label_nodes = []
+        after = None
+        while True:
+            d = lin.q('query($a:String){ issueLabels(first:250, after:$a){ nodes { id name team { id } } '
+                      'pageInfo { hasNextPage endCursor } } }', {"a": after})["issueLabels"]
+            label_nodes += d["nodes"]
+            if not d["pageInfo"]["hasNextPage"]:
+                break
+            after = d["pageInfo"]["endCursor"]
+        usable = {l["name"].lower() for l in label_nodes
+                  if l.get("team") is None or (team and l["team"] and l["team"]["id"] == team["id"])}
+        for name, color, desc in LINEAR_LABELS:
+            if name.lower() in usable:
+                rep.add("ok", name)
+            elif apply and team:
+                lin.q('mutation($i:IssueLabelCreateInput!){ issueLabelCreate(input:$i){ success } }',
+                      {"i": {"name": name, "color": color, "description": desc, "teamId": team["id"]}})
+                rep.add("ok", f"{name} created")
+            else:
+                rep.add("warn", f"{name} missing", "will create")
+
+    except RuntimeError as e:
+        rep.add("fail", "Linear API error", str(e)[:300])
+        rep.action(WHO_BROWSER, "Do the remaining Linear steps by hand", "docs/setup/LINEAR-SETUP.md")
+
+    rep.section("Manual steps in Linear (no API for these)")
+    for t in ["Connect GitHub: Settings → Integrations → GitHub",
+              "PR automations: PR opened → In Review; PR merged → Deploying",
+              "Branch name format: {issue-identifier}-{issue-title} (no username prefix)",
+              "Saved views: Waiting on me, Agent queue, Ideas inbox, Bugs, Overrides to close",
+              "Delete Linear's sample statuses you don't need (e.g. Duplicate)"]:
+        rep.add("info", t)
+    rep.action(WHO_BROWSER, "Finish the Linear settings listed above", "docs/setup/LINEAR-SETUP.md §6–7")
+    if not apply:
+        rep.add("info", "Plan only. Re-run with --apply to make these changes")
+    rep.print(args.json)
+
+
+# ----------------------------------------------------------------------------- invite
+
+def cmd_invite(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    rep.section(f"Invite {args.github}")
+    if gh_ready(rep, cfg):
+        repo = cfg["github_repo"]
+        code, _, _ = run(["gh", "api", f"repos/{repo}/collaborators/{args.github}"])
+        if code == 0:
+            rep.add("ok", f"{args.github} already has access to {repo}")
+        elif args.apply:
+            c2, _, e2 = run(["gh", "api", "-X", "PUT", f"repos/{repo}/collaborators/{args.github}",
+                             "-f", "permission=push"])
+            rep.add("ok" if c2 == 0 else "fail",
+                    f"GitHub invitation sent (write access, not admin)" if c2 == 0 else "GitHub invite failed", e2[:200])
+        else:
+            rep.add("warn", f"{args.github} has no access", "will invite with write (not admin) access")
+
+    if args.linear_email:
+        key = linear_key(rep)
+        if key:
+            lin = Linear(key)
+            try:
+                team = lin.q('query($k:String!){ teams(filter:{key:{eq:$k}}) { nodes { id } } }',
+                             {"k": cfg["team_key"]})["teams"]["nodes"]
+                if not lin.has_mutation("organizationInviteCreate"):
+                    raise RuntimeError("invite API not available")
+                fields = lin.input_fields("OrganizationInviteCreateInput")
+                inp = {"email": args.linear_email}
+                if "teamIds" in fields and team:
+                    inp["teamIds"] = [team[0]["id"]]
+                if args.apply:
+                    lin.q('mutation($i:OrganizationInviteCreateInput!){ organizationInviteCreate(input:$i){ success } }',
+                          {"i": inp})
+                    rep.add("ok", f"Linear invitation sent to {args.linear_email}",
+                            "added to the team" if "teamIds" in inp else "add them to the team after they accept")
+                else:
+                    rep.add("warn", f"Linear: will invite {args.linear_email}")
+            except RuntimeError as e:
+                rep.add("warn", "Linear invite not sent automatically", str(e)[:160])
+                rep.action(WHO_BROWSER, f"Invite {args.linear_email} in Linear → Settings → Members, "
+                           f"then add them to team {cfg['team_key']}")
+
+    rep.section("Send the new developer")
+    rep.add("info", "Repository link and docs/ONBOARDING.md")
+    rep.add("info", "Test credentials for local .env, via a password manager or one-time link (never chat/email)")
+    rep.add("info", "Their first message to their agent: \"Run /haam-onboard\" (Codex: $haam-onboard)")
+    if not args.apply:
+        rep.add("info", "Plan only. Re-run with --apply to send invitations")
+    rep.print(args.json)
+
+
+# ----------------------------------------------------------------------------- dev
+
+def cmd_dev(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    rep.section("Tools on this machine")
+    for b, why, how in [
+        ("git", "version control", "https://git-scm.com"),
+        ("gh", "pull requests and checks", "https://cli.github.com, then `gh auth login`"),
+        ("make", "project commands", "macOS: xcode-select --install · Linux: build-essential · Windows: use WSL"),
+        ("gitleaks", "secret scan before every commit (required)", "macOS: brew install gitleaks · others: github.com/gitleaks/gitleaks/releases"),
+    ]:
+        if have(b):
+            rep.add("ok", b, why)
+        else:
+            rep.add("fail", f"{b} missing", why)
+            rep.action(WHO_TERMINAL, f"Install {b}", how)
+    if have("gh"):
+        code, _, _ = run(["gh", "auth", "status"])
+        rep.add("ok" if code == 0 else "fail", "gh logged in" if code == 0 else "gh not logged in")
+        if code != 0:
+            rep.action(WHO_TERMINAL, "Log in to GitHub", "gh auth login")
+    found = [n for n, bins in (("Claude Code", ["claude"]), ("Cursor", ["cursor", "cursor-agent"]),
+                               ("Codex", ["codex"]), ("Grok", ["grok"]), ("Gemini CLI", ["gemini"]))
+             if any(have(x) for x in bins)]
+    rep.add("info", "Agent tools found: " + (", ".join(found) if found else "none on PATH (IDE apps may still be installed)"))
+
+    rep.section("This copy of the repository")
+    _, hooks_path, _ = run(["git", "config", "core.hooksPath"], cwd=root)
+    if hooks_path == ".githooks":
+        rep.add("ok", "Secret-scan commit hook on")
+    elif args.apply and (root / ".githooks/pre-commit").exists():
+        c2, _, e2 = run(["git", "config", "core.hooksPath", ".githooks"], cwd=root)
+        for f in list((root / ".githooks").glob("*")) + list((root / "scripts").glob("*.sh")) + \
+                list((root / ".claude/hooks").glob("*.sh")):
+            f.chmod(f.stat().st_mode | 0o111)
+        rep.add("ok" if c2 == 0 else "fail", "Secret-scan commit hook turned on" if c2 == 0 else "Couldn't set the hook", e2[:160])
+    else:
+        rep.add("warn", "Secret-scan commit hook off", "will turn on (git config core.hooksPath .githooks)")
+
+    env, example = root / ".env", root / ".env.example"
+    if env.exists():
+        rep.add("ok", ".env exists", "contents not read")
+    elif example.exists():
+        if args.apply:
+            shutil.copy2(example, env)
+            rep.add("ok", ".env created from .env.example", "fill in TEST values")
+        else:
+            rep.add("warn", ".env missing", "will copy from .env.example")
+        rep.action(WHO_TERMINAL, "Put the TEST credentials from the product owner into .env "
+                   "(agents must not read or write this file)")
+    else:
+        rep.add("info", "No .env.example in this project")
+
+    for rel in SKILL_LINKS:
+        p = root / rel
+        rep.add("ok" if p.exists() else "warn", f"{rel} available" if p.exists() else f"{rel} missing",
+                "" if p.exists() else "ask the admin to run `haam.py agents --apply` (or links weren't checked out: "
+                "on Windows enable git symlinks)")
+
+    if args.run_checks:
+        rep.section("Project checks")
+        for target in ("setup", "check"):
+            c2, out, e2 = run(["make", target], cwd=root)
+            rep.add("ok" if c2 == 0 else "fail", f"make {target}", (e2 or out)[-200:] if c2 else "")
+            if c2 != 0:
+                rep.action(WHO_AGENT, f"Investigate why `make {target}` fails and explain it to the developer")
+                break
+
+    rep.section("Accounts and connections")
+    rep.add("info", f"GitHub access to {cfg.get('github_repo') or '(repo)'} and Linear team {cfg.get('team_key')}: "
+                    "invitations come from the project admin (`haam.py invite`)")
+    rep.action(WHO_TERMINAL, "Connect your agent tool to Linear (one-time sign-in)",
+               "see docs/setup/AGENTS-SETUP.md for your tool")
+    rep.action(WHO_AGENT, "Verify Linear works: list the Ready issues in team " + cfg.get("team_key", ""))
+    rep.action(WHO_AGENT, "Walk the developer through docs/ONBOARDING.md §7–9 and suggest a first issue from the Agent queue")
+    if not args.apply:
+        rep.add("info", "Plan only. Re-run with --apply to make the local changes")
+    rep.print(args.json)
+
+
+# ----------------------------------------------------------------------------- doctor
+
+def cmd_doctor(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    admin = args.role == "admin"
+
+    rep.section("HAAM files")
+    lock = load_lock(root)
+    rep.add("ok" if lock.get("kit_version") else "warn", f"Kit version: {lock.get('kit_version') or 'not recorded'}",
+            "" if lock.get("kit_version") else f"no {LOCK_NAME}: run `update` from the kit to start tracking versions")
+    if getattr(args, "check_updates", False):
+        latest = latest_release()
+        if latest and lock.get("kit_version") and version_tuple(latest) > version_tuple(lock["kit_version"]):
+            rep.add("warn", f"Update available: {latest}", f"{KIT_URL}/releases")
+            rep.action(WHO_AGENT, f"Upgrade HAAM to {latest}", "run the /haam-update skill")
+        elif latest:
+            rep.add("ok", f"Up to date with the latest release ({latest})")
+    for rel, what in [("AGENTS.md", "rules for every agent"), ("CLAUDE.md", "Claude pointer"),
+                      ("docs/process/LIFECYCLE.md", "methodology"), ("docs/process/GATES.md", "gates"),
+                      (".github/workflows/review.yml", "AI review"), (".github/workflows/security.yml", "secret scan"),
+                      (".github/workflows/gates.yml", "UAT gate"), (".githooks/pre-commit", "commit hook"),
+                      (CONFIG_NAME, "project config"), (LOCK_NAME, "installed kit version")]:
+        rep.add("ok" if (root / rel).exists() else "fail", rel, what)
+    if not (root / "AGENTS.md").exists():
+        rep.action(WHO_AGENT, "HAAM isn't installed here. Install it from the kit",
+                   "python3 <kit>/tools/haam/haam.py install --target .")
+        rep.print(args.json)
+        return
+    skills = list((root / ".agents/skills").glob("*/SKILL.md"))
+    rep.add("ok" if len(skills) >= 13 else "warn", f"{len(skills)} skills in .agents/skills")
+    if (root / ".haam/incoming").exists() and any((root / ".haam/incoming").rglob("*")):
+        rep.add("warn", "Unmerged kit files in .haam/incoming")
+        rep.action(WHO_AGENT, "Merge the files in .haam/incoming, then delete that folder")
+
+    rep.section("Project configuration")
+    for k in ("product_name", "github_repo", "product_owner_github"):
+        rep.add("ok" if cfg.get(k) else "fail", f"{k}: {cfg.get(k) or '(not set)'}")
+    rep.add("ok" if cfg["team_key"] != PLACEHOLDER_KEY else "warn", f"team_key: {cfg['team_key']}",
+            "still the placeholder" if cfg["team_key"] == PLACEHOLDER_KEY else "")
+    if cfg["_applied"].get("team_key") != cfg["team_key"]:
+        rep.add("fail", "Team key not applied to the files yet")
+        rep.action(WHO_AGENT, "Apply the config", "python3 tools/haam/haam.py config")
+    if any(not cfg.get(k) for k in ("product_name", "github_repo", "product_owner_github")):
+        rep.action(WHO_AGENT, "Ask the human for the missing values and save them",
+                   "python3 tools/haam/haam.py config --product ... --team-key ... --github-repo ... --owner ...")
+    todos = todo_count(root)
+    rep.add("ok" if not todos else "warn", f"{len(todos)} TODO(setup) placeholders left",
+            ", ".join(todos[:6]) + (" …" if len(todos) > 6 else ""))
+    if todos:
+        rep.action(WHO_AGENT, "Fill the TODO(setup) placeholders from the codebase (Makefile commands, workflow "
+                   "runtime steps, ARCHITECTURE.md) and ask the human for product facts (PRODUCT.md)",
+                   "grep -rn 'TODO(setup)' AGENTS.md Makefile docs .github")
+
+    rep.section("This machine")
+    for b in ("git", "gh", "make", "gitleaks"):
+        rep.add("ok" if have(b) else "fail", b)
+    _, hp, _ = run(["git", "config", "core.hooksPath"], cwd=root)
+    rep.add("ok" if hp == ".githooks" else "warn", "commit secret hook " + ("on" if hp == ".githooks" else "off"))
+    for rel in SKILL_LINKS:
+        rep.add("ok" if (root / rel).exists() else "warn", rel)
+
+    if admin and have("gh") and cfg.get("github_repo") and run(["gh", "auth", "status"])[0] == 0:
+        repo = cfg["github_repo"]
+        rep.section(f"GitHub ({repo})")
+        code, out, _ = run(["gh", "label", "list", "-R", repo, "--json", "name", "-L", "200"])
+        have_labels = {l["name"] for l in json.loads(out)} if code == 0 and out else set()
+        miss = [n for n, _, _ in GITHUB_LABELS if n not in have_labels]
+        rep.add("ok" if not miss else "warn", "Labels", "missing: " + ", ".join(miss) if miss else "")
+        code, rs, _ = gh_api("GET", f"repos/{repo}/rulesets")
+        ok_rs = code == 0 and isinstance(rs, list) and any(r.get("name") == "HAAM main protection" for r in rs)
+        rep.add("ok" if ok_rs else "warn", "Branch ruleset with required checks")
+        code, _, _ = gh_api("GET", f"repos/{repo}/environments/production")
+        rep.add("ok" if code == 0 else "warn", "Production environment")
+        code, out, _ = run(["gh", "secret", "list", "-R", repo, "--json", "name"])
+        has_key = code == 0 and "ANTHROPIC_API_KEY" in out
+        rep.add("ok" if has_key else "warn", "ANTHROPIC_API_KEY secret")
+        if miss or not ok_rs or not has_key:
+            rep.action(WHO_AGENT, "Show the GitHub plan, get the human's OK, then apply",
+                       "python3 tools/haam/haam.py github  →  python3 tools/haam/haam.py github --apply")
+    elif admin:
+        rep.section("GitHub")
+        rep.add("warn", "Not checked", "needs gh logged in and github_repo set")
+
+    if admin:
+        rep.section("Linear")
+        if os.environ.get("LINEAR_API_KEY"):
+            rep.add("info", "Run `haam.py linear` to compare the team setup")
+        else:
+            rep.add("info", "Not checked from here (needs your Linear API key)")
+            rep.action(WHO_TERMINAL, "Check/apply the Linear setup yourself (asks for your key securely)",
+                       "python3 tools/haam/haam.py linear  →  then with --apply")
+    rep.print(args.json)
+
+
+# ----------------------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(prog="haam", description="HAAM setup tool " + VERSION)
+    ap.add_argument("--version", action="version", version=VERSION)
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    def common(p):
+        p.add_argument("--json", action="store_true", help="machine-readable output for agents")
+        return p
+
+    p = common(sub.add_parser("install", help="copy the kit into a repository"))
+    p.add_argument("--target", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_install)
+
+    p = common(sub.add_parser("update", help="upgrade a project to this kit version"))
+    p.add_argument("--target", required=True)
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="same as leaving out --apply")
+    p.set_defaults(func=cmd_update)
+
+    p = common(sub.add_parser("version", help="show kit versions"))
+    p.add_argument("--check", action="store_true", help="also look up the latest release (needs internet)")
+    p.set_defaults(func=cmd_version)
+
+    p = common(sub.add_parser("config", help="create/update haam.config.json"))
+    p.add_argument("--product")
+    p.add_argument("--team-key")
+    p.add_argument("--linear-team")
+    p.add_argument("--github-repo")
+    p.add_argument("--owner", help="product owner's GitHub username")
+    p.add_argument("--backup-approvers", help="comma-separated GitHub usernames")
+    p.add_argument("--production-url")
+    p.add_argument("--agents", help="comma-separated: claude,cursor,codex,grok,gemini")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_config)
+
+    for name, fn, h in (("agents", cmd_agents, "wire up agent tools"),
+                        ("github", cmd_github, "configure GitHub gates"),
+                        ("linear", cmd_linear, "configure Linear")):
+        p = common(sub.add_parser(name, help=h))
+        p.add_argument("--apply", action="store_true")
+        p.set_defaults(func=fn)
+
+    p = common(sub.add_parser("invite", help="invite a developer"))
+    p.add_argument("--github", required=True, help="their GitHub username")
+    p.add_argument("--linear-email")
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_invite)
+
+    p = common(sub.add_parser("doctor", help="check setup status"))
+    p.add_argument("--role", choices=["admin", "developer"], default="developer")
+    p.add_argument("--check-updates", action="store_true", help="look up the latest kit release (needs internet)")
+    p.set_defaults(func=cmd_doctor)
+
+    p = common(sub.add_parser("dev", help="developer onboarding on this machine"))
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--run-checks", action="store_true", help="also run make setup and make check")
+    p.set_defaults(func=cmd_dev)
+
+    args = ap.parse_args()
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # quiet exit when output is piped to `head`
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

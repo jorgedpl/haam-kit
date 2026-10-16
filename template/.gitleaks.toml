@@ -1,0 +1,11 @@
+# gitleaks configuration for HAAM projects.
+# Keeps all of gitleaks' default rules and ignores only haam.lock.json, whose
+# SHA-256 file fingerprints look like API keys to the scanner.
+# Changes to this file need a human review (AGENTS.md §3 rule 10).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "HAAM lock file: SHA-256 file fingerprints, not secrets"
+paths = ['''(^|/)haam\.lock\.json$''']

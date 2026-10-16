@@ -1,0 +1,4 @@
+# Codex: only run this skill when a human calls it by name ($decide).
+# Claude Code and Cursor use disable-model-invocation in SKILL.md instead.
+policy:
+  allow_implicit_invocation: false

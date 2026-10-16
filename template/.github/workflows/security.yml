@@ -1,0 +1,66 @@
+# Gate G3 (security part): deterministic checks on every PR.
+#   secrets       - gitleaks scans every commit in the PR for keys, tokens, passwords
+#   dependencies  - `make audit` fails on known high/critical vulnerabilities
+# Branch protection on `main` requires the checks "secrets" and "dependencies".
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: "8.24.2"   # pin; update deliberately
+
+jobs:
+  secrets:
+    name: secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so every commit in the PR is scanned
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Scan commits for secrets
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            RANGE="${{ github.event.before }}..${{ github.sha }}"
+            # First push to a new branch has no "before"; scan the last commit.
+            echo "$RANGE" | grep -q '^0000000' && RANGE="HEAD~1..HEAD"
+          fi
+          echo "Scanning $RANGE"
+          CONFIG=""
+          [ -f .gitleaks.toml ] && CONFIG="--config .gitleaks.toml"
+          # shellcheck disable=SC2086
+          gitleaks git --log-opts="$RANGE" $CONFIG --redact --no-banner -v .
+
+      - name: What to do if this failed
+        if: failure()
+        run: |
+          echo "::error::A possible secret was found in this PR's commits."
+          echo "1. Treat the secret as compromised: revoke/rotate it with the provider NOW."
+          echo "2. Remove it from the code and use an environment variable instead."
+          echo "3. Removing it in a new commit is not enough, it stays in history. Ask a repo admin to rewrite the branch history before merging."
+          echo "4. False positive? A human adds its fingerprint to .gitleaksignore in a reviewed commit."
+
+  dependencies:
+    name: dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # TODO(setup): same runtime setup as ci.yml
+      - run: make setup
+      - run: make audit

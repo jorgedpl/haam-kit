@@ -1,0 +1,49 @@
+# Gate G3 (automated part): every PR must pass `make check`.
+# Branch protection on `main` requires the status check named "ci".
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # TODO(setup): set up your language runtime. Uncomment the block that matches the stack.
+      # --- Node / TypeScript ---
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version-file: .nvmrc
+      #     cache: npm
+      # --- Python ---
+      # - uses: actions/setup-python@v5
+      #   with:
+      #     python-version-file: .python-version
+      #     cache: pip
+      # --- PHP ---
+      # - uses: shivammathur/setup-php@v2
+      #   with:
+      #     php-version: "8.3"
+
+      - name: Install dependencies
+        run: make setup
+
+      - name: Lint, typecheck, unit tests, build
+        run: make check
+        env:
+          CI: "true"
+          # Tests must use synthetic data and mocked external services.
+          # Never put production secrets here.

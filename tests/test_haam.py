@@ -1,0 +1,372 @@
+"""Tests for the HAAM setup tool (template/tools/haam/haam.py).
+
+Run:  python3 -m unittest discover -s tests -v
+Uses only the standard library. GitHub and Linear are replaced by local stand-ins (tests/fakes.py).
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from fakes import GOOD_KEY, FakeLinear, install_fake_gh  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+KIT = ROOT / "template"
+TOOL = KIT / "tools" / "haam" / "haam.py"
+
+
+def git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+class ToolTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="haam-test-"))
+        self.proj = self.tmp / "project"
+        self.proj.mkdir()
+        git(self.proj, "init", "-q", "-b", "main")
+        git(self.proj, "config", "user.email", "test@example.com")
+        git(self.proj, "config", "user.name", "Test")
+        git(self.proj, "remote", "add", "origin", "git@github.com:example-org/example-app.git")
+        (self.proj / "README.md").write_text("# Example\n")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "init")
+        self.env = {**os.environ, "NO_COLOR": "1"}
+        self.env.pop("LINEAR_API_KEY", None)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_tool(self, *args, tool=TOOL, cwd=None, env=None, check=True):
+        p = subprocess.run([sys.executable, str(tool), *args], cwd=cwd or self.proj, env=env or self.env,
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if check and p.returncode != 0:
+            self.fail(f"haam {' '.join(args)} failed ({p.returncode}):\n{p.stdout}\n{p.stderr}")
+        return p
+
+    def run_json(self, *args, **kw):
+        return json.loads(self.run_tool(*args, "--json", **kw).stdout)
+
+    def installed_tool(self):
+        return self.proj / "tools" / "haam" / "haam.py"
+
+    def install(self):
+        return self.run_tool("install", "--target", str(self.proj))
+
+    def lock(self):
+        return json.loads((self.proj / "haam.lock.json").read_text())
+
+
+class TestRepository(unittest.TestCase):
+    def test_versions_match(self):
+        tool_version = re.search(r'^VERSION = "([^"]+)"', TOOL.read_text(), re.M).group(1)
+        self.assertEqual((ROOT / "VERSION").read_text().strip(), tool_version)
+        self.assertIn(f"## [{tool_version}]", (ROOT / "CHANGELOG.md").read_text())
+
+    def test_template_has_no_project_or_build_leftovers(self):
+        for bad in ("haam.config.json", "haam.lock.json", ".haam", "__pycache__", ".env"):
+            self.assertFalse(list(KIT.rglob(bad)), f"{bad} must not be in the template")
+
+    def test_every_skill_is_valid_and_human_only_skills_are_marked(self):
+        skills = sorted(KIT.glob(".agents/skills/*/SKILL.md"))
+        self.assertGreaterEqual(len(skills), 14)
+        human_only = {"decide", "uat-result", "override", "release", "haam-setup", "haam-onboard", "haam-update"}
+        for s in skills:
+            front = s.read_text().split("---")[1]
+            name = re.search(r"^name: (.+)$", front, re.M).group(1).strip()
+            self.assertEqual(name, s.parent.name)
+            self.assertRegex(front, r"(?m)^description: .{20,}")
+            if name in human_only:
+                self.assertIn("disable-model-invocation: true", front, name)
+                self.assertTrue((s.parent / "agents" / "openai.yaml").exists(), f"{name}: Codex policy missing")
+
+    def test_json_configs_parse(self):
+        for rel in (".mcp.json", ".cursor/mcp.json", ".gemini/settings.json", ".claude/settings.json"):
+            json.loads((KIT / rel).read_text())
+
+    def test_skill_links_point_to_shared_folder(self):
+        for rel in (".claude/skills", ".grok/skills"):
+            p = KIT / rel
+            self.assertTrue(p.is_symlink(), rel)
+            self.assertEqual(p.resolve(), (KIT / ".agents/skills").resolve())
+
+
+class TestInstall(ToolTestCase):
+    def test_fresh_install(self):
+        out = self.install().stdout
+        self.assertIn("files added", out)
+        self.assertTrue((self.proj / "AGENTS.md").exists())
+        self.assertTrue((self.proj / ".agents/skills/build/SKILL.md").exists())
+        self.assertFalse((self.proj / "START-HERE.md").exists())
+        self.assertFalse((self.proj / ".gitignore.additions").exists())
+        gi = (self.proj / ".gitignore").read_text()
+        self.assertIn("# --- HAAM ---", gi)
+        self.assertIn("# --- /HAAM ---", gi)
+        lock = self.lock()
+        self.assertEqual(lock["kit_version"], re.search(r'VERSION = "([^"]+)"', TOOL.read_text()).group(1))
+        self.assertIn("AGENTS.md", lock["files"])
+        self.assertTrue(os.access(self.installed_tool(), os.X_OK))
+
+    def test_dry_run_writes_nothing(self):
+        before = sorted(p.name for p in self.proj.iterdir())
+        self.run_tool("install", "--target", str(self.proj), "--dry-run")
+        self.assertEqual(before, sorted(p.name for p in self.proj.iterdir()))
+
+    def test_never_overwrites_and_merges_settings(self):
+        (self.proj / "CLAUDE.md").write_text("# Old rules\nUse pnpm.\n")
+        (self.proj / ".mcp.json").write_text(json.dumps({"mcpServers": {"sentry": {"type": "http", "url": "https://example.com/mcp"}}}))
+        (self.proj / ".claude").mkdir()
+        (self.proj / ".claude/settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(pnpm test:*)"]}}))
+        out = self.install().stdout
+        self.assertEqual((self.proj / "CLAUDE.md").read_text(), "# Old rules\nUse pnpm.\n")
+        self.assertTrue((self.proj / ".haam/incoming/CLAUDE.md").exists())
+        self.assertIn("Kept your existing CLAUDE.md", out)
+        mcp = json.loads((self.proj / ".mcp.json").read_text())["mcpServers"]
+        self.assertEqual(set(mcp), {"sentry", "linear"})
+        settings = json.loads((self.proj / ".claude/settings.json").read_text())
+        self.assertIn("Bash(pnpm test:*)", settings["permissions"]["allow"])
+        self.assertIn("Bash(gh pr merge:*)", settings["permissions"]["deny"])
+        self.assertIn("PreToolUse", settings["hooks"])
+
+    def test_reinstall_is_idempotent(self):
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
+                      "--owner", "octocat", tool=self.installed_tool())
+        out = self.install().stdout
+        self.assertIn("0 files added", out)
+        self.assertNotIn("Kept your existing", out)
+        self.assertNotIn("merged automatically", out)
+
+
+class TestConfig(ToolTestCase):
+    def test_config_applies_key_and_product_everywhere(self):
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
+                      "--owner", "octocat", tool=self.installed_tool())
+        agents = (self.proj / "AGENTS.md").read_text()
+        self.assertIn("You are working on **Acme**", agents)
+        self.assertIn("`ACM-123", agents)
+        self.assertIn("acm-123-short-title", agents)
+        self.assertNotRegex(agents, r"\bAPP\b")
+        self.assertNotIn("replace with your team key", agents)
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual(cfg["_applied"]["team_key"], "ACM")
+
+    def test_rejects_bad_team_key(self):
+        self.install()
+        p = self.run_tool("config", "--team-key", "a b", tool=self.installed_tool(), check=False)
+        self.assertNotEqual(p.returncode, 0)
+
+    def test_detects_repo_from_remote(self):
+        self.install()
+        self.run_tool("config", "--product", "Acme", tool=self.installed_tool())
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual(cfg["github_repo"], "example-org/example-app")
+
+
+class TestUpdate(ToolTestCase):
+    def make_new_kit(self, version="9.9.9"):
+        """A copy of the kit at a newer version, with typical changes."""
+        new = self.tmp / "new-kit" / "template"
+        shutil.copytree(KIT, new, symlinks=True)
+        tool = new / "tools/haam/haam.py"
+        tool.write_text(re.sub(r'^VERSION = "[^"]+"', f'VERSION = "{version}"', tool.read_text(), flags=re.M))
+        return new
+
+    def test_three_way_update(self):
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
+                      "--owner", "octocat", tool=self.installed_tool())
+        new = self.make_new_kit()
+        # Kit changed a file the project never touched
+        (new / "docs/process/GATES.md").write_text((new / "docs/process/GATES.md").read_text() + "\nNew kit text.\n")
+        # Project customised a file the kit didn't change
+        prod = self.proj / "docs/product/PRODUCT.md"
+        prod.write_text("# Product context\nAcme specifics.\n")
+        # Both changed
+        (self.proj / "AGENTS.md").write_text((self.proj / "AGENTS.md").read_text() + "\n## Project specifics\nUse pnpm.\n")
+        (new / "AGENTS.md").write_text((new / "AGENTS.md").read_text() + "\n## 12. New kit section\n")
+        # New file in the kit; file removed from the kit
+        (new / "docs/setup/NEW-GUIDE.md").write_text("# New guide for APP\n")
+        (new / "docs/templates/adr.md").unlink()
+
+        new_tool = new / "tools/haam/haam.py"
+        plan = self.run_tool("update", "--target", str(self.proj), tool=new_tool).stdout
+        self.assertIn("Plan only", plan)
+        self.assertNotIn("New kit text", (self.proj / "docs/process/GATES.md").read_text())
+
+        self.run_tool("update", "--target", str(self.proj), "--apply", tool=new_tool)
+        self.assertIn("New kit text", (self.proj / "docs/process/GATES.md").read_text())          # updated
+        self.assertEqual(prod.read_text(), "# Product context\nAcme specifics.\n")                  # kept
+        self.assertIn("Use pnpm", (self.proj / "AGENTS.md").read_text())                            # not overwritten
+        self.assertIn("New kit section", (self.proj / ".haam/incoming/AGENTS.md").read_text())      # set aside to merge
+        self.assertIn("ACM", (self.proj / ".haam/incoming/AGENTS.md").read_text())                  # rendered for project
+        self.assertEqual((self.proj / "docs/setup/NEW-GUIDE.md").read_text(), "# New guide for ACM\n")  # added, renamed
+        self.assertTrue((self.proj / "docs/templates/adr.md").exists())                              # never deleted
+        lock = self.lock()
+        self.assertEqual(lock["kit_version"], "9.9.9")
+        self.assertNotIn("docs/templates/adr.md", lock["files"])
+
+        # Running the same update again changes nothing
+        again = self.run_json("update", "--target", str(self.proj), tool=new_tool)
+        texts = [i["text"] for s in again["sections"] for i in s["items"]]
+        self.assertIn("0 new files", texts)
+        self.assertIn("0 files updated (you hadn't changed them)", texts)
+        self.assertFalse([t for t in texts if t.startswith("Needs a merge")])
+
+    def test_refuses_downgrade(self):
+        self.install()
+        lock = self.lock()
+        lock["kit_version"] = "99.0.0"
+        (self.proj / "haam.lock.json").write_text(json.dumps(lock))
+        p = self.run_tool("update", "--target", str(self.proj), tool=TOOL, check=False)
+        self.assertNotEqual(p.returncode, 0)
+
+
+class TestAgentsDoctorDev(ToolTestCase):
+    def test_agents_links_and_moves_existing_skills(self):
+        (self.proj / ".claude/skills/my-skill").mkdir(parents=True)
+        (self.proj / ".claude/skills/my-skill/SKILL.md").write_text("---\nname: my-skill\ndescription: x\n---\n")
+        self.install()
+        self.run_tool("agents", "--apply", tool=self.installed_tool())
+        self.assertTrue((self.proj / ".claude/skills").is_symlink())
+        self.assertTrue((self.proj / ".grok/skills").is_symlink())
+        self.assertTrue((self.proj / ".agents/skills/my-skill/SKILL.md").exists())
+
+    def test_doctor_reports_missing_config(self):
+        self.install()
+        report = self.run_json("doctor", tool=self.installed_tool())
+        texts = [i["text"] for s in report["sections"] for i in s["items"]]
+        self.assertTrue(any(t.startswith("Kit version:") for t in texts))
+        self.assertTrue(any("product_name: (not set)" in t for t in texts))
+        self.assertTrue(report["next_actions"])
+
+    def test_dev_turns_on_hook_and_env(self):
+        (self.proj / ".env.example").write_text("API_URL=http://localhost\n")
+        self.install()
+        self.run_tool("dev", "--apply", tool=self.installed_tool())
+        hooks = subprocess.run(["git", "config", "core.hooksPath"], cwd=self.proj, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(hooks, ".githooks")
+        self.assertTrue((self.proj / ".env").exists())
+
+    @unittest.skipUnless(shutil.which("gitleaks"), "gitleaks not installed")
+    def test_commit_hook_blocks_a_key(self):
+        self.install()
+        self.run_tool("dev", "--apply", tool=self.installed_tool())
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "install haam")
+        (self.proj / "leak.py").write_text('key = "AKIA4XN7PQ2LMZ8RT6WB"\n')
+        git(self.proj, "add", "leak.py")
+        p = subprocess.run(["git", "commit", "-qm", "leak"], cwd=self.proj, capture_output=True, text=True)
+        self.assertNotEqual(p.returncode, 0)
+        # The agent hook blocks too (exit code 2), even for a file added in the same command
+        hook_in = json.dumps({"tool_input": {"command": "git add new.py && git commit -m x"}})
+        (self.proj / "new.py").write_text('aws_secret_access_key = "9fQx2LmZ7pRt4WvB8nKc3HyJ6sDa1GuE5oTiXqAz"\n')
+        h = subprocess.run(["bash", ".claude/hooks/block-secrets.sh"], cwd=self.proj, input=hook_in, text=True,
+                           capture_output=True, env={**self.env, "CLAUDE_PROJECT_DIR": str(self.proj)})
+        self.assertEqual(h.returncode, 2)
+
+
+class TestGitHub(ToolTestCase):
+    def setUp(self):
+        super().setUp()
+        bin_dir = self.tmp / "bin"
+        install_fake_gh(bin_dir)
+        self.log = self.tmp / "gh.log"
+        self.env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_LOG": str(self.log)}
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
+                      "--owner", "octocat", "--production-url", "https://acme.example", tool=self.installed_tool())
+
+    def requests(self):
+        if not self.log.exists():
+            return []
+        return [json.loads(l) for l in self.log.read_text().splitlines()]
+
+    def writes(self):
+        out = []
+        for r in self.requests():
+            a = r["args"]
+            if a[:2] in (["label", "create"], ["variable", "set"]):
+                out.append(r)
+            elif a and a[0] == "api" and "-X" in a and a[a.index("-X") + 1] != "GET":
+                out.append(r)
+        return out
+
+    def test_plan_changes_nothing(self):
+        out = self.run_tool("github", tool=self.installed_tool()).stdout
+        self.assertIn("will create", out)
+        self.assertEqual(self.writes(), [])
+
+    def test_apply_sends_expected_configuration(self):
+        self.run_tool("github", "--apply", tool=self.installed_tool())
+        writes = self.writes()
+        ruleset = next(json.loads(r["body"]) for r in writes if r["args"][-1] == "-" and "rulesets" in " ".join(r["args"]))
+        types = [r["type"] for r in ruleset["rules"]]
+        self.assertEqual(types, ["deletion", "non_fast_forward", "pull_request", "required_status_checks"])
+        checks = [c["context"] for c in ruleset["rules"][3]["parameters"]["required_status_checks"]]
+        self.assertEqual(checks, ["ci", "secrets", "dependencies", "ai-review", "security-review", "release-gate"])
+        env = next(json.loads(r["body"]) for r in writes if any(x.endswith("environments/production") for x in r["args"]))
+        self.assertEqual(env["reviewers"], [{"type": "User", "id": 583231}])
+        created = [r["args"][2] for r in writes if r["args"][:2] == ["label", "create"]]
+        self.assertEqual(sorted(created), ["ai-review-overruled", "gate-override", "human-review"])
+        # Secrets are never set by the tool
+        self.assertFalse([r for r in self.requests() if r["args"][:2] == ["secret", "set"]])
+
+
+class TestLinear(ToolTestCase):
+    def setUp(self):
+        super().setUp()
+        self.fake = FakeLinear()
+        self.env = {**self.env, "HAAM_LINEAR_API": self.fake.url}
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
+                      "--owner", "octocat", tool=self.installed_tool())
+
+    def tearDown(self):
+        self.fake.close()
+        super().tearDown()
+
+    def test_no_key_without_terminal_asks_human(self):
+        out = self.run_tool("linear", tool=self.installed_tool()).stdout
+        self.assertIn("[YOU, in your terminal]", out)
+        self.assertEqual(self.fake.calls, [])
+
+    def test_plan_then_apply_then_idempotent(self):
+        env = {**self.env, "LINEAR_API_KEY": GOOD_KEY}
+        self.run_tool("linear", tool=self.installed_tool(), env=env)
+        self.assertEqual(self.fake.mutations(), [])
+        out = self.run_tool("linear", "--apply", tool=self.installed_tool(), env=env).stdout
+        self.assertIn("Todo renamed to Ready", out)
+        self.assertIn("Triage turned on", out)
+        self.assertIn("override-followup created", out)
+        names = {s["name"] for s in self.fake.state["team"]["states"]["nodes"]}
+        for n in ("Triage", "Discovery", "Decision", "Backlog", "Ready", "In Progress", "In Review", "UAT",
+                  "Deploying", "Done", "Parked", "Canceled"):
+            self.assertIn(n, names)
+        self.assertTrue(all(c["auth"] == GOOD_KEY for c in self.fake.calls))
+        before = len(self.fake.mutations())
+        self.run_tool("linear", "--apply", tool=self.installed_tool(), env=env)
+        self.assertEqual(len(self.fake.mutations()), before)
+
+    def test_bad_key_fails_cleanly(self):
+        env = {**self.env, "LINEAR_API_KEY": "wrong"}
+        out = self.run_tool("linear", tool=self.installed_tool(), env=env).stdout
+        self.assertIn("Authentication required", out)
+
+    def test_linear_api_override_is_local_only(self):
+        code = ("import runpy,sys; sys.argv=['haam']; "
+                "g=runpy.run_path(sys.argv[0] if False else %r, run_name='not_main'); print(g['LINEAR_API'])" % str(TOOL))
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env={**self.env, "HAAM_LINEAR_API": "https://evil.example/graphql"}).stdout.strip()
+        self.assertEqual(out, "https://api.linear.app/graphql")
+
+if __name__ == "__main__":
+    unittest.main()

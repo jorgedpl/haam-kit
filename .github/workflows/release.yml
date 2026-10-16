@@ -1,0 +1,51 @@
+# Publishes a release when a version tag (vX.Y.Z) is pushed.
+# Checks that the tag, VERSION, the tool and the CHANGELOG agree, runs the tests,
+# then creates the GitHub release with the changelog notes and a zip of the kit.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check versions agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          file="$(tr -d '[:space:]' < VERSION)"
+          tool="$(python -c "import re;print(re.search(r'^VERSION = \"([^\"]+)\"', open('template/tools/haam/haam.py').read(), re.M).group(1))")"
+          echo "tag=$tag VERSION=$file tool=$tool"
+          [ "$tag" = "$file" ] && [ "$tag" = "$tool" ] || { echo "::error::Tag, VERSION and haam.py VERSION must match"; exit 1; }
+          grep -q "^## \[$tag\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $tag"; exit 1; }
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build release notes and zip
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          awk -v v="$tag" '
+            $0 ~ "^## \\[" v "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}
+          ' CHANGELOG.md > notes.md
+          printf '\n---\nInstall: see the README. Kit folder: `template/`.\n' >> notes.md
+          git archive --format=zip --prefix="haam-kit-${GITHUB_REF_NAME}/" -o "haam-kit-${GITHUB_REF_NAME}.zip" "$GITHUB_REF_NAME"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "haam-kit-${GITHUB_REF_NAME}.zip" \
+            --title "HAAM kit ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag

@@ -1,0 +1,22 @@
+---
+name: decide
+description: Record the product owner's Gate G1 decision on an assessed idea (approve, park or reject).
+argument-hint: "APP-123 approve|park|reject [urgent|high|medium|low] [notes]"
+disable-model-invocation: true
+---
+
+# /decide: Gate G1 (human decision)
+
+Decision: $ARGUMENTS
+
+This skill only runs when a human types it. You are recording *their* decision, not making one.
+
+1. **Parse** the issue ID, decision and optional priority/notes. If the decision word is missing or ambiguous, ask. Do not infer it.
+2. **Load the issue.** It should be in `Decision`. If not, warn and ask for confirmation before continuing.
+3. **Apply in Linear:**
+   - **approve** → status `Backlog`; replace label `stream:idea` with `stream:feature`; set priority (ask if not given); comment `✅ Approved at G1 by <user>: <notes>`.
+   - **park** → status `Parked`; ask for a "revisit when…" trigger if not in the notes; comment `⏸️ Parked: <notes>`.
+   - **reject** → status `Canceled`; comment `❌ Rejected: <notes>` (ask for a one-line reason if none given).
+4. **Merge-readiness of the assessment PR:** tell the user the assessment PR can now be merged so the reasoning is kept in Git (you do not merge it).
+5. **ADR:** if the decision fixes a technical choice that future agents must respect (e.g. "use provider X", "no new database"), draft an ADR in `docs/decisions/` from `docs/templates/adr.md` on the same docs branch and say so.
+6. **Reply** with the new status and, for approvals: "Next: `/spec APP-123`."

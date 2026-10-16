@@ -40,7 +40,7 @@ jobs:
             on && /^## \[/ {exit}
             on {print}
           ' CHANGELOG.md > notes.md
-          printf '\n---\nInstall: see the README. Kit folder: `template/`.\n' >> notes.md
+          printf '\n---\nInstall: see the README. The kit is the template/ folder.\n' >> notes.md
           git archive --format=zip --prefix="haam-kit-${GITHUB_REF_NAME}/" -o "haam-kit-${GITHUB_REF_NAME}.zip" "$GITHUB_REF_NAME"
 
       - name: Create GitHub release

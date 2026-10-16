@@ -46,7 +46,9 @@ jobs:
       - name: actionlint (kit and repo workflows)
         run: |
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          ./actionlint -color template/.github/workflows/*.yml .github/workflows/*.yml
+          # shellcheck disable=SC2016
+          ./actionlint -format '{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}},col={{$err.Column}}::{{$err.Message}}{{"\n"}}{{end}}' \
+            template/.github/workflows/*.yml .github/workflows/*.yml
       - name: shell syntax
         run: |
           for f in install.sh template/scripts/*.sh template/.githooks/* template/.claude/hooks/*.sh; do

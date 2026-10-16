@@ -26,8 +26,14 @@ jobs:
           file="$(tr -d '[:space:]' < VERSION)"
           tool="$(python -c "import re;print(re.search(r'^VERSION = \"([^\"]+)\"', open('template/tools/haam/haam.py').read(), re.M).group(1))")"
           echo "tag=$tag VERSION=$file tool=$tool"
-          [ "$tag" = "$file" ] && [ "$tag" = "$tool" ] || { echo "::error::Tag, VERSION and haam.py VERSION must match"; exit 1; }
-          grep -q "^## \[$tag\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $tag"; exit 1; }
+          if [ "$tag" != "$file" ] || [ "$tag" != "$tool" ]; then
+            echo "::error::Tag, VERSION and haam.py VERSION must match"
+            exit 1
+          fi
+          if ! grep -q "^## \[$tag\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $tag"
+            exit 1
+          fi
 
       - name: Run tests
         run: python -m unittest discover -s tests -v

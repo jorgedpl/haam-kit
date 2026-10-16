@@ -21,7 +21,7 @@ Target: $ARGUMENTS
 4. **Size check.** If it's more than ~1 day of agent work or ~400 changed lines, split it: create sub-issues in the tracker (each `stream:feature`, status `Backlog`), each with its own section in the spec, ordered so each slice is shippable on its own.
 5. **Protected areas:** if any are touched (`AGENTS.md` §4), add label `human-review` to the issue(s) and flag it at the top of the spec.
 6. **Self-check against the Definition of Ready** in `docs/process/GATES.md` (G2). List anything unmet.
-7. **Open a docs PR** (branch `docs/<issue-id>-spec`, commit `<ID>: spec`). Link it on the issue with a comment: `📝 Spec ready for review: <PR link>`.
+7. **Open a docs PR** (branch `docs/<issue-id>-spec` from `origin/main`, commit `<ID>: spec`). Link it on the issue with a comment: `📝 Spec ready for review: <PR link>`.
 8. **Ask open questions** as a single numbered list on the issue and in chat. Don't fill gaps on verification logic, data handling or money by guessing.
 9. **Reply:** "Spec ready for your review. When you approve it, merge the docs PR (or tell me 'spec approved') and I'll add `agent-ready` and move it to `Ready`."
 

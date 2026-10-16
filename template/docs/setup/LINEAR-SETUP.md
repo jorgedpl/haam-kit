@@ -80,6 +80,7 @@ Create these team views so humans see what needs them:
 
 | View | Filter |
 |---|---|
+| **Triage** | Linear's built-in Triage inbox (the product owner's daily inbox; see `docs/process/PRODUCT-MANAGER.md` §7) |
 | **Waiting on me** | Status in (Decision, UAT), plus Backlog issues with a `📝 Spec ready for review` comment |
 | **Agent queue** | Status = Ready, label `agent-ready` or `stream:bug`, unassigned |
 | **Ideas inbox** | Status in (Triage, Discovery), label `stream:idea` |

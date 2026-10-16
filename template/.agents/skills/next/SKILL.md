@@ -23,7 +23,7 @@ Take the first match, in this order:
 2. **Features**: status `Ready`, label `agent-ready`, by priority (Urgent → Low), then oldest first.
 3. **Bugs**: label `stream:bug`, status `Ready`, priority Medium or Low.
 4. **Specs to write**: status `Backlog`, label `stream:feature`, has a priority, no spec yet → run `/spec`.
-5. **Ideas to assess**: status `Triage`, label `stream:idea` → run `/assess`.
+5. **Ideas to assess**: label `stream:idea`, status `Discovery` and unassigned (triaged for assessment, by priority), then status `Triage` → run `/assess`.
 
 Skip any issue with label `human-only`, any with no priority (except ideas in step 5), and any whose `blocked by` relations are not Done.
 

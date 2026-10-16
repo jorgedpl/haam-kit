@@ -14,10 +14,10 @@ Target: $ARGUMENTS
 2. **Read context:** `docs/product/PRODUCT.md` (priorities, non-negotiables), `docs/product/ARCHITECTURE.md`, related issues and specs in `docs/specs/`.
 3. **Investigate the codebase** to ground effort and feasibility in reality: which modules change, what data model changes, which external services are involved, which protected areas (`AGENTS.md` §4) are touched.
 4. **Spike (only if `--spike` is passed, or if a key unknown can't be resolved by reading):**
-   - Branch `spike/<linear-branch-name>` from `main`.
+   - Branch `spike/<branch-name>` from `origin/main`.
    - Time-box it: prove or disprove the single riskiest assumption. Quick and dirty is fine.
    - Record findings, then push the branch. **Never open a PR to merge a spike.**
 5. **Write the assessment** at `docs/assessments/<FILE-ID>-<slug>.md` using `docs/templates/assessment.md`. Be honest: "unknown" beats invented numbers. Always include at least two options plus "do nothing", and a recommendation (approve / park / reject + suggested priority).
-6. **Commit and PR the assessment:** branch `docs/<issue-id>-assessment`, commit `<ID>: assessment`, open a PR (docs-only).
+6. **Commit and PR the assessment:** branch `docs/<issue-id>-assessment` from `origin/main` (`git fetch origin && git switch -c docs/<issue-id>-assessment origin/main`), commit `<ID>: assessment`, open a PR (docs-only).
 7. **Update the tracker:** link the PR and spike branch, post a summary comment (recommendation, size, top risk, 3 lines max), set status `Decision`.
 8. **Reply to the user** with the summary and: "Decide with `/decide <ID> approve|park|reject`."

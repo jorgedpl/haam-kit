@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.2.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.3.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 
@@ -96,6 +96,7 @@ Written `/name` here (Claude Code, Cursor, Grok). In Codex use `$name`. Any othe
 | `/idea <text>` | Capture an idea | Anyone |
 | `/bug <text>` | Report a problem | Anyone |
 | `/assess APP-12` | Evaluate value, effort, risk, feasibility | Agent |
+| `/triage` | Triage the inbox, re-rank (`backlog`), chase stuck work (`stale`) | Human only |
 | `/decide APP-12 approve` | Gate G1 | Human only |
 | `/spec APP-12` | Write a build-ready spec | Agent |
 | `/work bugs` | Start an agent in a new chat window: own worktree, then `/next` | Anyone |
@@ -323,8 +324,8 @@ Besides GitHub, Linear (if you use it) and each person's agent subscription, the
 ### Staying up to date
 New kit versions are published at https://github.com/jorgedpl/haam-kit/releases. `python3 tools/haam/haam.py doctor --check-updates` tells you when one is out. Run `/haam-update` (Codex: `$haam-update`) on a branch: files you never changed are updated, your customisations are kept, and where both changed the agent merges them. The CHANGELOG lists any migration steps.
 
-### Weekly rhythm (30 min)
-Decide everything in **Decision** · re-prioritise **Backlog**, revisit **Parked** · clear **UAT** · close **Overrides** (`override-followup`) · improve one thing in the process.
+### Your rhythm as product owner
+Daily (10–15 min): test **UAT**, empty **Triage** (`/triage`). Weekly (30–45 min): decide everything in **Decision**, re-rank the backlog (`/triage backlog`), chase stuck work (`/triage stale`), revisit **Parked**, close **Overrides**. The full guide, with priority rules and checklists: `docs/process/PRODUCT-MANAGER.md`.
 
 ---
 

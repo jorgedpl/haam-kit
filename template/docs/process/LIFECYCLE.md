@@ -150,6 +150,8 @@ The tracker's priority (Linear's built-in priority, or the board's Priority fiel
 
 Order inside the same priority: bugs before features, older before newer, smaller before larger.
 
+How to triage and choose priorities (levels, bug impact × reach, value/confidence/size, healthy queue sizes): `docs/process/PRODUCT-MANAGER.md`. The product owner can do it with an agent (`/triage`) or directly in the tracker.
+
 ---
 
 ## 7. Working in parallel (multiple humans, multiple agents)
@@ -184,5 +186,7 @@ Docs-only changes (assessments, specs, UAT plans) go through a small PR like any
 
 ## 9. Ceremonies (lightweight)
 
-- **Weekly backlog review (30 min, human):** go through *Decision* (decide), *Parked* (revisit), *Backlog* (re-prioritise), *UAT* (anything waiting on you).
+- **Daily triage (10–15 min, human):** test what's in *UAT*, empty *Triage* (`/triage`).
+- **Weekly backlog review (30 min, human):** go through *Decision* (decide), *Parked* (revisit), *Backlog* (re-prioritise, `/triage backlog`), stuck work (`/triage stale`).
+- The full rhythm and checklists for the product owner: `docs/process/PRODUCT-MANAGER.md`.
 - **Daily, optional:** a scheduled Claude task posts a digest to you: what moved, what is blocked, what is waiting on you.

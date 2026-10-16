@@ -6,6 +6,22 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-16
+
+### Added
+- **Product manager guide** (`docs/process/PRODUCT-MANAGER.md`), for humans: what only the product owner does, a daily, weekly and monthly rhythm, how to triage (four questions and the possible outcomes), priority levels with tests, a bug impact × reach matrix, value/confidence/size for ideas, healthy queue sizes, and how to do each step with an agent, directly in GitHub Projects or directly in Linear. With checklists.
+- **`/triage [inbox|backlog|stale]` skill** (human-invoked): the agent reads the inbox, the backlog or stuck work, proposes stream, priority and next step for each item in one table, and applies only what the product owner confirms, with a comment on each item.
+- GitHub Projects setup lists a **Triage** saved view; Linear setup points to Linear's Triage inbox.
+
+### Changed
+- On GitHub Projects, moving an issue to Canceled also closes it as not planned.
+- `/next` picks ideas triaged for assessment (Discovery, unassigned) before untriaged ones.
+- `/assess` and `/spec` branch from `origin/main` (works in worktrees); the claim message suggests the same.
+- Lifecycle, onboarding and adoption docs point to the guide and `/triage`.
+
+### Migration
+- `haam.py update`. On GitHub Projects, add the **Triage** view to the board (filter `status:Triage`).
+
 ## [1.2.0] - 2026-10-16
 
 ### Added
@@ -58,7 +74,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/jorgedpl/haam-kit/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jorgedpl/haam-kit/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jorgedpl/haam-kit/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jorgedpl/haam-kit/releases/tag/v1.0.0

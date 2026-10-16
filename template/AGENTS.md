@@ -31,6 +31,7 @@ Skills live in `.agents/skills/<name>/SKILL.md` (the shared Agent Skills format)
 | Capture an idea | `/idea <text>` | anyone |
 | Report a bug | `/bug <text>` | anyone |
 | Assess an idea + feasibility | `/assess <ID>` | agent |
+| Triage and prioritise with the product owner | `/triage [inbox\|backlog\|stale]` | **human only** |
 | Record a decision (G1) | `/decide <ID> approve\|park\|reject` | **human only** |
 | Write the spec | `/spec <ID>` | agent |
 | Start an agent in a new chat window | `/work [bugs\|features\|ideas]` | anyone |
@@ -51,7 +52,7 @@ The setup skills drive `tools/haam/haam.py`; run `python3 tools/haam/haam.py doc
 ## 3. Hard rules: never break these
 
 1. **Never push to `main`, never merge a PR, never deploy, never run production commands.** Humans do that.
-2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/decide`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
+2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/decide`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
 3. **Only build issues that are in `Ready` and have the `agent-ready` label** (bugs: `Ready` is enough). If something isn't ready, help make it ready (`/spec`) instead of building it.
 4. **Claim before you build** (see §6). Never work on an issue someone else has claimed.
 5. **Never put secrets or real personal data** (names, emails, dates of birth, addresses, document numbers of real people) in code, tests, fixtures, logs, commits, the tracker or docs. Use the synthetic fixtures in the test folder.

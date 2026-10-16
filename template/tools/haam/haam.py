@@ -56,7 +56,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -1570,6 +1570,7 @@ def cmd_github_project(args):
 
     rep.section("Board views (browser only)")
     for v in ["Board: layout Board, group by Status",
+              "Triage: filter  status:Triage  (the product owner's daily inbox)",
               "Agent queue: filter  status:Ready no:assignee  (features also need label:agent-ready)",
               "Waiting on me: filter  status:Decision,UAT",
               "Ideas inbox: filter  status:Triage,Discovery label:stream:idea",
@@ -1696,9 +1697,15 @@ def issue_action(args, cfg, board):
         human_move = canon in HUMAN_STATUSES or (iss["status"] == "Decision" and canon == "Backlog")
         if human_move and not args.human:
             raise RuntimeError(f"Moving to {canon} is a human decision. Only do it while running the human-only skill "
-                               "the human typed (/decide, /release …), and add --human.")
+                               "the human typed (/triage, /decide, /release …), and add --human.")
         board.set_option(iss, "Status", canon)
-        return {"number": number, "status": canon, "message": f"#{number}: {iss['status'] or '-'} → {canon}"}
+        msg = f"#{number}: {iss['status'] or '-'} → {canon}"
+        if canon == "Canceled" and iss["state"] == "OPEN":
+            code, out, err = run(["gh", "issue", "close", str(number), "-R", repo, "--reason", "not planned"])
+            if code != 0:
+                raise RuntimeError(err or out)
+            msg += " (closed as not planned)"
+        return {"number": number, "status": canon, "message": msg}
 
     if a == "priority":
         if not args.value:
@@ -1751,7 +1758,7 @@ def issue_action(args, cfg, board):
         run(["gh", "issue", "comment", str(number), "-R", repo, "--body",
              f"🤖 Claimed by @{me} via {tool}{where} · branch `{branch}`"])
         return {"number": number, "assignee": me, "message": f"Claimed #{number} for @{me}; status In Progress. "
-                f"Branch: git switch -c {number}-<short-title>"}
+                f"Branch: git fetch origin && git switch -c {number}-<short-title> origin/main"}
 
     if a == "close":
         if not args.human:

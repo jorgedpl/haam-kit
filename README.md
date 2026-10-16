@@ -13,7 +13,8 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 - **A lifecycle with five human gates**: decide the idea, approve the spec, automated checks with independent AI review, human acceptance test, production approval. Every gate can be overridden in an emergency, and every override is recorded and followed up.
 - **Three work streams** agents pull from: bugs, ready features, and ideas to assess. The tracker (GitHub Projects or Linear) holds the backlog, priorities and status.
-- **15 shared skills** (`/idea`, `/bug`, `/assess`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`), in the open Agent Skills format.
+- **16 shared skills** (`/idea`, `/bug`, `/assess`, `/triage`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`), in the open Agent Skills format.
+- **A guide for the product manager** ([PRODUCT-MANAGER.md](template/docs/process/PRODUCT-MANAGER.md)): daily and weekly rhythm, how to triage, priority rules with a bug impact × reach matrix, healthy queue sizes, done with an agent (`/triage`) or directly in GitHub Projects or Linear.
 - **Parallel agents without collisions**: open a new chat window, type `/work bugs`, and the agent gets its own copy of the project (a git worktree), picks the top bug and works it through to your test. Run as many as you like, on one computer or several.
 - **Code review where no one marks their own homework**: a secret scan before every commit and in CI, dependency audit, and two independent AI reviewers (spec/quality and security) that never saw the code being written. Humans review protected areas and can overrule.
 - **Gates enforced by GitHub**, not by trust: branch rules, required checks, a UAT label gate and deploy approvals, so they hold whatever agent or person is pushing.
@@ -25,7 +26,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.2.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.3.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:

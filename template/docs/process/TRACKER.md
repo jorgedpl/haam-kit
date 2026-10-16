@@ -36,10 +36,11 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Create a sub-issue** (spec slices) | `haam.py issue create --stream feature --status Backlog --title "…"` and mention the parent (`Part of #123`) in the body | Create sub-issue |
 | **Claim** (before any code) | `haam.py issue claim 123 --tool "Claude Code" --machine laptop` (refuses if already claimed or not Ready; `--force` for bugs being fixed straight from Triage only when the human said so) | Re-fetch; if In Progress or assigned to someone else, stop; else assign to you, set In Progress, comment |
 | **Change status** | `haam.py issue status 123 "UAT"` | Update issue status |
-| **Human-only status** (Done, Parked, Canceled, Decision→Backlog) | Same, plus `--human`, **only** inside `/decide`, `/release` or `/override` typed by a human | Same rule |
+| **Human-only status** (Done, Parked, Canceled, Decision→Backlog) | Same, plus `--human`, **only** inside `/triage`, `/decide`, `/release` or `/override` typed by a human | Same rule |
 | **Priority** | `haam.py issue priority 123 High` | Update priority |
 | **Labels** | `haam.py issue label 123 --add stream:feature --remove stream:idea` (`agent-ready` also needs `--human`, after the human approved the spec) | Update labels |
 | **Comment** | `haam.py issue comment 123 --body "…"` or `--body-file` | Create comment |
+| **Reject or duplicate** (in `/triage` or `/decide`) | `haam.py issue status 123 Canceled --human` (also closes the issue as not planned); comment the reason or the original's ID | Status Canceled, comment |
 | **Close after release** | `haam.py issue close 123 --human` (sets Done and closes; `/release` only) | Status Done |
 
 ## Rules that apply to both

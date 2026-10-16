@@ -79,7 +79,7 @@ class TestRepository(unittest.TestCase):
     def test_every_skill_is_valid_and_human_only_skills_are_marked(self):
         skills = sorted(KIT.glob(".agents/skills/*/SKILL.md"))
         self.assertGreaterEqual(len(skills), 14)
-        human_only = {"decide", "uat-result", "override", "release", "haam-setup", "haam-onboard", "haam-update"}
+        human_only = {"triage", "decide", "uat-result", "override", "release", "haam-setup", "haam-onboard", "haam-update"}
         for s in skills:
             front = s.read_text().split("---")[1]
             name = re.search(r"^name: (.+)$", front, re.M).group(1).strip()
@@ -449,6 +449,18 @@ class TestGitHubProjects(ToolTestCase):
         self.assertNotEqual(self.tool("issue", "close", str(n), check=False).returncode, 0)
         self.tool("issue", "close", str(n), "--human")
         self.assertEqual(self.gh_state()["issues"][str(n)]["state"], "CLOSED")
+
+    def test_triage_reject_closes_as_not_planned_and_needs_human(self):
+        self.setup_board()
+        n = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Dark mode", "--json").stdout)["number"]
+        self.assertNotEqual(self.tool("issue", "status", str(n), "Canceled", check=False).returncode, 0)
+        self.assertEqual(self.gh_state()["issues"][str(n)]["state"], "OPEN")
+        self.tool("issue", "status", str(n), "Canceled", "--human")
+        self.assertEqual(self.gh_state()["issues"][str(n)]["state"], "CLOSED")
+        m = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Later", "--json").stdout)["number"]
+        self.tool("issue", "status", str(m), "Parked", "--human")
+        self.assertEqual(self.gh_state()["issues"][str(m)]["state"], "OPEN")
+        self.tool("issue", "status", str(m), "Discovery")
 
     def test_feature_starts_in_backlog_and_bug_priority(self):
         self.setup_board()

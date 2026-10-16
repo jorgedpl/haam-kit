@@ -1,0 +1,30 @@
+name: Idea
+description: A new idea, feature request or improvement (HAAM stream "idea")
+labels:
+- stream:idea
+body:
+- type: textarea
+  id: problem
+  attributes:
+    label: Problem
+    description: What problem or opportunity? One or two sentences.
+  validations:
+    required: true
+- type: textarea
+  id: who
+  attributes:
+    label: Who it's for
+    description: Which customers or users? Internal team?
+- type: textarea
+  id: why
+  attributes:
+    label: Why now
+    description: Deadline, customer request, competitor, cost, risk…
+- type: textarea
+  id: solution
+  attributes:
+    label: Rough idea of a solution (optional)
+- type: textarea
+  id: signal
+  attributes:
+    label: How we'd know it worked

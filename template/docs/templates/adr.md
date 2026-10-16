@@ -3,7 +3,7 @@
 - **Status:** Proposed / Accepted / Superseded by ADR NNNN
 - **Date:** YYYY-MM-DD
 - **Deciders:** 
-- **Linear:** APP-XXX
+- **Issue:** <#123 or APP-123>
 
 ## Context
 <!-- The forces at play. What problem forces a decision? -->

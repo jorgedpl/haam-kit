@@ -1,6 +1,6 @@
 ---
 name: haam-setup
-description: First-time adoption of the Human-Agent Agile Methodology (HAAM) in a repository, run with the project admin. Installs the kit, configures the project, agents, GitHub and Linear, and fills in project knowledge. Use when the admin asks to set up, install or adopt HAAM.
+description: First-time adoption of the Human-Agent Agile Methodology (HAAM) in a repository, run with the project admin. Installs the kit, configures the project, agents, GitHub and the tracker (GitHub Projects or Linear), and fills in project knowledge. Use when the admin asks to set up, install or adopt HAAM.
 argument-hint: "[path to the unzipped HAAM kit, if HAAM isn't installed yet]"
 disable-model-invocation: true
 ---
@@ -12,7 +12,7 @@ Kit path (if given): $ARGUMENTS. This is the kit's `template/` folder, e.g. from
 You are guiding the **project admin** through adopting HAAM. The tool `tools/haam/haam.py` does the mechanical work; you do the judgement work (merging files, reading the codebase, asking the human) and keep the human in control of every change to GitHub and Linear.
 
 **Rules for this skill**
-- Show plans before applying. GitHub and Linear changes run with `--apply` **only after the human says yes** to the plan you showed.
+- Show plans before applying. GitHub and tracker changes run with `--apply` **only after the human says yes** to the plan you showed.
 - **Never ask the human to paste a secret into the chat**, and never read `.env*`. Steps marked `[YOU, in your terminal]` are done by the human in their own terminal; give them the exact command and wait.
 - Work on a branch. Never push to `main`.
 - After each phase, give a two-line status: done / waiting on the human.
@@ -20,7 +20,7 @@ You are guiding the **project admin** through adopting HAAM. The tool `tools/haa
 
 ## Phase 0: Check the starting point
 1. Confirm you're at the root of the project's git repository (`git rev-parse --show-toplevel`).
-2. Ask the human to confirm they are an **admin** of the GitHub repository and of the Linear workspace (or can get one to help). Explain in 3 lines what will happen: install files on a branch, configure, open a PR, set up GitHub and Linear, then a trial run.
+2. Ask the human to confirm they are an **admin** of the GitHub repository (and of the Linear workspace, if they choose Linear). Explain in 3 lines what will happen: install files on a branch, configure, open a PR, set up GitHub and Linear, then a trial run.
 3. If `AGENTS.md` and `tools/haam/haam.py` already exist, HAAM is installed: skip to Phase 2.
 
 ## Phase 1: Install the kit
@@ -35,12 +35,13 @@ You are guiding the **project admin** through adopting HAAM. The tool `tools/haa
 ## Phase 2: Project configuration
 1. Ask the human, in **one** message:
    - Product name
-   - Linear team key (2–5 capital letters, e.g. `ACM`) and team name
+   - **Tracker:** GitHub Projects (free, everything in GitHub; recommended for small teams) or Linear (nicer UX, free plan limited to a few hundred issues). See `docs/process/TRACKER.md`.
+   - A short product key (2–5 capital letters, e.g. `ACM`): the Linear team key if they use Linear
    - GitHub repo (`owner/name`): propose the one from `git remote get-url origin`
    - Product owner's GitHub username (approves production deploys) and any backup approvers
    - Production URL (or none yet)
    - Which agent tools the team uses (Claude Code, Cursor, Codex, Grok, Gemini, Copilot)
-2. `python3 tools/haam/haam.py config --product "…" --team-key … --linear-team "…" --github-repo … --owner … [--backup-approvers a,b] [--production-url …] --agents claude,cursor,…`
+2. `python3 tools/haam/haam.py config --product "…" --tracker github|linear --team-key … [--linear-team "…"] --github-repo … --owner … [--backup-approvers a,b] [--production-url …] --agents claude,cursor,…`
 3. `python3 tools/haam/haam.py agents --apply` and report per tool.
 
 ## Phase 3: Teach HAAM about the project (your judgement work)
@@ -63,12 +64,23 @@ Commit (`Adopt the Human-Agent Agile Methodology (HAAM)`), ask before pushing, p
 2. Human-only steps the tool lists, e.g. `[YOU, in your terminal] gh secret set ANTHROPIC_API_KEY -R owner/name` and the fork-PR setting in the browser. Wait for confirmation, then re-run `github` to verify.
 3. If something needs a paid GitHub plan, explain the trade-off briefly and continue.
 
-## Phase 7: Linear
+## Phase 7: The tracker
+
+**If GitHub Projects** (`"tracker": "github"`):
+1. `[YOU, in your terminal]` `gh auth refresh -s project` (lets the human's GitHub login use Projects).
+2. `python3 tools/haam/haam.py github-project` → show the plan → on the human's yes: `… github-project --apply`. It creates the board, links the repo, sets the 12 statuses and Priority, creates the labels, and saves the board number in `haam.config.json`.
+3. `[YOU, in your terminal]` the automation token, exactly as the tool prints it (`gh secret set HAAM_PROJECT_TOKEN …`).
+4. `[YOU, in the browser]` create the saved views the tool lists on the board.
+5. Verify: `python3 tools/haam/haam.py issue list`.
+
+**If Linear** (`"tracker": "linear"`):
 1. The Linear step needs the human's personal API key, so the **human runs it** in their terminal:
    `python3 tools/haam/haam.py linear` (plan), then `python3 tools/haam/haam.py linear --apply`.
    Ask them to paste you the **output** (it contains no secrets).
 2. Walk them through the browser-only steps the tool lists (GitHub integration, PR automations, branch name format, saved views), using `docs/setup/LINEAR-SETUP.md`.
 3. Connect your own tool to Linear (see `docs/setup/AGENTS-SETUP.md`) and verify: list the team's statuses and labels.
+
+**Existing backlog** (GitHub issues, Jira, a spreadsheet…): offer to bring it into the tracker, everything into Triage first.
 
 ## Phase 8: Verify and hand over
 1. `python3 tools/haam/haam.py doctor --role admin`. Fix what you can; list the rest.

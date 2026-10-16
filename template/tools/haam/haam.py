@@ -14,7 +14,11 @@ Admin (first-time adoption and upgrades):
     agents    [--apply]        Wire up Claude Code, Cursor, Codex, Grok, Gemini, Copilot
     github    [--apply]        Labels, branch rules, required checks, production env, security
     linear    [--apply]        Linear team, statuses and labels (needs a Linear API key)
+    github-project [--apply]   GitHub Projects board, statuses, priority, labels (tracker: github)
     invite    --github USER [--linear-email EMAIL] [--apply]
+
+Agents, when the tracker is GitHub Projects:
+    issue create|view|list|claim|status|priority|label|comment|close ...
 
 Everyone:
     version   [--check]                           Kit version here, in the project, and the latest release
@@ -47,7 +51,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -59,8 +63,13 @@ if os.environ.get("HAAM_LINEAR_API", "").startswith("http://127.0.0.1:"):
     LINEAR_API = os.environ["HAAM_LINEAR_API"]
 LINEAR_MCP = "https://mcp.linear.app/mcp"
 
+TRACKERS = ("github", "linear")
+
 DEFAULT_CONFIG = {
     "product_name": "",
+    "tracker": "linear",
+    "github_project_owner": "",
+    "github_project_number": None,
     "team_key": PLACEHOLDER_KEY,
     "linear_team_name": "",
     "github_repo": "",
@@ -694,10 +703,22 @@ def cmd_config(args):
     rep.section("Project configuration")
 
     detected = detect_github_repo(root)
+    if args.tracker is not None:
+        if args.tracker not in TRACKERS:
+            sys.exit(f"--tracker must be one of: {', '.join(TRACKERS)}")
+        cfg["tracker"] = args.tracker
+    elif not (root / CONFIG_NAME).exists() and is_tty():
+        t = ask("Where do you track work: github (GitHub Projects, free) or linear", "github").lower()
+        cfg["tracker"] = t if t in TRACKERS else "github"
+    if args.project_number is not None:
+        cfg["github_project_number"] = int(args.project_number)
+    if args.project_owner is not None:
+        cfg["github_project_owner"] = args.project_owner
     fields = [
         ("product_name", args.product, "Product name (e.g. Acme)"),
-        ("team_key", args.team_key, "Linear team key, 2-5 capital letters (e.g. ACM)"),
-        ("linear_team_name", args.linear_team, "Linear team name"),
+        ("team_key", args.team_key, "Short product key, 2-5 capital letters (e.g. ACM); used as the Linear team key"),
+        ("linear_team_name", args.linear_team if cfg.get("tracker") == "linear" else (args.linear_team or None),
+         "Linear team name"),
         ("github_repo", args.github_repo or (detected if not cfg["github_repo"] else None), "GitHub repo owner/name"),
         ("product_owner_github", args.owner, "Product owner's GitHub username (approves deploys)"),
         ("production_url", args.production_url, "Production URL (for the smoke test; blank if none)"),
@@ -730,13 +751,18 @@ def cmd_config(args):
         save_config(root, cfg)
 
     missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
-    for k in ("product_name", "team_key", "linear_team_name", "github_repo", "product_owner_github",
-              "production_url", "agents"):
+    for k in ("product_name", "tracker", "team_key", "github_repo", "product_owner_github",
+              "production_url", "agents") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
         v = cfg.get(k)
         rep.add("ok" if v else "warn", f"{k}: {v if v else '(not set)'}")
     if missing:
         rep.action(WHO_AGENT, "Ask the human for the missing values, then re-run with flags",
-                   "python3 tools/haam/haam.py config --product NAME --team-key KEY --github-repo owner/name --owner USER")
+                   "python3 tools/haam/haam.py config --product NAME --tracker github --team-key KEY --github-repo owner/name --owner USER")
+    if not missing:
+        nxt = "github-project" if cfg.get("tracker") == "github" else "linear"
+        rep.action(WHO_AGENT if nxt == "github-project" else WHO_TERMINAL,
+                   f"Set up the tracker ({'GitHub Projects' if nxt == 'github-project' else 'Linear'})",
+                   f"python3 tools/haam/haam.py {nxt}  →  then with --apply")
     rep.add("info", f"Saved to {CONFIG_NAME} (commit it; it holds no secrets)" if not args.dry_run else "Dry run: not saved")
     rep.print(args.json)
 
@@ -1113,6 +1139,8 @@ def cmd_linear(args):
     cfg = load_config(root)
     rep = Report()
     rep.section("Linear")
+    if cfg.get("tracker") == "github":
+        rep.add("warn", "This project's tracker is GitHub Projects", "use `haam.py github-project`, or switch with `config --tracker linear`")
     key = linear_key(rep)
     if not key:
         rep.print(args.json)
@@ -1227,6 +1255,547 @@ def cmd_linear(args):
     rep.print(args.json)
 
 
+# ----------------------------------------------------------------------------- github projects
+
+# Statuses as a single-select "Status" field on the board: (name, colour, description)
+GH_STATUSES = [
+    ("Triage", "ORANGE", "New idea or bug, not assessed"),
+    ("Discovery", "GRAY", "Being assessed"),
+    ("Decision", "YELLOW", "Waiting for a human decision (G1)"),
+    ("Backlog", "GRAY", "Approved, needs a spec"),
+    ("Ready", "BLUE", "Spec approved (G2): agents may build"),
+    ("In Progress", "YELLOW", "Claimed and being built"),
+    ("In Review", "PURPLE", "PR open: checks and AI review (G3)"),
+    ("UAT", "PINK", "Waiting for human testing (G4)"),
+    ("Deploying", "GREEN", "Merged: waiting for production approval (G5)"),
+    ("Done", "GREEN", "Released"),
+    ("Parked", "GRAY", "Good idea, not now"),
+    ("Canceled", "RED", "Will not do"),
+]
+GH_PRIORITIES = [
+    ("Urgent", "RED", "Production broken or deadline at risk"),
+    ("High", "ORANGE", "Important for current goals"),
+    ("Medium", "YELLOW", "Normal"),
+    ("Low", "GRAY", "Nice to have"),
+]
+# Issue labels used on GitHub when the tracker is GitHub Projects
+GH_ISSUE_LABELS = [
+    ("stream:idea", "BB87FC", "New idea, not yet decided"),
+    ("stream:feature", "4EA7FC", "Approved work"),
+    ("stream:bug", "EB5757", "Something is broken"),
+    ("agent-ready", "4CB782", "Passed G2: agents may build it"),
+    ("human-only", "95A2B3", "Agents must not pick this up"),
+    ("override-followup", "FC7840", "Created after a gate override"),
+]
+# Moving into these needs a human decision (they're done through human-only skills)
+HUMAN_STATUSES = {"Done", "Parked", "Canceled"}
+PROJECT_TOKEN_SECRET = "HAAM_PROJECT_TOKEN"
+
+
+def gql(query, variables=None):
+    """GitHub GraphQL through the gh CLI (uses the caller's own login or GH_TOKEN)."""
+    body = json.dumps({"query": query, "variables": variables or {}})
+    code, out, err = run(["gh", "api", "graphql", "--input", "-"], input_text=body)
+    data = None
+    if out:
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            pass
+    msg = ""
+    if data and data.get("errors"):
+        msg = "; ".join(e.get("message", "") for e in data["errors"])
+    elif code != 0:
+        msg = err or out
+    if msg:
+        if "INSUFFICIENT_SCOPES" in msg or "required scopes" in msg or "'project'" in msg:
+            raise RuntimeError("Your GitHub login can't use Projects yet. Run in your terminal: gh auth refresh -s project")
+        raise RuntimeError(msg[:400])
+    return (data or {}).get("data") or {}
+
+
+PROJECT_FIELDS = """
+  id number url title
+  items(first: 1) { totalCount }
+  fields(first: 50) { nodes { __typename
+    ... on ProjectV2FieldCommon { id name }
+    ... on ProjectV2SingleSelectField { options { id name } } } }
+"""
+
+
+class GHProject:
+    """The GitHub Projects board for this repository."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.repo = cfg.get("github_repo") or ""
+        if "/" not in self.repo:
+            raise RuntimeError("github_repo isn't set: python3 tools/haam/haam.py config --github-repo owner/name")
+        self.repo_owner, self.repo_name = self.repo.split("/", 1)
+        self.owner = cfg.get("github_project_owner") or self.repo_owner
+        self.number = cfg.get("github_project_number")
+        self.data = None
+
+    # --- board
+    def load(self):
+        if not self.number:
+            raise RuntimeError("No board configured. Run: python3 tools/haam/haam.py github-project --apply")
+        d = gql("query($o:String!,$n:Int!){ repositoryOwner(login:$o){ ... on ProjectV2Owner { projectV2(number:$n){ %s } } } }"
+                % PROJECT_FIELDS, {"o": self.owner, "n": int(self.number)})
+        proj = ((d.get("repositoryOwner") or {}).get("projectV2"))
+        if not proj:
+            raise RuntimeError(f"Board #{self.number} not found for {self.owner}, or no access to it")
+        self.data = proj
+        return proj
+
+    def field(self, name):
+        for f in (self.data or self.load())["fields"]["nodes"]:
+            if f.get("name") == name:
+                return f
+        return None
+
+    def option_id(self, field_name, option):
+        f = self.field(field_name)
+        if not f:
+            raise RuntimeError(f"The board has no '{field_name}' field. Run: python3 tools/haam/haam.py github-project --apply")
+        for o in f.get("options") or []:
+            if o["name"].lower() == option.lower():
+                return f["id"], o["id"]
+        valid = ", ".join(o["name"] for o in f.get("options") or [])
+        raise RuntimeError(f"'{option}' isn't a {field_name} on the board (valid: {valid})")
+
+    # --- issues
+    def issue(self, number):
+        d = gql("""query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){
+                     id number title state url body createdAt
+                     assignees(first:10){ nodes{ login } } labels(first:30){ nodes{ name } }
+                     projectItems(first:20){ nodes{ id project{ id number }
+                       fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue {
+                         name field{ ... on ProjectV2FieldCommon { name } } } } } } } } } }""",
+                {"o": self.repo_owner, "r": self.repo_name, "n": int(number)})
+        iss = ((d.get("repository") or {}).get("issue"))
+        if not iss:
+            raise RuntimeError(f"Issue #{number} not found in {self.repo}")
+        proj = self.data or self.load()
+        item = next((i for i in iss["projectItems"]["nodes"] if i["project"]["id"] == proj["id"]), None)
+        values = {}
+        if item:
+            for v in item["fieldValues"]["nodes"]:
+                if v and v.get("field"):
+                    values[v["field"]["name"]] = v["name"]
+        return {
+            "number": iss["number"], "title": iss["title"], "state": iss["state"], "url": iss["url"],
+            "node_id": iss["id"], "created": iss["createdAt"],
+            "assignees": [a["login"] for a in iss["assignees"]["nodes"]],
+            "labels": [l["name"] for l in iss["labels"]["nodes"]],
+            "item_id": item["id"] if item else None,
+            "status": values.get("Status"), "priority": values.get("Priority"),
+        }
+
+    def ensure_item(self, iss):
+        if iss.get("item_id"):
+            return iss["item_id"]
+        proj = self.data or self.load()
+        d = gql("mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p, contentId:$c}){ item{ id } } }",
+                {"p": proj["id"], "c": iss["node_id"]})
+        iss["item_id"] = d["addProjectV2ItemById"]["item"]["id"]
+        return iss["item_id"]
+
+    def set_option(self, iss, field_name, option):
+        field_id, opt_id = self.option_id(field_name, option)
+        item = self.ensure_item(iss)
+        gql("""mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{
+                 projectId:$p, itemId:$i, fieldId:$f, value:{ singleSelectOptionId:$o } }){ projectV2Item{ id } } }""",
+            {"p": self.data["id"], "i": item, "f": field_id, "o": opt_id})
+
+    def items(self):
+        proj = self.data or self.load()
+        out, after = [], None
+        while True:
+            d = gql("""query($p:ID!,$a:String){ node(id:$p){ ... on ProjectV2 { items(first:100, after:$a){
+                         pageInfo{ hasNextPage endCursor }
+                         nodes{ id content{ __typename ... on Issue { number title state url createdAt
+                           repository{ nameWithOwner } assignees(first:10){ nodes{ login } } labels(first:30){ nodes{ name } } } }
+                           fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue {
+                             name field{ ... on ProjectV2FieldCommon { name } } } } } } } } } }""",
+                    {"p": proj["id"], "a": after})
+            page = d["node"]["items"]
+            for n in page["nodes"]:
+                c = n.get("content") or {}
+                if c.get("__typename") != "Issue":
+                    continue
+                vals = {v["field"]["name"]: v["name"] for v in n["fieldValues"]["nodes"] if v and v.get("field")}
+                out.append({"number": c["number"], "title": c["title"], "state": c["state"], "url": c["url"],
+                            "repo": c["repository"]["nameWithOwner"], "created": c["createdAt"],
+                            "assignees": [a["login"] for a in c["assignees"]["nodes"]],
+                            "labels": [l["name"] for l in c["labels"]["nodes"]],
+                            "status": vals.get("Status"), "priority": vals.get("Priority")})
+            if not page["pageInfo"]["hasNextPage"]:
+                return out
+            after = page["pageInfo"]["endCursor"]
+
+
+def gh_login():
+    code, out, _ = run(["gh", "api", "user", "--jq", ".login"])
+    return out.strip() if code == 0 else ""
+
+
+def options_input(spec):
+    return [{"name": n, "color": col, "description": desc} for n, col, desc in spec]
+
+
+def cmd_github_project(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    rep.section("GitHub Projects board")
+    if cfg.get("tracker") != "github":
+        rep.add("warn", f"tracker is '{cfg.get('tracker')}' in {CONFIG_NAME}",
+                "set it first: python3 tools/haam/haam.py config --tracker github")
+    if not gh_ready(rep, cfg):
+        rep.print(args.json)
+        return
+    apply = args.apply
+    title = cfg.get("product_name") or cfg["github_repo"].split("/")[1]
+    try:
+        board = GHProject(cfg)
+        # Find or create the board
+        if board.number:
+            proj = board.load()
+            rep.add("ok", f"Board #{proj['number']} '{proj['title']}'", proj["url"])
+        else:
+            d = gql("query($o:String!){ repositoryOwner(login:$o){ id __typename ... on ProjectV2Owner {"
+                    " projectsV2(first:100){ nodes{ number title url } } } } }", {"o": board.owner})
+            owner = d.get("repositoryOwner")
+            if not owner:
+                raise RuntimeError(f"GitHub account '{board.owner}' not found")
+            match = next((p for p in owner["projectsV2"]["nodes"] if p["title"] == title), None)
+            if match:
+                board.number = match["number"]
+                rep.add("ok", f"Found board #{match['number']} '{title}'", match["url"])
+            elif apply:
+                rid = gql("query($o:String!,$r:String!){ repository(owner:$o,name:$r){ id } }",
+                          {"o": board.repo_owner, "r": board.repo_name})["repository"]["id"]
+                created = gql("mutation($o:ID!,$t:String!,$r:ID!){ createProjectV2(input:{ownerId:$o, title:$t,"
+                              " repositoryId:$r}){ projectV2{ number url } } }",
+                              {"o": owner["id"], "t": title, "r": rid})["createProjectV2"]["projectV2"]
+                board.number = created["number"]
+                rep.add("ok", f"Board #{created['number']} '{title}' created and linked to {cfg['github_repo']}", created["url"])
+            else:
+                rep.add("warn", f"No board called '{title}' for {board.owner}", "will create it and link the repo")
+            if board.number and apply:
+                cfg["github_project_number"] = board.number
+                cfg["github_project_owner"] = board.owner
+                save_config(root, cfg)
+            if board.number:
+                board.load()
+
+        if board.data:
+            proj = board.data
+            # Link repo (idempotent; errors if already linked are fine)
+            if apply:
+                try:
+                    rid = gql("query($o:String!,$r:String!){ repository(owner:$o,name:$r){ id } }",
+                              {"o": board.repo_owner, "r": board.repo_name})["repository"]["id"]
+                    gql("mutation($p:ID!,$r:ID!){ linkProjectV2ToRepository(input:{projectId:$p, repositoryId:$r}){"
+                        " repository{ id } } }", {"p": proj["id"], "r": rid})
+                except RuntimeError:
+                    pass
+
+            rep.section("Status field (12 statuses)")
+            status = board.field("Status")
+            want = [n for n, _, _ in GH_STATUSES]
+            have_opts = [o["name"] for o in (status or {}).get("options") or []]
+            if have_opts == want:
+                rep.add("ok", "Status has the 12 HAAM statuses")
+            elif not status:
+                rep.add("fail", "The board has no Status field", "add a single-select field called Status in the browser")
+            elif proj["items"]["totalCount"] and not args.force_status:
+                rep.add("warn", "Status options differ and the board already has items",
+                        "replacing options clears existing statuses; rerun with --force-status, or edit options in the browser")
+            elif apply:
+                gql("mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){ updateProjectV2Field(input:{"
+                    " fieldId:$f, singleSelectOptions:$o }){ projectV2Field{ ... on ProjectV2FieldCommon { id } } } }",
+                    {"f": status["id"], "o": options_input(GH_STATUSES)})
+                rep.add("ok", "Status options set: " + ", ".join(want))
+            else:
+                rep.add("warn", "Status options", "will set: " + ", ".join(want))
+
+            rep.section("Priority field")
+            prio = board.field("Priority")
+            if prio:
+                rep.add("ok", "Priority field exists", ", ".join(o["name"] for o in prio.get("options") or []))
+            elif apply:
+                gql("mutation($p:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){ createProjectV2Field(input:{"
+                    " projectId:$p, name:\"Priority\", dataType:SINGLE_SELECT, singleSelectOptions:$o }){"
+                    " projectV2Field{ ... on ProjectV2FieldCommon { id } } } }",
+                    {"p": proj["id"], "o": options_input(GH_PRIORITIES)})
+                rep.add("ok", "Priority field created: Urgent, High, Medium, Low")
+            else:
+                rep.add("warn", "Priority field missing", "will create: Urgent, High, Medium, Low")
+    except RuntimeError as e:
+        rep.add("fail", "GitHub Projects error", str(e))
+        if "gh auth refresh" in str(e):
+            rep.action(WHO_TERMINAL, "Give your GitHub login access to Projects", "gh auth refresh -s project")
+        rep.print(args.json)
+        return
+
+    rep.section("Issue labels")
+    code, out, _ = run(["gh", "label", "list", "-R", cfg["github_repo"], "--json", "name", "-L", "200"])
+    existing = {l["name"] for l in json.loads(out)} if code == 0 and out else set()
+    for name, color, desc in GH_ISSUE_LABELS:
+        if name in existing:
+            rep.add("ok", name)
+        elif apply:
+            c2, _, e2 = run(["gh", "label", "create", name, "--color", color, "--description", desc, "-R", cfg["github_repo"]])
+            rep.add("ok" if c2 == 0 else "fail", f"{name} created" if c2 == 0 else name, e2[:120])
+        else:
+            rep.add("warn", f"{name} missing", "will create")
+
+    rep.section("Automation token (moves cards when PRs open and merge)")
+    code, out, _ = run(["gh", "secret", "list", "-R", cfg["github_repo"], "--json", "name"])
+    if code == 0 and PROJECT_TOKEN_SECRET in out:
+        rep.add("ok", f"{PROJECT_TOKEN_SECRET} secret present")
+    else:
+        rep.add("warn", f"{PROJECT_TOKEN_SECRET} secret missing", "cards won't move automatically on PR open/merge")
+        rep.action(WHO_TERMINAL,
+                   "Create a classic GitHub token with the 'project' scope (and 'repo' if the repository is private) at "
+                   "github.com/settings/tokens, then paste it when this command asks",
+                   f"gh secret set {PROJECT_TOKEN_SECRET} -R {cfg['github_repo']}")
+
+    rep.section("Board views (browser only)")
+    for v in ["Board: layout Board, group by Status",
+              "Agent queue: filter  status:Ready no:assignee  (features also need label:agent-ready)",
+              "Waiting on me: filter  status:Decision,UAT",
+              "Ideas inbox: filter  status:Triage,Discovery label:stream:idea",
+              "Bugs: filter  label:stream:bug -status:Done,Canceled  sorted by Priority"]:
+        rep.add("info", v)
+    if board.data:
+        rep.action(WHO_BROWSER, "Create the saved views listed above on the board", board.data["url"])
+    rep.add("info", "Agents use `python3 tools/haam/haam.py issue ...` for this board (docs/process/TRACKER.md)")
+    if not apply:
+        rep.add("info", "Plan only. Re-run with --apply to make these changes")
+    rep.print(args.json)
+
+
+def parse_issue_number(text):
+    m = re.fullmatch(r"#?(\d+)", str(text).strip())
+    if not m:
+        sys.exit(f"Expected an issue number like 123 or #123, got '{text}'")
+    return int(m.group(1))
+
+
+def linked_issue_numbers(pr):
+    """Issues a PR refers to: 'Refs/Closes/Fixes #N' in title or body, or a branch named 'N-...'."""
+    nums = set()
+    for text in (pr.get("title") or "", pr.get("body") or ""):
+        for m in re.finditer(r"(?i)\b(?:refs?|closes?|closed|fix(?:es|ed)?|resolves?|resolved)\s*:?\s+#(\d+)", text):
+            nums.add(int(m.group(1)))
+        m = re.match(r"\s*#(\d+)\s*:", text)
+        if m:
+            nums.add(int(m.group(1)))
+    m = re.match(r"(\d+)-", pr.get("headRefName") or "")
+    if m:
+        nums.add(int(m.group(1)))
+    return sorted(nums)
+
+
+def cmd_issue(args):
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if cfg.get("tracker") != "github":
+        sys.exit("This project tracks work in Linear: use the Linear connection (MCP). See docs/process/TRACKER.md.")
+    try:
+        board = GHProject(cfg)
+        board.load()
+        result = issue_action(args, cfg, board)
+    except RuntimeError as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"✘ {e}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        print(json.dumps({"ok": True, **result}, indent=2))
+    elif result.get("message"):
+        print(result["message"])
+
+
+def issue_action(args, cfg, board):
+    repo = cfg["github_repo"]
+    a = args.action
+
+    if a == "list":
+        items = [i for i in board.items() if i["repo"].lower() == repo.lower()]
+        if args.status:
+            wanted = {s.lower() for s in args.status}
+            items = [i for i in items if (i["status"] or "").lower() in wanted]
+        for lab in args.label or []:
+            items = [i for i in items if lab in i["labels"]]
+        for lab in args.no_label or []:
+            items = [i for i in items if lab not in i["labels"]]
+        if args.unassigned:
+            items = [i for i in items if not i["assignees"]]
+        if args.open_only:
+            items = [i for i in items if i["state"] == "OPEN"]
+        order = {n: k for k, (n, _, _) in enumerate(GH_PRIORITIES)}
+        items.sort(key=lambda i: (order.get(i["priority"], 9), i["created"]))
+        lines = [f"#{i['number']:<5} {i['status'] or '-':<12} {i['priority'] or '-':<7} "
+                 f"{','.join(i['assignees']) or '-':<14} {i['title']}  [{', '.join(i['labels'])}]" for i in items]
+        return {"items": items, "message": "\n".join(lines) or "No matching issues."}
+
+    if a == "create":
+        if not args.title:
+            sys.exit("--title is required")
+        body = Path(args.body_file).read_text() if args.body_file else (args.body or "")
+        labels = [f"stream:{args.stream}"] + (args.label or [])
+        cmd = ["gh", "issue", "create", "-R", repo, "--title", args.title, "--body", body]
+        for lab in labels:
+            cmd += ["--label", lab]
+        code, out, err = run(cmd)
+        if code != 0:
+            raise RuntimeError(err or out)
+        number = int(out.strip().rstrip("/").split("/")[-1])
+        iss = board.issue(number)
+        status = args.status[-1] if args.status else ("Backlog" if args.stream == "feature" else "Triage")
+        board.set_option(iss, "Status", status)
+        if args.priority:
+            board.set_option(iss, "Priority", args.priority)
+        return {"number": number, "url": iss["url"], "status": status,
+                "message": f"Created #{number} ({status}{', ' + args.priority if args.priority else ''}): {iss['url']}"}
+
+    number = parse_issue_number(args.number) if args.number else None
+    if number is None:
+        sys.exit(f"`issue {a}` needs an issue number")
+    iss = board.issue(number)
+
+    if a == "view":
+        msg = (f"#{iss['number']} {iss['title']}\n  state: {iss['state']} · status: {iss['status'] or '-'} · "
+               f"priority: {iss['priority'] or '-'} · assignees: {', '.join(iss['assignees']) or '-'}\n"
+               f"  labels: {', '.join(iss['labels']) or '-'}\n  {iss['url']}")
+        return {"issue": {k: v for k, v in iss.items() if k != "node_id"}, "message": msg}
+
+    if a == "add":
+        board.ensure_item(iss)
+        if not iss["status"]:
+            board.set_option(iss, "Status", "Triage")
+        return {"number": number, "message": f"#{number} is on the board ({iss['status'] or 'Triage'})"}
+
+    if a == "status":
+        new = args.value
+        if not new:
+            sys.exit("Give the new status, e.g. `issue status 12 \"In Progress\"`")
+        canon = next((n for n, _, _ in GH_STATUSES if n.lower() == new.lower()), None)
+        if not canon:
+            raise RuntimeError(f"Unknown status '{new}'. Valid: {', '.join(n for n, _, _ in GH_STATUSES)}")
+        human_move = canon in HUMAN_STATUSES or (iss["status"] == "Decision" and canon == "Backlog")
+        if human_move and not args.human:
+            raise RuntimeError(f"Moving to {canon} is a human decision. Only do it while running the human-only skill "
+                               "the human typed (/decide, /release …), and add --human.")
+        board.set_option(iss, "Status", canon)
+        return {"number": number, "status": canon, "message": f"#{number}: {iss['status'] or '-'} → {canon}"}
+
+    if a == "priority":
+        if not args.value:
+            sys.exit("Give the priority: Urgent, High, Medium or Low")
+        board.set_option(iss, "Priority", args.value)
+        return {"number": number, "priority": args.value, "message": f"#{number}: priority {args.value}"}
+
+    if a == "label":
+        cmd = ["gh", "issue", "edit", str(number), "-R", repo]
+        human_labels = {"agent-ready"}
+        for lab in args.add or []:
+            if lab in human_labels and not args.human:
+                raise RuntimeError("agent-ready is added only after a human approves the spec; add --human when that happened")
+            cmd += ["--add-label", lab]
+        for lab in args.remove or []:
+            cmd += ["--remove-label", lab]
+        code, out, err = run(cmd)
+        if code != 0:
+            raise RuntimeError(err or out)
+        return {"number": number, "message": f"#{number}: labels updated"}
+
+    if a == "comment":
+        body = Path(args.body_file).read_text() if args.body_file else (args.body or "")
+        if not body:
+            sys.exit("--body or --body-file is required")
+        code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
+        if code != 0:
+            raise RuntimeError(err or out)
+        return {"number": number, "message": f"Commented on #{number}"}
+
+    if a == "claim":
+        me = gh_login()
+        if iss["state"] != "OPEN":
+            raise RuntimeError(f"#{number} is closed")
+        others = [x for x in iss["assignees"] if x != me]
+        if iss["status"] == "In Progress" or others:
+            raise RuntimeError(f"#{number} is already claimed (status {iss['status']}, assignees {', '.join(iss['assignees']) or '-'}). "
+                               "Pick another issue.")
+        if iss["status"] not in ("Ready", None) and not args.force:
+            raise RuntimeError(f"#{number} is in {iss['status']}, not Ready. Only Ready issues are built (AGENTS.md §3).")
+        if "human-only" in iss["labels"]:
+            raise RuntimeError(f"#{number} is labelled human-only")
+        code, out, err = run(["gh", "issue", "edit", str(number), "-R", repo, "--add-assignee", "@me"])
+        if code != 0:
+            raise RuntimeError(err or out)
+        board.set_option(iss, "Status", "In Progress")
+        tool = args.tool or "an agent"
+        where = f" on {args.machine}" if args.machine else ""
+        branch = args.branch or f"{number}-<short-title>"
+        run(["gh", "issue", "comment", str(number), "-R", repo, "--body",
+             f"🤖 Claimed by @{me} via {tool}{where} · branch `{branch}`"])
+        return {"number": number, "assignee": me, "message": f"Claimed #{number} for @{me}; status In Progress. "
+                f"Branch: git switch -c {number}-<short-title>"}
+
+    if a == "close":
+        if not args.human:
+            raise RuntimeError("Closing an issue is done by /release (human-only). Add --human when running it.")
+        board.set_option(iss, "Status", "Done")
+        code, out, err = run(["gh", "issue", "close", str(number), "-R", repo, "--reason", "completed"])
+        if code != 0:
+            raise RuntimeError(err or out)
+        return {"number": number, "message": f"#{number} Done and closed"}
+
+    raise RuntimeError(f"Unknown action '{a}'")
+
+
+def cmd_sync_pr(args):
+    """Used by the tracker-sync workflow: move linked issues when a PR opens or merges."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if cfg.get("tracker") != "github":
+        print("tracker is not github; nothing to do")
+        return
+    code, out, err = run(["gh", "pr", "view", str(args.pr), "-R", cfg["github_repo"], "--json",
+                          "title,body,headRefName,isDraft"])
+    if code != 0:
+        sys.exit(f"Can't read PR #{args.pr}: {err}")
+    pr = json.loads(out)
+    nums = linked_issue_numbers(pr)
+    if not nums:
+        print(f"PR #{args.pr} doesn't reference an issue (use 'Refs #123' in the description)")
+        return
+    board = GHProject(cfg)
+    board.load()
+    target = {"opened": "In Review", "merged": "Deploying"}[args.event]
+    keep = {"opened": {"UAT", "Deploying", "Done"}, "merged": {"Done"}}[args.event]
+    for n in nums:
+        try:
+            iss = board.issue(n)
+        except RuntimeError as e:
+            print(f"#{n}: {e}")
+            continue
+        if args.event == "opened" and pr.get("isDraft"):
+            print(f"#{n}: PR is a draft; leaving status {iss['status']}")
+            continue
+        if iss["status"] in keep:
+            print(f"#{n}: already {iss['status']}; unchanged")
+            continue
+        board.set_option(iss, "Status", target)
+        print(f"#{n}: {iss['status'] or '-'} → {target}")
+
+
 # ----------------------------------------------------------------------------- invite
 
 def cmd_invite(args):
@@ -1247,7 +1816,27 @@ def cmd_invite(args):
         else:
             rep.add("warn", f"{args.github} has no access", "will invite with write (not admin) access")
 
-    if args.linear_email:
+    if cfg.get("tracker") == "github" and cfg.get("github_project_number") and have("gh"):
+        try:
+            board = GHProject(cfg)
+            proj = board.load()
+            if args.apply:
+                code, uid, err = run(["gh", "api", f"users/{args.github}", "--jq", ".node_id"])
+                if code != 0 or not uid:
+                    raise RuntimeError(f"GitHub user {args.github} not found")
+                gql("mutation($p:ID!,$u:ID!){ updateProjectV2Collaborators(input:{projectId:$p,"
+                    " collaborators:[{userId:$u, role:WRITER}]}){ collaborators(first:1){ totalCount } } }",
+                    {"p": proj["id"], "u": uid})
+                rep.add("ok", f"{args.github} can edit the board", proj["url"])
+            else:
+                rep.add("warn", f"Board #{proj['number']}: will give {args.github} write access")
+        except RuntimeError as e:
+            rep.add("warn", "Board access not granted automatically", str(e)[:160])
+            rep.action(WHO_BROWSER, f"Share the board with {args.github} (board → ⋯ → Settings → Manage access)")
+
+    if args.linear_email and cfg.get("tracker") == "github":
+        rep.add("info", "Tracker is GitHub Projects: no Linear invite needed")
+    elif args.linear_email:
         key = linear_key(rep)
         if key:
             lin = Linear(key)
@@ -1352,11 +1941,24 @@ def cmd_dev(args):
                 break
 
     rep.section("Accounts and connections")
-    rep.add("info", f"GitHub access to {cfg.get('github_repo') or '(repo)'} and Linear team {cfg.get('team_key')}: "
-                    "invitations come from the project admin (`haam.py invite`)")
-    rep.action(WHO_TERMINAL, "Connect your agent tool to Linear (one-time sign-in)",
-               "see docs/setup/AGENTS-SETUP.md for your tool")
-    rep.action(WHO_AGENT, "Verify Linear works: list the Ready issues in team " + cfg.get("team_key", ""))
+    if cfg.get("tracker") == "github":
+        rep.add("info", f"GitHub access to {cfg.get('github_repo') or '(repo)'} and its project board: "
+                        "invitations come from the project admin (`haam.py invite`)")
+        if have("gh"):
+            _, so, se = run(["gh", "auth", "status"])
+            status_text = (so + se).lower()
+            if "project" in status_text:
+                rep.add("ok", "gh login can use GitHub Projects")
+            else:
+                rep.add("warn", "gh login may lack the 'project' scope")
+                rep.action(WHO_TERMINAL, "Let your GitHub login use Projects", "gh auth refresh -s project")
+        rep.action(WHO_AGENT, "Verify the board works: python3 tools/haam/haam.py issue list --status Ready")
+    else:
+        rep.add("info", f"GitHub access to {cfg.get('github_repo') or '(repo)'} and Linear team {cfg.get('team_key')}: "
+                        "invitations come from the project admin (`haam.py invite`)")
+        rep.action(WHO_TERMINAL, "Connect your agent tool to Linear (one-time sign-in)",
+                   "see docs/setup/AGENTS-SETUP.md for your tool")
+        rep.action(WHO_AGENT, "Verify Linear works: list the Ready issues in team " + cfg.get("team_key", ""))
     rep.action(WHO_AGENT, "Walk the developer through docs/ONBOARDING.md §7–9 and suggest a first issue from the Agent queue")
     if not args.apply:
         rep.add("info", "Plan only. Re-run with --apply to make the local changes")
@@ -1400,6 +2002,7 @@ def cmd_doctor(args):
         rep.action(WHO_AGENT, "Merge the files in .haam/incoming, then delete that folder")
 
     rep.section("Project configuration")
+    rep.add("ok", f"tracker: {cfg.get('tracker')}" + (" (GitHub Projects)" if cfg.get("tracker") == "github" else " (Linear)"))
     for k in ("product_name", "github_repo", "product_owner_github"):
         rep.add("ok" if cfg.get(k) else "fail", f"{k}: {cfg.get(k) or '(not set)'}")
     rep.add("ok" if cfg["team_key"] != PLACEHOLDER_KEY else "warn", f"team_key: {cfg['team_key']}",
@@ -1448,7 +2051,26 @@ def cmd_doctor(args):
         rep.section("GitHub")
         rep.add("warn", "Not checked", "needs gh logged in and github_repo set")
 
-    if admin:
+    if admin and cfg.get("tracker") == "github":
+        rep.section("Tracker: GitHub Projects")
+        if not cfg.get("github_project_number"):
+            rep.add("fail", "No board configured")
+            rep.action(WHO_AGENT, "Create and configure the board (show the plan, then apply on the human's OK)",
+                       "python3 tools/haam/haam.py github-project  →  --apply")
+        elif have("gh") and run(["gh", "auth", "status"])[0] == 0:
+            try:
+                board = GHProject(cfg)
+                proj = board.load()
+                st = [o["name"] for o in (board.field("Status") or {}).get("options") or []]
+                rep.add("ok", f"Board #{proj['number']}", proj["url"])
+                rep.add("ok" if st == [n for n, _, _ in GH_STATUSES] else "warn", "Status field has the 12 HAAM statuses")
+                rep.add("ok" if board.field("Priority") else "warn", "Priority field")
+            except RuntimeError as e:
+                rep.add("warn", "Couldn't read the board", str(e)[:160])
+            code, out, _ = run(["gh", "secret", "list", "-R", cfg["github_repo"], "--json", "name"])
+            rep.add("ok" if code == 0 and PROJECT_TOKEN_SECRET in out else "warn",
+                    f"{PROJECT_TOKEN_SECRET} secret (moves cards on PR open/merge)")
+    elif admin:
         rep.section("Linear")
         if os.environ.get("LINEAR_API_KEY"):
             rep.add("info", "Run `haam.py linear` to compare the team setup")
@@ -1494,6 +2116,9 @@ def main():
     p.add_argument("--backup-approvers", help="comma-separated GitHub usernames")
     p.add_argument("--production-url")
     p.add_argument("--agents", help="comma-separated: claude,cursor,codex,grok,gemini")
+    p.add_argument("--tracker", help="github (GitHub Projects) or linear")
+    p.add_argument("--project-number", help="existing GitHub Projects board number to use")
+    p.add_argument("--project-owner", help="GitHub user/org that owns the board (default: repo owner)")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_config)
 
@@ -1503,6 +2128,40 @@ def main():
         p = common(sub.add_parser(name, help=h))
         p.add_argument("--apply", action="store_true")
         p.set_defaults(func=fn)
+
+    p = common(sub.add_parser("github-project", help="set up the GitHub Projects board (tracker: github)"))
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--force-status", action="store_true", help="replace Status options even if the board has items")
+    p.set_defaults(func=cmd_github_project)
+
+    p = common(sub.add_parser("issue", help="work with issues on the GitHub Projects board (for agents)"))
+    p.add_argument("action", choices=["list", "create", "view", "add", "claim", "status", "priority", "label",
+                                      "comment", "close"])
+    p.add_argument("number", nargs="?", help="issue number (#123 or 123)")
+    p.add_argument("value", nargs="?", help="new status or priority")
+    p.add_argument("--title")
+    p.add_argument("--body")
+    p.add_argument("--body-file")
+    p.add_argument("--stream", choices=["idea", "feature", "bug"], default="idea")
+    p.add_argument("--priority", choices=[n for n, _, _ in GH_PRIORITIES])
+    p.add_argument("--status", action="append", help="list: filter by status (repeatable); create: initial status")
+    p.add_argument("--label", action="append", help="list: must have label; create: extra label (repeatable)")
+    p.add_argument("--no-label", action="append", help="list: must not have label (repeatable)")
+    p.add_argument("--unassigned", action="store_true")
+    p.add_argument("--open-only", action="store_true")
+    p.add_argument("--add", action="append", help="label: add (repeatable)")
+    p.add_argument("--remove", action="append", help="label: remove (repeatable)")
+    p.add_argument("--tool", help="claim: agent tool, e.g. 'Claude Code'")
+    p.add_argument("--machine", help="claim: which computer, e.g. 'desktop'")
+    p.add_argument("--branch", help="claim: branch name")
+    p.add_argument("--force", action="store_true", help="claim: allow claiming a non-Ready issue (bugs)")
+    p.add_argument("--human", action="store_true", help="a human ran the human-only skill for this change")
+    p.set_defaults(func=cmd_issue)
+
+    p = sub.add_parser("sync-pr", help=argparse.SUPPRESS)
+    p.add_argument("--pr", required=True, type=int)
+    p.add_argument("--event", required=True, choices=["opened", "merged"])
+    p.set_defaults(func=cmd_sync_pr)
 
     p = common(sub.add_parser("invite", help="invite a developer"))
     p.add_argument("--github", required=True, help="their GitHub username")

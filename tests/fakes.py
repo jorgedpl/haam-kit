@@ -129,3 +129,150 @@ class FakeLinear:
 
     def mutations(self):
         return [c["query"] for c in self.calls if c["query"].lstrip().startswith("mutation")]
+
+
+# ----------------------------------------------------------------------------- GitHub Projects stand-in
+
+FAKE_GH_PROJECTS = r'''#!/usr/bin/env python3
+"""Stateful stand-in for the gh CLI covering what haam.py uses for GitHub Projects."""
+import json, os, sys
+STATE = os.environ["FAKE_GH_STATE"]
+LOG = os.environ.get("FAKE_GH_LOG")
+a = sys.argv[1:]
+stdin = sys.stdin.read() if ("--input" in a) else ""
+if LOG:
+    with open(LOG, "a") as f:
+        f.write(json.dumps({"args": a, "body": stdin}) + "\n")
+st = json.load(open(STATE)) if os.path.exists(STATE) else {
+    "me": "tester", "projects": [], "issues": {}, "items": [], "next_issue": 1, "next_id": 1,
+    "comments": [], "labels": [], "secrets": [], "prs": {}}
+def save():
+    json.dump(st, open(STATE, "w"))
+def nid(prefix):
+    st["next_id"] += 1
+    return f"{prefix}_{st['next_id']}"
+def out(x):
+    save(); print(json.dumps(x)); sys.exit(0)
+def opt(a, name, default=None):
+    return a[a.index(name) + 1] if name in a else default
+def opts(a, name):
+    return [a[i + 1] for i, x in enumerate(a) if x == name]
+def proj_view(p):
+    return {"id": p["id"], "number": p["number"], "url": p["url"], "title": p["title"],
+            "items": {"totalCount": len([i for i in st["items"] if i["project"] == p["id"]])},
+            "fields": {"nodes": [{"__typename": "ProjectV2SingleSelectField", "id": f["id"], "name": f["name"],
+                                  "options": f["options"]} for f in p["fields"]]}}
+def values(item):
+    out_ = []
+    p = next(p for p in st["projects"] if p["id"] == item["project"])
+    for f in p["fields"]:
+        oid = item["values"].get(f["id"])
+        o = next((o for o in f["options"] if o["id"] == oid), None)
+        if o:
+            out_.append({"name": o["name"], "field": {"name": f["name"]}})
+    return out_
+def issue_view(n):
+    i = st["issues"][str(n)]
+    items = [it for it in st["items"] if it["issue"] == n]
+    return {"id": i["id"], "number": n, "title": i["title"], "state": i["state"], "url": i["url"], "body": i["body"],
+            "createdAt": i["created"], "assignees": {"nodes": [{"login": x} for x in i["assignees"]]},
+            "labels": {"nodes": [{"name": x} for x in i["labels"]]},
+            "projectItems": {"nodes": [{"id": it["id"], "project": {"id": it["project"], "number": next(
+                p["number"] for p in st["projects"] if p["id"] == it["project"])},
+                "fieldValues": {"nodes": values(it)}} for it in items]}}
+
+if a[:2] == ["auth", "status"]:
+    print("Token scopes: 'gist', 'project', 'repo'"); sys.exit(0)
+if a[:2] == ["label", "list"]:
+    out([{"name": x} for x in st["labels"]])
+if a[:2] == ["label", "create"]:
+    st["labels"].append(a[2]); save(); sys.exit(0)
+if a[:2] == ["secret", "list"]:
+    out([{"name": x} for x in st["secrets"]])
+if a[:2] == ["issue", "create"]:
+    n = st["next_issue"]; st["next_issue"] += 1
+    st["issues"][str(n)] = {"id": nid("I"), "title": opt(a, "--title"), "body": opt(a, "--body", ""), "state": "OPEN",
+                            "url": f"https://github.com/example-org/example-app/issues/{n}", "labels": opts(a, "--label"),
+                            "assignees": [], "created": f"2026-01-01T00:00:{n:02d}Z"}
+    save(); print(f"https://github.com/example-org/example-app/issues/{n}"); sys.exit(0)
+if a[:2] == ["issue", "edit"]:
+    i = st["issues"][a[2]]
+    for x in opts(a, "--add-assignee"):
+        i["assignees"].append(st["me"] if x == "@me" else x)
+    for x in opts(a, "--add-label"):
+        i["labels"].append(x)
+    for x in opts(a, "--remove-label"):
+        i["labels"] = [l for l in i["labels"] if l != x]
+    save(); sys.exit(0)
+if a[:2] == ["issue", "comment"]:
+    st["comments"].append({"issue": int(a[2]), "body": opt(a, "--body")}); save(); sys.exit(0)
+if a[:2] == ["issue", "close"]:
+    st["issues"][a[2]]["state"] = "CLOSED"; save(); sys.exit(0)
+if a[:2] == ["pr", "view"]:
+    out(st["prs"][a[2]])
+if a[:2] == ["api", "user"]:
+    print(st["me"]); sys.exit(0)
+if a[:2] == ["api", "graphql"]:
+    req = json.loads(stdin); q = req["query"]; v = req.get("variables") or {}
+    if "createProjectV2Field" in q:
+        p = next(p for p in st["projects"] if p["id"] == v["p"])
+        p["fields"].append({"id": nid("F"), "name": "Priority", "options": [{"id": nid("O"), "name": o["name"]} for o in v["o"]]})
+        out({"data": {"createProjectV2Field": {"projectV2Field": {"id": "x"}}}})
+    if "updateProjectV2Field(" in q:
+        for p in st["projects"]:
+            for f in p["fields"]:
+                if f["id"] == v["f"]:
+                    f["options"] = [{"id": nid("O"), "name": o["name"]} for o in v["o"]]
+        out({"data": {"updateProjectV2Field": {"projectV2Field": {"id": v["f"]}}}})
+    if "createProjectV2(" in q:
+        n = len(st["projects"]) + 1
+        p = {"id": nid("PVT"), "number": n, "title": v["t"], "url": f"https://github.com/users/example-org/projects/{n}",
+             "fields": [{"id": nid("F"), "name": "Status", "options": [{"id": nid("O"), "name": x} for x in ("Todo", "In Progress", "Done")]}]}
+        st["projects"].append(p)
+        out({"data": {"createProjectV2": {"projectV2": {"number": n, "url": p["url"]}}}})
+    if "linkProjectV2ToRepository" in q or "updateProjectV2Collaborators" in q:
+        out({"data": {"x": {"repository": {"id": "R1"}}}})
+    if "projectsV2(first:100)" in q:
+        out({"data": {"repositoryOwner": {"id": "U1", "__typename": "User", "projectsV2": {"nodes": [
+            {"number": p["number"], "title": p["title"], "url": p["url"]} for p in st["projects"]]}}}})
+    if "projectV2(number:" in q:
+        p = next((p for p in st["projects"] if p["number"] == v["n"]), None)
+        out({"data": {"repositoryOwner": {"projectV2": proj_view(p) if p else None}}})
+    if "issue(number:" in q:
+        out({"data": {"repository": {"issue": issue_view(v["n"]) if str(v["n"]) in st["issues"] else None}}})
+    if "repository(owner:$o,name:$r){ id }" in q:
+        out({"data": {"repository": {"id": "R1"}}})
+    if "addProjectV2ItemById" in q:
+        n = next(int(k) for k, i in st["issues"].items() if i["id"] == v["c"])
+        it = {"id": nid("PVTI"), "project": v["p"], "issue": n, "values": {}}
+        st["items"].append(it)
+        out({"data": {"addProjectV2ItemById": {"item": {"id": it["id"]}}}})
+    if "updateProjectV2ItemFieldValue" in q:
+        it = next(i for i in st["items"] if i["id"] == v["i"])
+        it["values"][v["f"]] = v["o"]
+        out({"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": it["id"]}}}})
+    if "items(first:100" in q:
+        nodes = []
+        for it in st["items"]:
+            if it["project"] != v["p"]:
+                continue
+            iv = issue_view(it["issue"])
+            nodes.append({"id": it["id"], "content": {"__typename": "Issue", "number": it["issue"], "title": iv["title"],
+                          "state": iv["state"], "url": iv["url"], "createdAt": iv["createdAt"],
+                          "repository": {"nameWithOwner": "example-org/example-app"},
+                          "assignees": iv["assignees"], "labels": iv["labels"]},
+                          "fieldValues": {"nodes": values(it)}})
+        out({"data": {"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}})
+    out({"errors": [{"message": "fake gh: unhandled query"}]})
+if a and a[0] == "api":
+    out({"permissions": {"admin": True}, "private": False})
+sys.exit(0)
+'''
+
+
+def install_fake_gh_projects(bin_dir: Path):
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(FAKE_GH_PROJECTS)
+    gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+    return gh

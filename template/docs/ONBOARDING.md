@@ -13,7 +13,7 @@ Welcome. This repo is built by humans and coding agents working together using t
    - Codex: `$haam-onboard`
    - Any other tool: *"Read `.agents/skills/haam-onboard/SKILL.md` and follow it."*
 
-It checks your machine, access and Linear connection, sets up your local hooks and `.env`, runs the project checks, explains how we work and suggests a first issue. Steps that need your password or keys are done by you, in your own terminal or editor. You never paste secrets into the chat.
+It checks your machine, access and tracker connection, sets up your local hooks and `.env`, runs the project checks, explains how we work and suggests a first issue. Steps that need your password or keys are done by you, in your own terminal or editor. You never paste secrets into the chat.
 
 Prefer to do it by hand? The sections below cover the same ground.
 
@@ -29,7 +29,7 @@ Prefer to do it by hand? The sections below cover the same ground.
 | Account | Why | Ask for |
 |---|---|---|
 | GitHub | Code, PRs, CI | Write access to the repo |
-| Linear | Backlog and status | Membership of team **APP** |
+| Tracker | Backlog and status | **GitHub Projects:** access to the board (comes with the repo invite). **Linear:** membership of team **APP** |
 | Your agent tool | Coding agent | Your **own** account (Claude, Cursor, OpenAI, xAI…). Never share accounts |
 | Test services | Running locally | Test credentials only, from the product owner |
 
@@ -51,8 +51,10 @@ python3 tools/haam/haam.py dev --run-checks   # make setup + make check
 make dev                                       # app at http://localhost:TODO
 ```
 
-## 5. Connect your agent to Linear
-Follow your tool's section in `docs/setup/AGENTS-SETUP.md` (one sign-in). Test: *"List the Ready issues in Linear team APP."*
+## 5. Connect to the tracker
+Check `"tracker"` in `haam.config.json`:
+- **GitHub Projects:** run `gh auth refresh -s project` once, then test: `python3 tools/haam/haam.py issue list --status Ready`.
+- **Linear:** follow your tool's section in `docs/setup/AGENTS-SETUP.md` (one sign-in), then ask your agent: *"List the Ready issues in Linear team APP."*
 
 ## 6. Your personal settings (not shared)
 Personal notes and preferences go in git-ignored files: `AGENTS.local.md`, `CLAUDE.local.md`, `.claude/settings.local.json`, or your tool's user settings. Never put shared rules there. If something should apply to everyone, propose a change to `AGENTS.md` via PR.
@@ -62,7 +64,7 @@ Commands are written `/name` below; in Codex use `$name`.
 
 | You want to… | Do this |
 |---|---|
-| See what's waiting | Linear view **Agent queue** (to build) or **Waiting on me** |
+| See what's waiting | Tracker view **Agent queue** (to build) or **Waiting on me** |
 | Start work | `/next`, or `/build APP-123` |
 | Log an idea | `/idea …` |
 | Report a bug | `/bug …` |
@@ -76,7 +78,7 @@ Each agent session works on one issue. To run two at once on your machine, give 
 git worktree add ../app-123 -b app-123-short-title origin/main
 cd ../app-123   # open your agent here
 ```
-Two people never work on the same issue: the claim protocol (assign + In Progress + comment) prevents it. Always check Linear before starting.
+Two people never work on the same issue: the claim protocol (assign + In Progress + comment) prevents it. Always check the tracker before starting.
 
 ### Running agents semi-autonomously
 - **Attended:** type `/next`, review its choice, let it run. Your tool should ask before it pushes or opens PRs (see safe settings in `docs/setup/AGENTS-SETUP.md`).
@@ -90,10 +92,10 @@ Every PR is checked by tests, a secret scan, a dependency audit and two independ
 
 ## 9. Rules worth repeating
 - No pushes to `main`, no merges, no deploys from agents.
-- No secrets or real personal data in code, tests, fixtures, Linear or chat. Personal data is protected by law (e.g. GDPR).
+- No secrets or real personal data in code, tests, fixtures, the tracker or chat. Personal data is protected by law (e.g. GDPR).
 - One issue → one branch → one PR, small enough to review in 15 minutes.
 - Fill in **Built with** on every PR (your tool and model).
-- If it isn't in Git or Linear, it doesn't exist for the next person.
+- If it isn't in Git or the tracker, it doesn't exist for the next person.
 
 ## 10. Getting help
 - Process questions: ask your agent *"according to LIFECYCLE.md, what should happen when…"*

@@ -1,5 +1,6 @@
-## Linear issue
-APP-XXX: <link>
+## Issue
+<!-- GitHub Projects: keep the line below with the issue number (use Refs, not Closes: the issue closes at /release). Linear: put the ID in the PR title (APP-123: …). -->
+Refs #
 
 ## Built with
 <!-- Agent tool and model (e.g. Claude Code / Opus, Cursor / <model>, Codex, Grok Build), or "human". -->
@@ -13,7 +14,7 @@ APP-XXX: <link>
 | AC1 | `test_…` | ✅ |
 
 ## How to verify
-- UAT plan: `docs/uat/APP-XXX-*.md` (added by `/uat`)
+- UAT plan: `docs/uat/<GH-123 or APP-123>-*.md` (added by `/uat`)
 - Screenshots / notes:
 
 ## Risk

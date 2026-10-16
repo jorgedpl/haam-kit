@@ -4,7 +4,7 @@ Five gates stand between an idea and production. Each one has a clear owner, a c
 
 | Gate | Between | Owner | Enforced by |
 |---|---|---|---|
-| **G1 Decision** | Discovery → Backlog | Human (PO) | Linear status: only humans run `/decide` |
+| **G1 Decision** | Discovery → Backlog | Human (PO) | Tracker status: only humans run `/decide` |
 | **G2 Ready** | Backlog → Ready | Human approves spec | `agent-ready` label; agents only build `agent-ready` issues |
 | **G3 Verified** | In Progress → UAT | Automated checks + independent reviewer agent (+ human for protected areas) | Required checks `ci`, `secrets`, `dependencies`, `ai-review`, `security-review` |
 | **G4 Accepted** | UAT → merge | Human tester | Required check `release-gate` (needs PR label `uat-passed` or `gate-override`) |
@@ -45,7 +45,7 @@ An issue may get `agent-ready` only when:
 - [ ] No unrelated changes in the diff
 - [ ] Docs touched by the change are updated (`ARCHITECTURE.md`, API docs, env var list)
 - [ ] No secrets, no real personal data in code, tests or fixtures
-- [ ] PR description follows the template and links the Linear issue
+- [ ] PR description follows the template and links the issue (`Refs #123` on GitHub Projects, ID in the title on Linear)
 - [ ] `secrets` check green: no keys, tokens or passwords in any commit of the PR
 - [ ] `dependencies` check green: no known high/critical vulnerabilities
 - [ ] `ai-review` green: independent reviewer agent found no blocking issues
@@ -89,7 +89,7 @@ Review is layered so that **no agent ever reviews its own work** and **secrets a
 - [ ] PR merged to `main` by a human
 - [ ] Production deploy approved in GitHub (environment `production`)
 - [ ] Post-deploy smoke check passed (`make smoke`, if defined)
-- [ ] `/release` marks the Linear issue Done and updates `CHANGELOG.md`
+- [ ] `/release` marks the issue Done and updates `CHANGELOG.md`
 
 ---
 
@@ -100,10 +100,10 @@ Sometimes production is on fire or a deadline won't wait. Overrides exist for th
 ### Level 1: skip UAT (most common)
 Use when the fix is urgent and verified by tests but there's no time for a full UAT cycle.
 
-1. Human runs `/override APP-123 "<reason>"`, or manually adds the PR label `gate-override` and comments `OVERRIDE: <reason>` on the PR.
+1. Human runs `/override <ID> "<reason>"`, or manually adds the PR label `gate-override` and comments `OVERRIDE: <reason>` on the PR.
 2. The `release-gate` check passes on the override label.
 3. CI (`ci` check) **still must pass**.
-4. The agent automatically creates a follow-up Linear issue: `Post-override UAT for APP-123` (priority High, label `stream:bug`, `override-followup`), so the skipped verification still happens after the fact.
+4. The agent automatically creates a follow-up issue in the tracker: `Post-override UAT for <ID>` (priority High, label `stream:bug`, `override-followup`), so the skipped verification still happens after the fact.
 
 ### Level 2: emergency bypass (rare)
 Use only when CI itself is broken or blocking a production fix.
@@ -115,4 +115,4 @@ Use only when CI itself is broken or blocking a production fix.
 ### Override rules
 - Agents **never** add `gate-override`, never bypass protections, and never suggest overriding unless the human raises it first.
 - Every override must have a written reason on the PR.
-- Overrides are reviewed at the weekly backlog review: search Linear for label `override-followup`.
+- Overrides are reviewed at the weekly backlog review: filter the tracker by label `override-followup`.

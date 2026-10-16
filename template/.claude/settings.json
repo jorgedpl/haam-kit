@@ -23,7 +23,10 @@
       "Bash(gh run view:*)",
       "Bash(make audit:*)",
       "Bash(make hooks:*)",
-      "Bash(bash scripts/scan-secrets.sh:*)"
+      "Bash(bash scripts/scan-secrets.sh:*)",
+      "Bash(python3 tools/haam/haam.py issue:*)",
+      "Bash(python3 tools/haam/haam.py doctor:*)",
+      "Bash(python3 tools/haam/haam.py version:*)"
     ],
     "ask": [
       "Bash(git push:*)",

@@ -1,5 +1,7 @@
 # Linear setup (one-time, ~30 minutes, workspace admin)
 
+> **Only if your tracker is Linear** (`"tracker": "linear"` in `haam.config.json`). Using GitHub Projects? Run `python3 tools/haam/haam.py github-project` instead and see `docs/process/TRACKER.md`.
+
 This configures Linear to match `docs/process/LIFECYCLE.md`. Do it once; every developer and agent then uses the same structure.
 
 > **Automated:** sections 1–4 are done by `python3 tools/haam/haam.py linear --apply`, run by you in your own terminal (it asks for your Linear personal API key securely and never stores it). This page is the manual equivalent, plus sections 5–9 which only exist in Linear's web app.

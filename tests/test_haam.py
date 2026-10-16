@@ -5,6 +5,8 @@ Uses only the standard library. GitHub and Linear are replaced by local stand-in
 """
 
 import json
+import sys as _sys
+_sys.dont_write_bytecode = True  # keep the kit free of __pycache__
 import os
 import re
 import shutil
@@ -15,7 +17,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fakes import GOOD_KEY, FakeLinear, install_fake_gh  # noqa: E402
+from fakes import GOOD_KEY, FakeLinear, install_fake_gh, install_fake_gh_projects  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 KIT = ROOT / "template"
@@ -367,6 +369,131 @@ class TestLinear(ToolTestCase):
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env={**self.env, "HAAM_LINEAR_API": "https://evil.example/graphql"}).stdout.strip()
         self.assertEqual(out, "https://api.linear.app/graphql")
+
+class TestGitHubProjects(ToolTestCase):
+    def setUp(self):
+        super().setUp()
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        self.state = self.tmp / "gh-state.json"
+        self.env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(self.state)}
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--tracker", "github", "--team-key", "ACM",
+                      "--github-repo", "example-org/example-app", "--owner", "octocat", tool=self.installed_tool())
+
+    def gh_state(self):
+        return json.loads(self.state.read_text()) if self.state.exists() else {}
+
+    def tool(self, *args, **kw):
+        return self.run_tool(*args, tool=self.installed_tool(), **kw)
+
+    def setup_board(self):
+        self.tool("github-project", "--apply")
+
+    def test_plan_changes_nothing(self):
+        out = self.tool("github-project").stdout
+        self.assertIn("will create", out)
+        self.assertEqual(self.gh_state().get("projects", []), [])
+
+    def test_apply_creates_board_statuses_priority_labels(self):
+        out = self.tool("github-project", "--apply").stdout
+        self.assertIn("created and linked", out)
+        st = self.gh_state()
+        self.assertEqual(len(st["projects"]), 1)
+        fields = {f["name"]: [o["name"] for o in f["options"]] for f in st["projects"][0]["fields"]}
+        self.assertEqual(fields["Status"], ["Triage", "Discovery", "Decision", "Backlog", "Ready", "In Progress",
+                                            "In Review", "UAT", "Deploying", "Done", "Parked", "Canceled"])
+        self.assertEqual(fields["Priority"], ["Urgent", "High", "Medium", "Low"])
+        for lab in ("stream:idea", "stream:feature", "stream:bug", "agent-ready", "human-only", "override-followup"):
+            self.assertIn(lab, st["labels"])
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual(cfg["github_project_number"], 1)
+        # Second run finds the board and changes nothing
+        again = self.tool("github-project", "--apply").stdout
+        self.assertIn("Status has the 12 HAAM statuses", again)
+        self.assertEqual(len(self.gh_state()["projects"]), 1)
+
+    def test_issue_lifecycle_and_guards(self):
+        self.setup_board()
+        r = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Bulk invite", "--json").stdout)
+        self.assertEqual(r["status"], "Triage")
+        n = r["number"]
+        # Can't claim something that isn't Ready
+        p = self.tool("issue", "claim", str(n), check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("not Ready", p.stderr)
+        # Human-only moves need --human
+        self.tool("issue", "status", str(n), "Decision")
+        p = self.tool("issue", "status", str(n), "Backlog", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.tool("issue", "status", str(n), "Backlog", "--human")
+        p = self.tool("issue", "label", str(n), "--add", "agent-ready", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.tool("issue", "label", str(n), "--add", "agent-ready", "--add", "stream:feature", "--remove", "stream:idea", "--human")
+        self.tool("issue", "status", str(n), "Ready")
+        self.tool("issue", "priority", str(n), "High")
+        queue = json.loads(self.tool("issue", "list", "--status", "Ready", "--unassigned", "--label", "agent-ready", "--json").stdout)
+        self.assertEqual([i["number"] for i in queue["items"]], [n])
+        # Claim: assigns, moves, comments; a second claim is refused
+        self.tool("issue", "claim", str(n), "--tool", "Claude Code", "--machine", "laptop")
+        view = json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]
+        self.assertEqual(view["status"], "In Progress")
+        self.assertEqual(view["assignees"], ["tester"])
+        self.assertEqual(view["priority"], "High")
+        self.assertIn("stream:feature", view["labels"])
+        self.assertTrue(any("Claimed by @tester via Claude Code on laptop" in c["body"] for c in self.gh_state()["comments"]))
+        p = self.tool("issue", "claim", str(n), check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("already claimed", p.stderr)
+        # Close only with --human
+        self.assertNotEqual(self.tool("issue", "close", str(n), check=False).returncode, 0)
+        self.tool("issue", "close", str(n), "--human")
+        self.assertEqual(self.gh_state()["issues"][str(n)]["state"], "CLOSED")
+
+    def test_feature_starts_in_backlog_and_bug_priority(self):
+        self.setup_board()
+        f = json.loads(self.tool("issue", "create", "--stream", "feature", "--title", "Slice 1", "--json").stdout)
+        b = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "Crash", "--priority", "Urgent", "--json").stdout)
+        self.assertEqual(f["status"], "Backlog")
+        bug = json.loads(self.tool("issue", "view", str(b["number"]), "--json").stdout)["issue"]
+        self.assertEqual((bug["status"], bug["priority"]), ("Triage", "Urgent"))
+
+    def test_pr_sync_moves_linked_issues(self):
+        self.setup_board()
+        n = json.loads(self.tool("issue", "create", "--stream", "feature", "--title", "X", "--status", "In Progress", "--json").stdout)["number"]
+        st = self.gh_state()
+        st["prs"] = {"5": {"title": f"#{n}: Do X", "body": f"Refs #{n}", "headRefName": f"{n}-do-x", "isDraft": False},
+                     "6": {"title": "Draft", "body": f"Refs #{n}", "headRefName": "x", "isDraft": True}}
+        self.state.write_text(json.dumps(st))
+        self.tool("sync-pr", "--pr", "6", "--event", "opened")
+        self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "In Progress")
+        self.tool("sync-pr", "--pr", "5", "--event", "opened")
+        self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "In Review")
+        self.tool("issue", "status", str(n), "UAT")
+        self.tool("sync-pr", "--pr", "5", "--event", "opened")  # reopen must not move it back
+        self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "UAT")
+        self.tool("sync-pr", "--pr", "5", "--event", "merged")
+        self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "Deploying")
+
+    def test_issue_command_refuses_on_linear_projects(self):
+        self.tool("config", "--tracker", "linear")
+        p = self.tool("issue", "list", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Linear", p.stdout + p.stderr)
+
+
+class TestLinkedIssues(unittest.TestCase):
+    def test_parsing(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("haam_mod", TOOL)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        f = mod.linked_issue_numbers
+        self.assertEqual(f({"title": "#12: Add x", "body": "", "headRefName": "feature"}), [12])
+        self.assertEqual(f({"title": "Add x", "body": "Refs #7\nalso fixes #9", "headRefName": "x"}), [7, 9])
+        self.assertEqual(f({"title": "Add x", "body": "", "headRefName": "33-add-x"}), [33])
+        self.assertEqual(f({"title": "Bump #2 deps", "body": "see issue #4", "headRefName": "dependabot/x"}), [])
+
 
 if __name__ == "__main__":
     unittest.main()

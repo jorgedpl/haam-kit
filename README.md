@@ -1,8 +1,8 @@
 # HAAM: Human-Agent Agile Methodology
 
-**Humans decide. Agents execute. Everything lives in Git and Linear.**
+**Humans decide. Agents execute. Everything lives in Git and your tracker.**
 
-HAAM is an open methodology and kit for building software with AI coding agents, from idea to production, without losing control. It gives every agent the same rules, the same commands and the same gates, whatever tool it runs in: **Claude Code, Cursor, Codex, Grok Build, Gemini CLI or GitHub Copilot**. Several people, each with their own agent and account, can work on the same product in parallel.
+HAAM is an open methodology and kit for building software with AI coding agents, from idea to production, without losing control. It gives every agent the same rules, the same commands and the same gates, whatever tool it runs in: **Claude Code, Cursor, Codex, Grok Build, Gemini CLI or GitHub Copilot**. Work is tracked on a **GitHub Projects** board (free) or in **Linear**, your choice. Several people, each with their own agent and account, can work on the same product in parallel.
 
 ```
 Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build + unit tests ─► [G3 CI + secret scan + AI review]
@@ -12,11 +12,11 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 ## What you get
 
 - **A lifecycle with five human gates**: decide the idea, approve the spec, automated checks with independent AI review, human acceptance test, production approval. Every gate can be overridden in an emergency, and every override is recorded and followed up.
-- **Three work streams** agents pull from: bugs, ready features, and ideas to assess. Linear holds the backlog, priorities and status.
+- **Three work streams** agents pull from: bugs, ready features, and ideas to assess. The tracker (GitHub Projects or Linear) holds the backlog, priorities and status.
 - **13 shared skills** (`/idea`, `/bug`, `/assess`, `/decide`, `/spec`, `/next`, `/build`, `/uat`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`), plus `/haam-update`, in the open Agent Skills format.
 - **Code review where no one marks their own homework**: a secret scan before every commit and in CI, dependency audit, and two independent AI reviewers (spec/quality and security) that never saw the code being written. Humans review protected areas and can overrule.
 - **Gates enforced by GitHub**, not by trust: branch rules, required checks, a UAT label gate and deploy approvals, so they hold whatever agent or person is pushing.
-- **A setup tool** (`haam.py`, Python 3, no dependencies) that installs the kit into an existing repo without overwriting anything, configures GitHub and Linear, onboards developers, checks the setup and upgrades projects to new kit versions.
+- **A setup tool** (`haam.py`, Python 3, no dependencies) that installs the kit into an existing repo without overwriting anything, configures GitHub and the tracker (GitHub Projects or Linear), gives agents one command set for the board, onboards developers, checks the setup and upgrades projects to new kit versions.
 
 ## Quick start
 
@@ -24,13 +24,13 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.0.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.1.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
    > Read `~/haam-kit/template/.agents/skills/haam-setup/SKILL.md` and follow it to set up HAAM in this repository. The kit is at `~/haam-kit/template`.
 
-The agent installs the kit on a branch, asks you a few questions, fills in project knowledge from your code, and walks you through GitHub and Linear. It shows every change before making it. Anything involving a password or API key is done by you, in your own terminal, never through the agent's chat.
+The agent installs the kit on a branch, asks you a few questions, fills in project knowledge from your code, and walks you through GitHub and your tracker. It shows every change before making it. Anything involving a password or API key is done by you, in your own terminal, never through the agent's chat.
 
 Prefer doing it by hand? Follow [the adoption guide](template/docs/setup/HAAM-ADOPTION-GUIDE.md).
 
@@ -56,17 +56,30 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `config` | admin | Product name, Linear team key, repo, approvers → `haam.config.json`; applies them to every HAAM file |
 | `agents [--apply]` | admin | Wire up skills and Linear for Claude Code, Cursor, Codex, Grok, Gemini, Copilot |
 | `github [--apply]` | admin | Labels, branch ruleset with required checks, production approval, security features |
+| `github-project [--apply]` | admin | GitHub Projects board: 12 statuses, Priority field, labels, repo link |
 | `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 7 labels |
-| `invite --github USER [--linear-email EMAIL] [--apply]` | admin | Invite a developer (GitHub write, not admin; Linear team) |
+| `issue list\|create\|claim\|status\|…` | agents | Work the GitHub Projects board from any agent tool |
+| `invite --github USER [--linear-email EMAIL] [--apply]` | admin | Invite a developer (GitHub write, not admin; board access or Linear team) |
 | `dev [--apply] [--run-checks]` | developer | Machine check, commit hook, `.env` from example, project checks |
 | `doctor [--role admin] [--check-updates]` | anyone | What's done, what's missing, and who must do it |
 | `version [--check]` | anyone | Tool, project and latest released kit versions |
 
 Every command shows a plan first and changes things only with `--apply`. Add `--json` for machine-readable output.
 
+## Choosing a tracker
+
+| | GitHub Projects | Linear |
+|---|---|---|
+| Cost | Free on every GitHub plan | Free plan with limits; paid per user |
+| Where | Next to your code, one login | Separate app |
+| Agents use | `haam.py issue …` (any agent) | Linear's MCP server |
+| Best for | Solo and small teams, keeping everything in GitHub | Busier backlogs, several teams, richer planning |
+
+Same lifecycle, gates and skills either way, and you can switch later. See [TRACKER.md](template/docs/process/TRACKER.md).
+
 ## Agent compatibility
 
-| | Rules | Skills | Calling a skill | Linear |
+| | Rules | Skills | Calling a skill | Linear (if used) |
 |---|---|---|---|---|
 | Claude Code | `CLAUDE.md` → `AGENTS.md` | `.claude/skills` → `.agents/skills` | `/build` | `.mcp.json` |
 | Cursor | `AGENTS.md` | `.agents/skills` | `/build` | `.cursor/mcp.json` |
@@ -75,12 +88,12 @@ Every command shows a plan first and changes things only with `--apply`. Add `--
 | Gemini CLI | `AGENTS.md` via `.gemini/settings.json` | by file | by file | per user |
 | GitHub Copilot | `AGENTS.md` | by file | by file | per user |
 
-Details and recommended safe settings per tool: [AGENTS-SETUP.md](template/docs/setup/AGENTS-SETUP.md).
+On GitHub Projects every agent uses the same `haam.py issue` commands, so there's nothing per tool to connect. Details and recommended safe settings per tool: [AGENTS-SETUP.md](template/docs/setup/AGENTS-SETUP.md).
 
 ## Requirements
 
 - A GitHub repository (rulesets and deploy approvals on **private** repos need a paid GitHub plan; public repos work on the free plan)
-- A Linear workspace (any plan)
+- A tracker: a GitHub Projects board (free, on any GitHub plan) or a Linear workspace (any plan)
 - Python 3.8+, Git, Make, GitHub CLI, [gitleaks](https://github.com/gitleaks/gitleaks)
 - An Anthropic API key for the CI reviewer agents (usage-based; set a spend limit)
 - Any supported coding agent

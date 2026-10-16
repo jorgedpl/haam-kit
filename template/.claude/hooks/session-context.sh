@@ -7,14 +7,16 @@ set +e
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null
 
 branch=$(git branch --show-current 2>/dev/null)
-issue=$(echo "$branch" | grep -oiE '[a-z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+# Linear branches look like app-123-title; GitHub Projects branches like 123-title
+issue=$(echo "$branch" | grep -oiE '^[a-z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+[ -z "$issue" ] && issue=$(echo "$branch" | grep -oE '^[0-9]+' | head -1 | sed 's/^/#/')
 changes=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 behind=$(git rev-list --count HEAD..origin/main 2>/dev/null)
 
 echo "## Session context"
 echo "- Branch: ${branch:-detached}"
 if [ -n "$issue" ] && [ "$branch" != "main" ]; then
-  echo "- Linked Linear issue (from branch name): $issue. Fetch it from Linear before continuing work."
+  echo "- Linked issue (from branch name): $issue. Read it in the tracker before continuing work (docs/process/TRACKER.md)."
 fi
 echo "- Uncommitted changes: ${changes:-0} file(s)"
 [ -n "$behind" ] && [ "$behind" != "0" ] && echo "- Local branch is $behind commit(s) behind origin/main (as of last fetch). Rebase before opening a PR."

@@ -10,8 +10,8 @@ It is the single source of truth for **stages, streams, statuses, gates and who 
 
 ## 1. Principles
 
-1. **Everything lives in Git or Linear.** Nothing important exists only in a chat, a Claude memory or someone's head. Any person with their own Claude account can clone the repo, connect Linear and pick up where anyone else left off.
-2. **Linear is where work is planned and tracked. Git is where knowledge and code live.** Ticket = intent and status. Repo = specs, decisions, architecture, UAT plans, code.
+1. **Everything lives in Git or the tracker.** Nothing important exists only in a chat, a Claude memory or someone's head. Any person with their own Claude account can clone the repo, connect the tracker and pick up where anyone else left off.
+2. **The tracker is where work is planned and tracked. Git is where knowledge and code live.** The tracker is a GitHub Projects board or Linear, chosen per project (`docs/process/TRACKER.md`). Ticket = intent and status. Repo = specs, decisions, architecture, UAT plans, code.
 3. **Humans decide, agents execute.** Agents can propose, assess, spec, build, test and prepare UAT. Only humans approve ideas, approve specs, pass UAT, merge to `main` and approve production deploys.
 4. **Gates are cheap to pass and expensive to skip.** Every gate can be overridden by a human, but every override leaves a trail and a follow-up ticket.
 5. **Small slices.** One ticket → one branch → one PR, reviewable in ~15 minutes. Anything bigger is split before it reaches `Ready`.
@@ -20,19 +20,19 @@ It is the single source of truth for **stages, streams, statuses, gates and who 
 
 ## 2. The three work streams
 
-Agents pull work from three streams. They look the same in Linear (issues) but are distinguished by label and follow slightly different paths.
+Agents pull work from three streams. They look the same in the tracker (issues) but are distinguished by label and follow slightly different paths.
 
-| Stream | Linear label | Starts in | Typical source | Path |
+| Stream | Label | Starts in | Typical source | Path |
 |---|---|---|---|---|
 | **Ideas** | `stream:idea` | Triage | Anyone: you, a customer, an agent noticing something | Full lifecycle (all gates) |
 | **Features** | `stream:feature` | Backlog | Approved ideas, roadmap items | Spec → build → UAT → deploy |
 | **Issues (bugs)** | `stream:bug` | Triage | Users, monitoring, UAT failures | Short path: repro → fix → UAT verify → deploy |
 
-When an idea is approved at Gate G1 its label changes from `stream:idea` to `stream:feature`. It keeps the same Linear issue ID so the whole history stays in one place.
+When an idea is approved at Gate G1 its label changes from `stream:idea` to `stream:feature`. It keeps the same issue ID so the whole history stays in one place.
 
 ---
 
-## 3. Stages and Linear statuses
+## 3. Stages and statuses
 
 ```mermaid
 flowchart LR
@@ -51,7 +51,7 @@ flowchart LR
     DP --> DN[Done]
 ```
 
-| # | Linear status | Linear category | Meaning | Who moves it here |
+| # | Status | Linear category (Linear only) | Meaning | Who moves it here |
 |---|---|---|---|---|
 | 1 | **Triage** | Triage | New idea or bug, unassessed | Anyone (`/idea`, `/bug`) |
 | 2 | **Discovery** | Backlog | Being assessed: value, effort, risk, feasibility spike | Agent (`/assess`) |
@@ -59,9 +59,9 @@ flowchart LR
 | 4 | **Backlog** | Backlog | Approved, prioritised, needs a spec | Human (`/decide approve`) |
 | 5 | **Ready** | Unstarted | Spec approved, Definition of Ready met (**G2**), label `agent-ready` | Human approves spec |
 | 6 | **In Progress** | Started | An agent or developer has claimed it and is building | Agent (`/build`) |
-| 7 | **In Review** | Started | PR open, CI running, code review (**G3**) | Linear GitHub automation on PR open |
+| 7 | **In Review** | Started | PR open, CI running, code review (**G3**) | Tracker automation on PR open (Linear integration / `tracker-sync` workflow) |
 | 8 | **UAT** | Started | CI green, UAT plan ready, waiting for a human to test locally (**G4**) | Agent, when CI is green |
-| 9 | **Deploying** | Started | Merged to `main`, production deploy waiting for approval (**G5**) | Linear GitHub automation on PR merge |
+| 9 | **Deploying** | Started | Merged to `main`, production deploy waiting for approval (**G5**) | Tracker automation on PR merge |
 | 10 | **Done** | Completed | Live in production and verified | Human (`/release`) |
 | – | **Parked** | Canceled | Good idea, not now. Revisited at backlog review | Human |
 | – | **Canceled** | Canceled | Will not do | Human |
@@ -75,7 +75,7 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
 ### Stage 1: Idea capture (Triage)
 - **Input:** a sentence, a voice note, a customer email.
 - **Skill:** `/idea <description>`.
-- **Output:** Linear issue with label `stream:idea`, status Triage, filled from `docs/templates/idea.md` (problem, who it's for, why now, rough success signal).
+- **Output:** an issue in the tracker with label `stream:idea`, status Triage, filled from `docs/templates/idea.md` (problem, who it's for, why now, rough success signal).
 - **Rule:** capture is fast and cheap. No judgement yet.
 
 ### Stage 2: Assessment and feasibility (Discovery)
@@ -87,7 +87,7 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
   - Technical feasibility: which parts of the codebase change, unknowns, and **an optional spike** on a throwaway branch `spike/app-123-<slug>` that is **never merged**.
   - Options: at least two ways to do it, plus "do nothing".
   - Recommendation: approve / park / reject, with priority suggestion.
-- The assessment is committed (via a small PR or directly on a `docs/` branch, see §8) and linked from the Linear issue. Status moves to **Decision**.
+- The assessment is committed (via a small PR or directly on a `docs/` branch, see §8) and linked from the issue. Status moves to **Decision**.
 
 ### Stage 3: Decision (Gate G1, human)
 - **Skill:** `/decide APP-123 approve|park|reject [priority] [notes]` (human-invoked only).
@@ -104,7 +104,7 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
 
 ### Stage 5: Build (In Progress)
 - **Skill:** `/build APP-123` or `/next` (agent picks the top item).
-- Claim protocol (see §7), then: branch from `main` using Linear's branch name, implement against acceptance criteria, **write unit tests for every acceptance criterion**, run `make check` locally until green, update docs touched by the change, open a PR whose title starts with the issue ID.
+- Claim protocol (see §7), then: branch from `main` using the issue's branch name (`123-short-title` on GitHub, Linear's branch name on Linear), implement against acceptance criteria, **write unit tests for every acceptance criterion**, run `make check` locally until green, update docs touched by the change, open a PR whose title starts with the issue ID.
 
 ### Stage 6: Automated verification and code review (In Review, Gate G3)
 - **Deterministic checks** on every PR: `ci` (lint, types, unit tests, build), `secrets` (gitleaks over every commit), `dependencies` (vulnerability audit).
@@ -116,11 +116,11 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
 ### Stage 7: User acceptance testing (UAT, Gate G4, human)
 - **Skill:** `/uat APP-123` (agent prepares), `/uat-result APP-123 pass|fail` (human records).
 - When CI is green the agent writes `docs/uat/APP-123-<slug>.md` from `docs/templates/uat-plan.md`: how to run locally (`make dev` on the PR branch), test data, numbered steps with expected results and checkboxes, edge cases, what is out of scope.
-- The agent posts a short version in Linear and moves the issue to **UAT**. The human is notified via Linear.
+- The agent posts a short version on the issue and moves it to **UAT**. The human is notified by the tracker.
 - Human tests on **local** first. Pass → `/uat-result pass` adds the PR label `uat-passed`. Fail → `/uat-result fail <notes>` sends it back to **In Progress** with the failures recorded as a checklist on the issue.
 
 ### Stage 8: Release (Deploying → Done, Gate G5, human)
-- Human merges the PR. Linear moves the issue to **Deploying**.
+- Human merges the PR. The tracker moves the issue to **Deploying**.
 - The deploy workflow starts and waits on the GitHub `production` environment, which requires a human approval.
 - After deploy, `/release APP-123` runs a smoke check (if defined), closes the issue as **Done**, and appends a line to `CHANGELOG.md`.
 
@@ -132,15 +132,15 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
 |---|---|---|
 | **Product owner** | The person accountable for product decisions (one per product) | Everything. Owns G1, G2 approval, G4, G5, overrides, priorities |
 | **Developer** | Any human contributor with their own Claude account | Capture, assess, spec, build, review, run UAT if delegated by the product owner; merge with the product owner's OK |
-| **Agent** | Any coding-agent session in this repo, whatever the tool | Capture, assess, spike, spec, build, test, open PRs, prepare UAT, update Linear statuses up to **UAT**. **Never**: decide G1, approve specs, set `uat-passed`, merge to `main`, deploy, apply `gate-override` or `ai-review-overruled`, review their own PRs |
+| **Agent** | Any coding-agent session in this repo, whatever the tool | Capture, assess, spike, spec, build, test, open PRs, prepare UAT, update tracker statuses up to **UAT**. **Never**: decide G1, approve specs, set `uat-passed`, merge to `main`, deploy, apply `gate-override` or `ai-review-overruled`, review their own PRs |
 
 ---
 
 ## 6. Priorities
 
-Linear's built-in priority field is the only priority source.
+The tracker's priority (Linear's built-in priority, or the board's Priority field on GitHub Projects) is the only priority source.
 
-| Linear priority | Meaning | Expected handling |
+| Priority | Meaning | Expected handling |
 |---|---|---|
 | Urgent | Production broken or a legal/compliance deadline at risk | Drop everything. Override allowed |
 | High | Important for current goals | Next up |
@@ -154,12 +154,12 @@ Order inside the same priority: bugs before features, older before newer, smalle
 
 ## 7. Working in parallel (multiple humans, multiple agents)
 
-1. **Claiming is done in Linear, not in chat.** Before building, an agent re-reads the issue. If it is already *In Progress* or assigned to someone else, it skips it. Otherwise it assigns it to the human running the session, sets *In Progress* and posts a comment: `🤖 Claimed by <name>'s Claude session · branch <branch>`.
+1. **Claiming is done in the tracker, not in chat.** Before building, an agent re-reads the issue. If it is already *In Progress* or assigned to someone else, it skips it. Otherwise it assigns it to the human running the session, sets *In Progress* and posts a comment: `🤖 Claimed by <name>'s Claude session · branch <branch>`.
 2. **One issue per session.** A session works on one issue at a time. To run several agents at once on one machine, use a separate git worktree per session (`git worktree add`, see `docs/ONBOARDING.md`) so they don't share a working directory.
-3. **Branch names come from Linear** (`app-123-short-title`), so the Linear ↔ GitHub link is automatic.
+3. **Branch names come from the issue** (`123-short-title` on GitHub, `app-123-short-title` on Linear), so the link to the issue is automatic.
 4. **Always rebase on fresh `main`** before opening or updating a PR.
 5. **No personal state in shared files.** Personal preferences go in git-ignored files (`CLAUDE.local.md`, `AGENTS.local.md`, `.claude/settings.local.json`…).
-6. **Handover note.** If a session stops before finishing, the agent posts a Linear comment: done / not done / next step / gotchas, and pushes the branch as a draft PR. Anyone can resume from that.
+6. **Handover note.** If a session stops before finishing, the agent posts a comment on the issue: done / not done / next step / gotchas, and pushes the branch as a draft PR. Anyone can resume from that.
 
 ---
 
@@ -167,7 +167,7 @@ Order inside the same priority: bugs before features, older before newer, smalle
 
 | Artefact | Location | Created by |
 |---|---|---|
-| Idea, bug, status, priority, discussion | Linear issue | `/idea`, `/bug` |
+| Idea, bug, status, priority, discussion | Tracker issue | `/idea`, `/bug` |
 | Assessment and feasibility | `docs/assessments/APP-123-*.md` | `/assess` |
 | Spike code | branch `spike/app-123-*` (never merged) | `/assess` |
 | Decision record (technical) | `docs/decisions/NNNN-*.md` (ADR) | `/decide`, `/spec` |

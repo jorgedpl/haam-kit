@@ -1,6 +1,6 @@
-# Spec: APP-XXX <title>
+# Spec: <ID> <title>
 
-- **Linear:** APP-XXX · **Assessment:** docs/assessments/APP-XXX-*.md · **ADRs:** <links or none>
+- **Issue:** <#123 or APP-123> · **Assessment:** docs/assessments/<FILE-ID>-*.md · **ADRs:** <links or none>
 - **Status:** Draft / Approved · **Approved by:** <human> on YYYY-MM-DD
 - **Protected areas:** none / <list> → `human-review`
 

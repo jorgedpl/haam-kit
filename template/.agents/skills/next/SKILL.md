@@ -6,9 +6,13 @@ argument-hint: "[bugs|features|ideas]  (optional: restrict to one stream)"
 
 # /next: pull the next work item
 
+> **Tracker:** check `"tracker"` in `haam.config.json` and do every tracker step below the way `docs/process/TRACKER.md` says (GitHub Projects: `python3 tools/haam/haam.py issue …`; Linear: the Linear connection). `<ID>` means `#123` (GitHub) or `APP-123` (Linear).
+
 Filter: $ARGUMENTS (empty = all streams)
 
-## 1. Build the queue (Linear, team `APP`, unassigned or assigned to the current user, not In Progress)
+## 1. Build the queue (unassigned or assigned to the current user, not In Progress)
+
+GitHub Projects: `python3 tools/haam/haam.py issue list --status Ready --unassigned --open-only` (and `--status Backlog`, `--status Triage` for steps 4–5). Linear: list the team's issues.
 
 Take the first match, in this order:
 

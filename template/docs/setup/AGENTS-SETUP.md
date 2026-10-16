@@ -1,12 +1,12 @@
 # Agent tools: setup per tool
 
-HAAM works with any coding agent. Every tool reads the **same rules** (`AGENTS.md`) and the **same skills** (`.agents/skills/`), and connects to the **same Linear** (`https://mcp.linear.app/mcp`). Only the plumbing differs.
+HAAM works with any coding agent. Every tool reads the **same rules** (`AGENTS.md`) and the **same skills** (`.agents/skills/`), and works on the **same tracker**: a GitHub Projects board (through `python3 tools/haam/haam.py issue …`, which any agent can run) or Linear (through its MCP server, `https://mcp.linear.app/mcp`). Only the plumbing differs.
 
 Run `python3 tools/haam/haam.py agents` to see what's wired up in this repo, and `python3 tools/haam/haam.py dev` to check your machine.
 
 ## How each tool picks up HAAM
 
-| | Rules | Skills | Calling a skill | Linear (MCP) | Human-only skills |
+| | Rules | Skills | Calling a skill | Linear MCP (Linear projects only) | Human-only skills |
 |---|---|---|---|---|---|
 | **Claude Code** | `CLAUDE.md` → imports `AGENTS.md` | `.claude/skills` (link to `.agents/skills`) | `/build APP-1` | `.mcp.json` (in repo) | `disable-model-invocation` |
 | **Cursor** | `AGENTS.md` | `.agents/skills` | `/build APP-1` | `.cursor/mcp.json` (in repo) | `disable-model-invocation` |
@@ -17,7 +17,9 @@ Run `python3 tools/haam/haam.py agents` to see what's wired up in this repo, and
 
 If a tool doesn't load skills, tell it: *"Open `.agents/skills/<name>/SKILL.md` and follow it."* The skills are plain Markdown.
 
-## Connect to Linear (one time per person)
+## Connect to the tracker (one time per person)
+
+**GitHub Projects:** nothing to install in your agent. Run `gh auth refresh -s project` once, and test with `python3 tools/haam/haam.py issue list`. The rest of this section is for **Linear** projects.
 
 Linear signs you in with your own account (OAuth). Agents act as you.
 
@@ -51,7 +53,7 @@ Ask the agent, in the repo:
 3. *"List the Ready issues in Linear team APP."* This checks the Linear connection.
 
 ## Recording which tool did the work
-The claim comment in Linear and the PR's **Built with** field record the tool and model. After a few weeks you can compare review findings and UAT failures by tool.
+The claim comment on the issue and the PR's **Built with** field record the tool and model. After a few weeks you can compare review findings and UAT failures by tool.
 
 ## Cross-model review
 The CI reviewer agents use Claude. When code is written with a different tool (Codex, Grok, Cursor with another model), the review is also cross-model, which is a useful extra check.

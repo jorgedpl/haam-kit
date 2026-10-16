@@ -1,6 +1,6 @@
-# Assessment: APP-XXX <title>
+# Assessment: <ID> <title>
 
-- **Linear:** APP-XXX
+- **Issue:** <#123 or APP-123>
 - **Author:** <agent session / person> · **Date:** YYYY-MM-DD
 - **Recommendation:** Approve / Park / Reject · **Suggested priority:** Urgent / High / Medium / Low
 - **Size:** XS / S / M / L / XL

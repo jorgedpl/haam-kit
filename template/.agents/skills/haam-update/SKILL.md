@@ -37,7 +37,7 @@ Open `/tmp/haam-kit-<target-version>/CHANGELOG.md`. Summarise for the human, in 
 ## 6. Migration steps
 Do each step from the CHANGELOG. Typical ones:
 - New required checks or labels: `python3 tools/haam/haam.py github` (plan) → `--apply` on the human's OK.
-- New Linear statuses or labels: the **human** runs `python3 tools/haam/haam.py linear` then `--apply` in their own terminal (it needs their API key).
+- New statuses, fields or labels: GitHub Projects: `python3 tools/haam/haam.py github-project` (plan) → `--apply` on the human's OK. Linear: the **human** runs `python3 tools/haam/haam.py linear` then `--apply` in their own terminal (it needs their API key).
 - New `TODO(setup)` placeholders: fill them from the codebase or ask the human.
 
 ## 7. Verify and open the PR

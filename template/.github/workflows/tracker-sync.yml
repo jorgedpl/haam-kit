@@ -1,0 +1,70 @@
+# Keeps the GitHub Projects board in step with pull requests (only when
+# haam.config.json says "tracker": "github"; does nothing for Linear projects,
+# where Linear's own GitHub integration moves issues).
+#   PR opened / ready for review → linked issues move to "In Review"
+#   PR merged                    → linked issues move to "Deploying"
+#   Issue opened                 → added to the board in "Triage"
+# A PR links an issue with "Refs #123" in its description (or a branch named 123-...).
+# Needs the repository secret HAAM_PROJECT_TOKEN: a classic token with the
+# 'project' scope (and 'repo' if the repository is private). The built-in token
+# can't edit project boards.
+name: Tracker sync
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, closed]
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tracker-sync-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Which tracker?
+        id: tracker
+        run: |
+          t=$(python3 -c "import json; print(json.load(open('haam.config.json')).get('tracker', ''))" 2>/dev/null || true)
+          echo "name=$t" >> "$GITHUB_OUTPUT"
+          echo "Tracker: ${t:-not configured}"
+
+      - name: Move issues linked to this pull request
+        if: steps.tracker.outputs.name == 'github' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.HAAM_PROJECT_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::HAAM_PROJECT_TOKEN isn't set, so board cards won't move automatically. See docs/process/TRACKER.md."
+            exit 0
+          fi
+          if [ "$ACTION" = "closed" ]; then
+            if [ "$MERGED" != "true" ]; then echo "Closed without merging: nothing to do"; exit 0; fi
+            event=merged
+          else
+            event=opened
+          fi
+          python3 tools/haam/haam.py sync-pr --pr "$PR" --event "$event"
+
+      - name: Put new issues on the board
+        if: steps.tracker.outputs.name == 'github' && github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ secrets.HAAM_PROJECT_TOKEN }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::HAAM_PROJECT_TOKEN isn't set; add the issue to the board by hand."
+            exit 0
+          fi
+          python3 tools/haam/haam.py issue add "$ISSUE"

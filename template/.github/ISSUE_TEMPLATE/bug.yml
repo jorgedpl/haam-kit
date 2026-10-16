@@ -1,0 +1,40 @@
+name: Bug
+description: Something is broken or wrong (HAAM stream "bug")
+labels:
+- stream:bug
+body:
+- type: markdown
+  attributes:
+    value: Don't include personal data (names, emails, document numbers) or secrets. Redact screenshots.
+- type: textarea
+  id: what
+  attributes:
+    label: What happened
+  validations:
+    required: true
+- type: textarea
+  id: expected
+  attributes:
+    label: What should have happened
+- type: textarea
+  id: steps
+  attributes:
+    label: Steps to reproduce
+    value: '1.
+
+      2.
+
+      '
+- type: dropdown
+  id: env
+  attributes:
+    label: Where
+    options:
+    - Production
+    - Local
+    - Other
+- type: textarea
+  id: impact
+  attributes:
+    label: Impact
+    description: Who is affected, how many, any data wrong or exposed, workaround?

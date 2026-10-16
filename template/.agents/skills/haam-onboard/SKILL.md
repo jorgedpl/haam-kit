@@ -1,6 +1,6 @@
 ---
 name: haam-onboard
-description: Onboard a developer who is joining a project that uses the Human-Agent Agile Methodology (HAAM). Checks their machine, access, agent tool and Linear connection, sets up local hooks and environment, explains the way of working and suggests a first issue. Use when someone new asks to get set up, get started or onboard.
+description: Onboard a developer who is joining a project that uses the Human-Agent Agile Methodology (HAAM). Checks their machine, access, agent tool and tracker connection, sets up local hooks and environment, explains the way of working and suggests a first issue. Use when someone new asks to get set up, get started or onboard.
 disable-model-invocation: true
 ---
 
@@ -25,11 +25,12 @@ You're helping a developer (human) get ready to work on this project with their 
 ## 3. Access
 1. GitHub: `gh api repos/<github_repo> --jq .permissions`. If no access, or no `push` permission: tell them to ask the project admin to run
    `python3 tools/haam/haam.py invite --github <their-username> --linear-email <their-email> --apply`, then accept the emails. Pause until done.
-2. Linear: they need membership of team `<team_key>`. Same invite command covers it.
+2. Tracker (`"tracker"` in `haam.config.json`): **GitHub Projects**: the invite also shares the board; they run `gh auth refresh -s project` in their terminal. **Linear**: they need membership of team `<team_key>`; the same invite command covers it.
 3. Test credentials: they come from the product owner via a password manager or one-time link. The developer pastes them into `.env` themselves.
 
-## 4. Connect their agent tool to Linear
-Use `docs/setup/AGENTS-SETUP.md` for their tool (Claude Code, Cursor, Codex, Grok, Gemini, Copilot). Then verify: list the issues in status **Ready** for team `<team_key>`. If it fails, troubleshoot with the same doc.
+## 4. Connect to the tracker
+- **GitHub Projects:** nothing to install. Verify: `python3 tools/haam/haam.py issue list --status Ready`. If it says the login can't use Projects: `gh auth refresh -s project`.
+- **Linear:** connect their agent tool using `docs/setup/AGENTS-SETUP.md` (Claude Code, Cursor, Codex, Grok, Gemini, Copilot), then list the issues in status **Ready** for team `<team_key>`.
 
 ## 5. Run the project
 1. `python3 tools/haam/haam.py dev --run-checks` (runs `make setup` and `make check`).
@@ -41,7 +42,7 @@ Explain briefly, in your own words, from `AGENTS.md`, `docs/process/LIFECYCLE.md
 - The lifecycle: idea → assess → decide → spec → build → checks & AI review → UAT → deploy, and which steps are human-only.
 - The commands for **their** tool (`/build` vs `$build`), the hard rules (no push to `main`, no secrets, claim before building, small PRs).
 - How review works: reviewer agents block, humans overrule; two failed rounds → hand over.
-- Where things live: Linear for work, Git for knowledge (`docs/`).
+- Where things live: the tracker for work (`docs/process/TRACKER.md`), Git for knowledge (`docs/`).
 
 ## 7. First task
 1. Show the top 3 items from the **Agent queue** (status Ready, `agent-ready` or `stream:bug`, unassigned). Prefer something small.

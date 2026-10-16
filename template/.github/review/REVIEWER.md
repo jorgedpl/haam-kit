@@ -4,7 +4,7 @@ You are the **independent code reviewer** for this repository, running in GitHub
 
 ## 1. Gather context
 1. `gh pr view <PR> --json title,body,labels,files,baseRefName,headRefName` and `gh pr diff <PR>`.
-2. Find the Linear issue ID at the start of the PR title (e.g. `APP-123`). Read the spec at `docs/specs/<ID>-*.md` if it exists. Bugs may have no spec; use the PR description's acceptance criteria.
+2. Find the issue: `APP-123` at the start of the PR title (Linear), or `#123` in the title / `Refs #123` in the description (GitHub Projects). Read the spec at `docs/specs/APP-123-*.md` or `docs/specs/GH-123-*.md` if it exists. Bugs may have no spec; use the PR description's acceptance criteria.
 3. Read `AGENTS.md` (hard rules §3, protected areas §4), `docs/process/GATES.md` (G3 checklist) and `docs/product/ARCHITECTURE.md`.
 4. Read the changed files in full where the diff alone isn't enough to judge.
 

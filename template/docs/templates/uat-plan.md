@@ -1,6 +1,6 @@
-# UAT plan: APP-XXX <title>
+# UAT plan: <ID> <title>
 
-- **Linear:** APP-XXX · **PR:** #NNN · **Spec:** docs/specs/APP-XXX-*.md
+- **Issue:** <#123 or APP-123> · **PR:** #NNN · **Spec:** docs/specs/<FILE-ID>-*.md
 - **Estimated time:** ~N minutes
 
 ## Setup (local)

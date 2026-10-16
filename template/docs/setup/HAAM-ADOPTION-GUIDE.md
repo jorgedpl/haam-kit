@@ -1,7 +1,7 @@
 # Human-Agent Agile Methodology (HAAM)
 ## Adoption guide for the project admin
 
-HAAM is a way of building software where **humans decide and agents execute**. Every piece of work goes from idea to production through the same stages, with human gates at the points that matter. Everything lives in **Git** (knowledge and code) and **Linear** (work and status). People can use different coding agents (Claude Code, Cursor, Codex, Grok, Gemini, Copilot) with their own accounts and still work in parallel.
+HAAM is a way of building software where **humans decide and agents execute**. Every piece of work goes from idea to production through the same stages, with human gates at the points that matter. Everything lives in **Git** (knowledge and code) and the **tracker** (work and status): a **GitHub Projects** board (free) or **Linear**. People can use different coding agents (Claude Code, Cursor, Codex, Grok, Gemini, Copilot) with their own accounts and still work in parallel.
 
 This guide applies HAAM to an existing repository in **six phases, about half a day in total**. You can stop after any phase and still have something useful.
 
@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.0.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.1.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 
@@ -29,7 +29,7 @@ The agent drives the setup tool (`tools/haam/haam.py`) through every phase below
 |---|---|
 | `[agent]` | Your coding agent does it (or you, if doing it by hand) |
 | `[YOU, in your terminal]` | You run the command yourself: it involves a secret (API key, login) that must never pass through an agent's chat |
-| `[YOU, in the browser]` | A setting that GitHub or Linear only offers in their web app |
+| `[YOU, in the browser]` | A setting that GitHub or Linear only offers in its web app |
 
 ---
 
@@ -48,15 +48,17 @@ scripts/scan-secrets.sh       Secret scan (gitleaks) shared by all commit hooks
 .githooks/pre-commit          Blocks commits containing secrets (any human, any agent using git)
 .agents/skills/               One skill per stage, shared by all agent tools
 .claude/                      Claude Code: settings (guard-rails), hooks, skills link
-.cursor/mcp.json              Cursor: Linear connection
+.cursor/mcp.json              Cursor: Linear connection (Linear projects)
 .grok/skills                  Grok Build: skills link
 .gemini/settings.json         Gemini CLI: read AGENTS.md
-.mcp.json                     Linear connection (Claude Code, Grok)
+.mcp.json                     Linear connection (Claude Code, Grok; Linear projects)
 .github/
   pull_request_template.md    Includes "Built with" (agent tool and model)
   workflows/ci.yml            Gate G3: tests on every PR
   workflows/security.yml      Gate G3: secret scan of every commit + dependency audit
   workflows/review.yml        Gate G3: independent AI reviewers (spec/quality + security)
+  workflows/tracker-sync.yml    Moves GitHub Projects cards when PRs open and merge
+  ISSUE_TEMPLATE/              Idea and bug forms (GitHub Projects)
   workflows/gates.yml         Gate G4: blocks merge until UAT passed or overridden
   workflows/deploy.yml        Gate G5: production deploy waits for human approval
   review/REVIEWER.md          Instructions for the reviewer agent
@@ -64,6 +66,7 @@ scripts/scan-secrets.sh       Secret scan (gitleaks) shared by all commit hooks
 docs/
   process/LIFECYCLE.md        The methodology: streams, stages, statuses, roles
   process/GATES.md            Gate checklists, code review, overrides
+  process/TRACKER.md          How each tracker operation works on GitHub Projects and on Linear
   product/PRODUCT.md          Your product context (you confirm it)
   product/ARCHITECTURE.md     Map of your codebase (the agent drafts it)
   setup/HAAM-ADOPTION-GUIDE.md  This guide
@@ -130,7 +133,7 @@ Full rules: `docs/process/GATES.md`. Reviewer instructions you can tune: `.githu
 
 You need:
 - [ ] Admin access to the GitHub repository (and a paid plan if the repo is private and you want rulesets and deploy approvals enforced; see Phase 4)
-- [ ] Admin access to a Linear workspace (any plan)
+- [ ] A tracker: **GitHub Projects** (nothing extra; free on every plan) or admin access to a **Linear** workspace
 - [ ] A coding agent installed and signed in, in your own account
 - [ ] Python 3, Git, Make, and the GitHub CLI signed in (`gh auth login`)
 - [ ] gitleaks (`brew install gitleaks`, or from its GitHub releases page)
@@ -138,9 +141,10 @@ You need:
 - [ ] Your project runs locally today
 
 Decide now:
-1. **Team key:** a short code for your Linear team, e.g. `ACM`, `SHOP`, `CRM`. The kit uses `APP` as a placeholder until `config` replaces it everywhere.
-2. **Product owner:** the one person who approves ideas, specs, UAT and deploys (plus an optional backup approver).
-3. **Agent tools** your team will use.
+1. **Tracker:** GitHub Projects (free, everything in GitHub) or Linear (nicer to use, free plan limited). You can switch later.
+2. **Product key:** a short code, e.g. `ACM`, `SHOP`, `CRM` (the Linear team key if you use Linear). The kit uses `APP` as a placeholder until `config` replaces it everywhere.
+3. **Product owner:** the one person who approves ideas, specs, UAT and deploys (plus an optional backup approver).
+4. **Agent tools** your team will use.
 
 Check your machine any time with: `python3 <kit>/tools/haam/haam.py dev`
 
@@ -181,7 +185,7 @@ Delete `.haam/incoming/` when done.
 
 1. **Project settings** `[agent]` (answers from you):
    ```bash
-   python3 tools/haam/haam.py config --product "Acme" --team-key ACM --linear-team "Acme" \
+   python3 tools/haam/haam.py config --product "Acme" --tracker github --team-key ACM --linear-team "Acme" \
      --github-repo owner/repo --owner your-github-user --production-url https://… \
      --agents claude,cursor,codex,grok
    ```
@@ -234,18 +238,32 @@ Detail and manual equivalents: `docs/setup/GITHUB-SETUP.md`.
 
 ---
 
-## Phase 5: Linear (20 min)
+## Phase 5: The tracker (20 min)
 
+### Option A: GitHub Projects (free)
+1. `[YOU, in your terminal]` `gh auth refresh -s project` (lets your GitHub login use Projects).
+2. `[agent, with your OK]`
+   ```bash
+   python3 tools/haam/haam.py github-project           # plan
+   python3 tools/haam/haam.py github-project --apply   # creates the board, links the repo, 12 statuses, Priority, labels
+   ```
+3. `[YOU, in your terminal]` automation token, so cards move when PRs open and merge: create a classic token at github.com/settings/tokens with the `project` scope (plus `repo` if the repository is private), then `gh secret set HAAM_PROJECT_TOKEN -R owner/repo`.
+4. `[YOU, in the browser]` on the board, create the views the tool lists: Board grouped by Status, **Agent queue**, **Waiting on me**, **Ideas inbox**, **Bugs**.
+5. Test: `python3 tools/haam/haam.py issue list`.
+
+Agents use `python3 tools/haam/haam.py issue …` for every board operation (`docs/process/TRACKER.md`), so it works the same from Claude Code, Cursor, Codex, Grok or anything else.
+
+### Option B: Linear
 1. **Statuses, labels, team** `[YOU, in your terminal]` (needs your Linear personal API key, which never goes through an agent):
    ```bash
    python3 tools/haam/haam.py linear           # plan; asks for the key securely
    python3 tools/haam/haam.py linear --apply
    ```
    It creates the team if needed, turns on Triage, creates the 12 statuses (renaming Linear's default "Todo" to "Ready"), and the 7 labels. It never deletes anything; it lists extra statuses for you to archive.
-2. **Browser-only settings** `[YOU, in the browser]`: connect GitHub, PR automations (PR opened → In Review, merged → Deploying), branch name format `{issue-identifier}-{issue-title}`, saved views (**Waiting on me**, **Agent queue**, **Ideas inbox**, **Bugs**, **Overrides to close**). See `docs/setup/LINEAR-SETUP.md`.
+2. **Browser-only settings** `[YOU, in the browser]`: connect GitHub, PR automations (PR opened → In Review, merged → Deploying), branch name format `{issue-identifier}-{issue-title}`, saved views. See `docs/setup/LINEAR-SETUP.md`.
 3. **Connect your agent** to Linear (`docs/setup/AGENTS-SETUP.md`) and test: *"List the issues in Linear team ACM."*
 
-**Existing backlog?** Import it with Linear's importer (Settings → Import) or ask your agent to move items via the Linear connection. Put everything in **Triage**, triage once (`stream:bug`, `stream:idea`, or `stream:feature` + Backlog), and spec only the top five.
+**Existing backlog?** Ask your agent to bring it into the tracker (GitHub issues can simply be added to the board). Put everything in **Triage**, triage once (`stream:bug`, `stream:idea`, or `stream:feature` + Backlog), and spec only the top five.
 
 ---
 
@@ -259,26 +277,28 @@ Pick something small and real. Walk it through every stage once:
 
 | Step | You type | What should happen |
 |---|---|---|
-| 1 | `/idea Add a "last updated" date to the dashboard` | New Linear issue in Triage, label `stream:idea` |
-| 2 | `/assess ACM-1` | Assessment doc in a docs PR; issue moves to Decision |
-| 3 | `/decide ACM-1 approve medium` | Issue moves to Backlog, label becomes `stream:feature` |
-| 4 | `/spec ACM-1` | Spec doc in a docs PR with acceptance criteria |
+| 1 | `/idea Add a "last updated" date to the dashboard` | New issue in Triage, label `stream:idea` (on GitHub: `#1`; on Linear: `ACM-1`) |
+| 2 | `/assess #1` | Assessment doc in a docs PR; issue moves to Decision |
+| 3 | `/decide #1 approve medium` | Issue moves to Backlog, label becomes `stream:feature` |
+| 4 | `/spec #1` | Spec doc in a docs PR with acceptance criteria |
 | 5 | Review the spec, merge the docs PR, tell the agent "spec approved" | Issue gets `agent-ready`, moves to Ready |
-| 6 | `/build ACM-1` | Claims it, branches, codes, writes tests, self-reviews, opens PR; Linear shows In Review |
+| 6 | `/build #1` | Claims it, branches, codes, writes tests, self-reviews, opens PR; the tracker shows In Review |
 | 6b | (automatic) | `ci`, `secrets`, `dependencies` run; the reviewer agent comments; the building agent fixes Blocking findings |
-| 7 | (when all green) `/uat ACM-1` | UAT plan committed; issue moves to UAT; you're notified |
+| 7 | (when all green) `/uat #1` | UAT plan committed; issue moves to UAT; you're notified |
 | 8 | Test locally following the plan | – |
-| 9 | `/uat-result ACM-1 pass` | PR gets `uat-passed`; `release-gate` turns green |
-| 10 | Merge the PR | Linear moves to Deploying; deploy waits for your approval |
+| 9 | `/uat-result #1 pass` | PR gets `uat-passed`; `release-gate` turns green |
+| 10 | Merge the PR | The tracker moves it to Deploying; deploy waits for your approval |
 | 11 | Approve the deploy in GitHub (Actions → run → Review deployments) | Production updated |
-| 12 | `/release ACM-1` | Smoke check, CHANGELOG entry, issue Done |
+| 12 | `/release #1` | Smoke check, CHANGELOG entry, issue Done |
+
+(On Linear the IDs look like `ACM-1`.)
 
 Then try the edges once: ask the agent to commit a fake key on a throwaway branch (`AKIA` + 16 capital letters/digits): the commit must be blocked. Then fail a UAT, and use an override. Tune the skills in `.agents/skills/` or the process in `docs/process/LIFECYCLE.md` where something felt wrong.
 
 **Try a second agent tool on the trial loop too** (e.g. Cursor or Codex for step 6). That confirms the shared rules and skills work beyond your main tool.
 
 ### Adding developers
-1. `[agent, with your OK]` `python3 tools/haam/haam.py invite --github THEIR_USER --linear-email THEM@… --apply`: GitHub write access (not admin) and a Linear invitation.
+1. `[agent, with your OK]` `python3 tools/haam/haam.py invite --github THEIR_USER --linear-email THEM@… --apply`: GitHub write access (not admin), access to the GitHub Projects board, or a Linear invitation.
 2. Send them the repo link and test credentials (password manager or one-time link, never chat or email).
 3. They open their own agent in the repo and run `/haam-onboard` (Codex: `$haam-onboard`).
 4. Once there are two of you: the tool sets "1 approval required" when you add backup approvers (`config --backup-approvers`, then `github --apply`), and you can add `.github/CODEOWNERS` for protected areas.
@@ -294,7 +314,7 @@ Then try the edges once: ask the agent to commit a fake key on a throwaway branc
 At every level, agents stop at the human gates.
 
 ### Running costs
-Besides Linear, GitHub and each person's agent subscription, the only usage-based cost is the reviewer agents: two Claude calls per reviewed PR push, billed to `ANTHROPIC_API_KEY`. Keep the spend limit on and PRs small.
+Besides GitHub, Linear (if you use it) and each person's agent subscription, the only usage-based cost is the reviewer agents: two Claude calls per reviewed PR push, billed to `ANTHROPIC_API_KEY`. Keep the spend limit on and PRs small.
 
 ### Staying up to date
 New kit versions are published at https://github.com/jorgedpl/haam-kit/releases. `python3 tools/haam/haam.py doctor --check-updates` tells you when one is out. Run `/haam-update` (Codex: `$haam-update`) on a branch: files you never changed are updated, your customisations are kept, and where both changed the agent merges them. The CHANGELOG lists any migration steps.
@@ -310,6 +330,8 @@ Decide everything in **Decision** · re-prioritise **Backlog**, revisit **Parked
 |---|---|---|
 | Not sure what's left | – | `python3 tools/haam/haam.py doctor --role admin` |
 | Agent doesn't follow the rules | Tool not reading `AGENTS.md` | First-run check in `docs/setup/AGENTS-SETUP.md` |
+| `haam.py issue` says the login can't use Projects | gh login lacks the `project` scope | `gh auth refresh -s project` |
+| Board cards don't move when PRs open/merge | `HAAM_PROJECT_TOKEN` missing, or the PR doesn't say `Refs #123` | Add the secret (Phase 5); check the PR description |
 | Agent doesn't see Linear | MCP not connected or not signed in | Per-tool steps in `docs/setup/AGENTS-SETUP.md` |
 | Skills show twice in Cursor | Cursor reads both `.agents/skills` and `.claude/skills` | Turn off Claude-skills compatibility in Cursor's settings |
 | `.claude/skills` or `.grok/skills` missing after clone (Windows) | Git symlinks off | `git config core.symlinks true` and re-clone, or `haam.py agents --apply` (copies instead) |
@@ -331,7 +353,7 @@ Decide everything in **Decision** · re-prioritise **Backlog**, revisit **Parked
 ## Principles
 
 1. **Humans decide, agents execute.**
-2. **If it isn't in Git or Linear, it doesn't exist** for the next person or agent.
+2. **If it isn't in Git or the tracker, it doesn't exist** for the next person or agent.
 3. **Small slices:** one issue, one branch, one PR, reviewable in 15 minutes.
 4. **Gates are cheap to pass and expensive to skip.** Overrides are allowed, always recorded, always followed up.
 5. **Green means green.** Never weaken a test to pass a gate.

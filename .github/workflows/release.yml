@@ -1,11 +1,18 @@
-# Publishes a release when a version tag (vX.Y.Z) is pushed.
+# Publishes a release for a version tag (vX.Y.Z), whether the tag is pushed with git
+# or created by publishing a release in GitHub's web page.
 # Checks that the tag, VERSION, the tool and the CHANGELOG agree, runs the tests,
-# then creates the GitHub release with the changelog notes and a zip of the kit.
+# then attaches the changelog notes and a zip of the kit to the release.
 name: Release
 
 on:
   push:
     tags: ["v*.*.*"]
+  release:
+    types: [published]
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -53,5 +60,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "haam-kit-${GITHUB_REF_NAME}.zip" \
-            --title "HAAM kit ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # Release already published (e.g. from the web page): fill in notes and the zip.
+            gh release upload "$GITHUB_REF_NAME" "haam-kit-${GITHUB_REF_NAME}.zip" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "HAAM kit ${GITHUB_REF_NAME}" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" "haam-kit-${GITHUB_REF_NAME}.zip" \
+              --title "HAAM kit ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag
+          fi

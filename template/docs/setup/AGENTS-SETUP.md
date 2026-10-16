@@ -31,6 +31,19 @@ Linear signs you in with your own account (OAuth). Agents act as you.
 
 **Test:** ask your agent *"List the Ready issues in Linear team APP."*
 
+## Running several agents at once
+
+Every agent chat that changes files needs its own folder (a git worktree), or the chats overwrite each other's work. Start each agent chat with `/work` (Codex: `$work`): it checks where it is and sets up a worktree if needed. Your own chat stays in the main folder.
+
+| Tool | New agent chat |
+|---|---|
+| **Claude Code (VS Code)** | New chat tab: Cmd+Shift+Esc (Mac) / Ctrl+Shift+Esc (Windows/Linux), or Command Palette → "Claude Code: Open in New Tab". Type `/work`; Claude moves itself into a worktree. |
+| **Claude Code (terminal)** | `claude --worktree` (or `-w <name>`), then `/work`. |
+| **Claude desktop app** | Start a session with the **worktree** option, then `/work`. |
+| **Codex, Cursor, others** | Use the tool's own worktree or parallel-agent option if it has one, then `/work`. If not, type `/work` in the main folder: it creates a worktree with `haam.py worktree new` and tells you which folder to open in a new window. |
+
+Local files that aren't in Git (like `.env`) are copied into each new worktree from the list in `.worktreeinclude`. Tidy up finished worktrees with `python3 tools/haam/haam.py worktree clean` (plan), then `--apply`.
+
 ## Safe settings per tool
 
 The hard guard-rails live in GitHub and git, so they protect you **whatever the tool does**: no pushes to `main`, required checks, UAT label, deploy approval, the commit secret hook (`make hooks`) and the CI secret scan. Tool settings are a second layer that stops mistakes earlier. Recommended:
@@ -49,7 +62,7 @@ Never give any agent tool your production credentials or a GitHub token with adm
 
 Ask the agent, in the repo:
 1. *"What are the hard rules in this repository?"* It should list the rules from `AGENTS.md` §3. If not, tell it to read `AGENTS.md` first, and check the tool's settings for the instructions file name.
-2. *"Which skills do you have for this project?"* It should list idea, bug, assess, spec, next, build, uat… If not, see the table above.
+2. *"Which skills do you have for this project?"* It should list idea, bug, assess, spec, next, work, build, uat… If not, see the table above.
 3. *"List the Ready issues in Linear team APP."* This checks the Linear connection.
 
 ## Recording which tool did the work

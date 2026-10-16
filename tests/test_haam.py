@@ -494,6 +494,75 @@ class TestLinkedIssues(unittest.TestCase):
         self.assertEqual(f({"title": "Add x", "body": "", "headRefName": "33-add-x"}), [33])
         self.assertEqual(f({"title": "Bump #2 deps", "body": "see issue #4", "headRefName": "dependabot/x"}), [])
 
+class TestWorktrees(ToolTestCase):
+    def setUp(self):
+        super().setUp()
+        self.origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
+        git(self.proj, "remote", "set-url", "origin", str(self.origin))
+        self.install()
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "adopt HAAM")
+        git(self.proj, "push", "-q", "-u", "origin", "main")
+        (self.proj / ".env").write_text("APP_MODE=local\n")
+
+    def wt(self, *args, cwd=None, check=True):
+        return self.run_tool("worktree", *args, tool=self.installed_tool(), cwd=cwd, check=check)
+
+    def test_new_copies_local_files_and_status_knows_where_it_is(self):
+        res = json.loads(self.wt("new", "w1", "--json").stdout)
+        w1 = Path(res["path"])
+        self.assertEqual(w1, (self.proj / ".claude/worktrees/w1").resolve())
+        self.assertEqual(res["copied"], [".env"])
+        self.assertEqual((w1 / ".env").read_text(), "APP_MODE=local\n")
+        self.assertTrue((w1 / "AGENTS.md").exists())
+        self.assertNotIn(".claude/worktrees", git_status(self.proj))
+        self.assertTrue(json.loads(self.wt("status", "--json", cwd=w1).stdout)["in_worktree"])
+        self.assertFalse(json.loads(self.wt("status", "--json").stdout)["in_worktree"])
+        (w1 / ".env").unlink()
+        self.assertEqual(json.loads(self.wt("prep", "--json", cwd=w1).stdout)["copied"], [".env"])
+        self.assertEqual(json.loads(self.wt("prep", "--json", cwd=w1).stdout)["copied"], [])
+        self.assertNotEqual(self.wt("new", "w1", check=False).returncode, 0)
+
+    def test_tracked_files_are_never_copied(self):
+        (self.proj / ".worktreeinclude").write_text("README.md\n.env\n")
+        res = json.loads(self.wt("new", "w2", "--json").stdout)
+        self.assertEqual(res["copied"], [".env"])
+        self.assertTrue(any("README.md" in s for s in res["skipped"]))
+
+    def test_clean_removes_only_finished_worktrees(self):
+        done = Path(json.loads(self.wt("new", "done", "--json").stdout)["path"])
+        git(done, "switch", "-q", "-c", "5-fix")
+        (done / "fix.txt").write_text("fixed\n")
+        git(done, "add", "fix.txt")
+        git(done, "commit", "-qm", "#5: fix")
+        git(done, "push", "-q", "-u", "origin", "5-fix")
+        git(self.origin, "branch", "-D", "5-fix")                         # PR merged, GitHub deleted the branch
+        busy = Path(json.loads(self.wt("new", "busy", "--json").stdout)["path"])
+        (busy / "wip.txt").write_text("not saved\n")
+        fresh = Path(json.loads(self.wt("new", "fresh", "--json").stdout)["path"])
+        git(fresh, "switch", "-q", "-c", "6-start")                       # agent just started, nothing pushed
+        plan = json.loads(self.wt("clean", "--json").stdout)
+        items = {i["text"]: i["detail"] for s in plan["sections"] for i in s["items"]}
+        self.assertIn(f"remove: {done}", items)
+        self.assertIn(f"keep: {busy}", items)
+        self.assertIn(f"keep: {fresh}", items)
+        self.assertTrue(done.exists())                                      # plan only
+        self.wt("clean", "--apply")
+        self.assertFalse(done.exists())
+        self.assertTrue(busy.exists() and fresh.exists())
+
+    def test_doctor_reports_parallel_chat_setup(self):
+        out = json.loads(self.run_tool("doctor", "--json", tool=self.installed_tool()).stdout)
+        sec = next(s for s in out["sections"] if s["title"] == "Parallel chats")
+        status = {i["text"]: i["status"] for i in sec["items"]}
+        self.assertEqual(status[".worktreeinclude"], "ok")
+        self.assertEqual(status[".claude/worktrees/ is git-ignored"], "ok")
+
+
+def git_status(cwd):
+    return subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True).stdout
+
 
 if __name__ == "__main__":
     unittest.main()

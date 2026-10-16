@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SessionStart hook: gives every new Claude Code session a quick picture of
-# where it is, so it can link the current branch to a Linear issue.
+# where it is, so it can link the current branch to its tracker issue.
 # Output is added to the session's context. Keep it short and never fail.
 
 set +e
-cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null
+cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || true
 
 branch=$(git branch --show-current 2>/dev/null)
 # Linear branches look like app-123-title; GitHub Projects branches like 123-title
@@ -18,10 +18,15 @@ echo "- Branch: ${branch:-detached}"
 if [ -n "$issue" ] && [ "$branch" != "main" ]; then
   echo "- Linked issue (from branch name): $issue. Read it in the tracker before continuing work (docs/process/TRACKER.md)."
 fi
+if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then
+  echo "- Workspace: this chat's own worktree ($(pwd))."
+else
+  echo "- Workspace: the main folder. If other agent chats may be open, move to your own worktree before changing files (/work, AGENTS.md §7)."
+fi
 echo "- Uncommitted changes: ${changes:-0} file(s)"
 [ -n "$behind" ] && [ "$behind" != "0" ] && echo "- Local branch is $behind commit(s) behind origin/main (as of last fetch). Rebase before opening a PR."
 if [ "$branch" = "main" ]; then
-  echo "- You are on main. Do not commit here; create a branch from the Linear issue first."
+  echo "- You are on main. Do not commit here; create a branch from the issue first."
 fi
-echo "- Process: AGENTS.md, docs/process/LIFECYCLE.md. Use /next to pick up work."
+echo "- Process: AGENTS.md, docs/process/LIFECYCLE.md. Use /work (new agent chat) or /next to pick up work."
 exit 0

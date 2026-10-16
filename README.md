@@ -13,7 +13,8 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 - **A lifecycle with five human gates**: decide the idea, approve the spec, automated checks with independent AI review, human acceptance test, production approval. Every gate can be overridden in an emergency, and every override is recorded and followed up.
 - **Three work streams** agents pull from: bugs, ready features, and ideas to assess. The tracker (GitHub Projects or Linear) holds the backlog, priorities and status.
-- **13 shared skills** (`/idea`, `/bug`, `/assess`, `/decide`, `/spec`, `/next`, `/build`, `/uat`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`), plus `/haam-update`, in the open Agent Skills format.
+- **15 shared skills** (`/idea`, `/bug`, `/assess`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`), in the open Agent Skills format.
+- **Parallel agents without collisions**: open a new chat window, type `/work bugs`, and the agent gets its own copy of the project (a git worktree), picks the top bug and works it through to your test. Run as many as you like, on one computer or several.
 - **Code review where no one marks their own homework**: a secret scan before every commit and in CI, dependency audit, and two independent AI reviewers (spec/quality and security) that never saw the code being written. Humans review protected areas and can overrule.
 - **Gates enforced by GitHub**, not by trust: branch rules, required checks, a UAT label gate and deploy approvals, so they hold whatever agent or person is pushing.
 - **A setup tool** (`haam.py`, Python 3, no dependencies) that installs the kit into an existing repo without overwriting anything, configures GitHub and the tracker (GitHub Projects or Linear), gives agents one command set for the board, onboards developers, checks the setup and upgrades projects to new kit versions.
@@ -24,7 +25,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.1.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.2.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -59,12 +60,23 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `github-project [--apply]` | admin | GitHub Projects board: 12 statuses, Priority field, labels, repo link |
 | `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 7 labels |
 | `issue list\|create\|claim\|status\|…` | agents | Work the GitHub Projects board from any agent tool |
+| `worktree status\|new\|prep\|list\|clean` | agents, anyone | One worktree per agent chat; copies local files from `.worktreeinclude`; tidies finished ones |
 | `invite --github USER [--linear-email EMAIL] [--apply]` | admin | Invite a developer (GitHub write, not admin; board access or Linear team) |
 | `dev [--apply] [--run-checks]` | developer | Machine check, commit hook, `.env` from example, project checks |
 | `doctor [--role admin] [--check-updates]` | anyone | What's done, what's missing, and who must do it |
 | `version [--check]` | anyone | Tool, project and latest released kit versions |
 
 Every command shows a plan first and changes things only with `--apply`. Add `--json` for machine-readable output.
+
+## Running several agents at once
+
+Each agent chat gets its own folder, so chats never overwrite each other's work:
+
+1. Open a new chat window (Claude Code in VS Code: Cmd/Ctrl+Shift+Esc).
+2. Type `/work bugs` (or `/work features`, `/work ideas`, or just `/work`; Codex: `$work`).
+3. The agent moves into its own git worktree, copies local files like `.env`, claims the top item on the board, builds and tests it, opens the PR and hands you a test plan.
+
+Repeat for as many agents as you want, on any computer with the project cloned. The claim on the board stops two agents taking the same issue. Your own chat stays in the main folder for ideas, decisions, testing and releases.
 
 ## Choosing a tracker
 

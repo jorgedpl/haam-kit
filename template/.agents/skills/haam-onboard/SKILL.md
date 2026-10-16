@@ -47,6 +47,7 @@ Explain briefly, in your own words, from `AGENTS.md`, `docs/process/LIFECYCLE.md
 ## 7. First task
 1. Show the top 3 items from the **Agent queue** (status Ready, `agent-ready` or `stream:bug`, unassigned). Prefer something small.
 2. Offer to start it together with the build skill, explaining each step as it happens the first time.
+3. Explain how to run agents in parallel from now on: one new chat window per agent, each started with `/work` (Codex: `$work`), which gives it its own worktree. The chat in the main folder is theirs, for ideas, testing and reviews. On a second computer, the same: clone, `/haam-onboard` once, then `/work`.
 
 ## 8. Wrap up
 Run `python3 tools/haam/haam.py doctor` and finish with a checklist: ready ✔ / still to do ☐ (with who and how).

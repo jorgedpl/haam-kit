@@ -20,6 +20,9 @@ Admin (first-time adoption and upgrades):
 Agents, when the tracker is GitHub Projects:
     issue create|view|list|claim|status|priority|label|comment|close ...
 
+Parallel chats (one worktree per agent chat):
+    worktree status|new|prep|list|clean [--apply]
+
 Everyone:
     version   [--check]                           Kit version here, in the project, and the latest release
     doctor    [--role admin|developer] [--json]   Check what's done and what's missing
@@ -29,7 +32,8 @@ Safety rules built into the tool:
   * Without --apply nothing is changed: you see the plan first.
   * Secrets are never stored in the repo, printed, or passed through an agent's chat.
     Steps that need one are marked [YOU, in your terminal] for the human to run.
-  * Nothing is deleted. Conflicting files are left alone and reported.
+  * Nothing is deleted. Conflicting files are left alone and reported. The one exception,
+    `worktree clean --apply`, only removes finished worktrees with nothing unsaved in them.
 
 Requires: Python 3.8+, git. For github/invite: GitHub CLI (`gh`) logged in as a repo admin.
 
@@ -44,6 +48,7 @@ import json
 import os
 import re
 import shutil
+import time
 import signal
 import subprocess
 import sys
@@ -51,7 +56,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -1796,6 +1801,246 @@ def cmd_sync_pr(args):
         print(f"#{n}: {iss['status'] or '-'} → {target}")
 
 
+# ----------------------------------------------------------------------------- worktrees (parallel chats)
+
+WORKTREE_DIR = ".claude/worktrees"   # same place Claude Code uses, so both kinds are listed and cleaned together
+WORKTREE_INCLUDE = ".worktreeinclude"
+WORKTREE_IDLE_HOURS = 24
+
+
+def git_out(cwd, *a):
+    code, out, _ = run(["git", *a], cwd=cwd)
+    return out if code == 0 else ""
+
+
+def git_paths(cwd):
+    """(this checkout's top folder, the main checkout's top folder, True if this is a linked worktree)."""
+    top = Path(git_out(cwd, "rev-parse", "--show-toplevel") or cwd).resolve()
+    gd = git_out(top, "rev-parse", "--git-dir")
+    cd = git_out(top, "rev-parse", "--git-common-dir")
+    git_dir = (top / gd).resolve() if gd else top / ".git"
+    common = (top / cd).resolve() if cd else git_dir
+    main = common.parent if common.name == ".git" else top
+    return top, main, git_dir != common
+
+
+def default_base(root):
+    ref = git_out(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if ref:
+        return ref
+    if git_out(root, "rev-parse", "--verify", "--quiet", "origin/main"):
+        return "origin/main"
+    return "HEAD"
+
+
+def include_patterns(main):
+    f = main / WORKTREE_INCLUDE
+    if not f.exists():
+        return []
+    return [l.strip() for l in f.read_text().splitlines() if l.strip() and not l.strip().startswith("#")]
+
+
+def copy_includes(main, dest):
+    """Copy git-ignored local files listed in .worktreeinclude (e.g. .env) from the main folder into a
+    worktree. Never overwrites, never copies tracked files, never prints contents. Returns (copied, skipped)."""
+    copied, skipped = [], []
+    if main.resolve() == dest.resolve():
+        return copied, skipped
+    for pat in include_patterns(main):
+        pat = pat.lstrip("/")
+        for src in sorted(main.glob(pat)):
+            if not src.is_file() or WORKTREE_DIR in src.relative_to(main).as_posix():
+                continue
+            rel = src.relative_to(main).as_posix()
+            if run(["git", "check-ignore", "-q", rel], cwd=main)[0] != 0:
+                skipped.append(rel + " (tracked or not git-ignored)")
+                continue
+            target = dest / rel
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+            copied.append(rel)
+    return copied, skipped
+
+
+def list_worktrees(root):
+    _, main, _ = git_paths(root)
+    out, cur = [], {}
+    for line in git_out(main, "worktree", "list", "--porcelain").splitlines() + [""]:
+        if not line:
+            if cur:
+                out.append(cur)
+            cur = {}
+            continue
+        key, _, val = line.partition(" ")
+        if key == "worktree":
+            cur = {"path": val, "branch": "", "detached": False, "locked": False}
+        elif key == "branch":
+            cur["branch"] = val.replace("refs/heads/", "", 1)
+        elif key == "detached":
+            cur["detached"] = True
+        elif key == "locked":
+            cur["locked"] = True
+        elif key == "HEAD":
+            cur["head"] = val
+    for w in out:
+        p = Path(w["path"])
+        w["main"] = p.resolve() == main.resolve()
+        w["haam_area"] = (main / WORKTREE_DIR).resolve() in p.resolve().parents
+        w["exists"] = p.exists()
+    return out
+
+
+def worktree_finished(main, w, base):
+    """Decide whether a worktree can be removed without losing anything. Returns (ok, reason)."""
+    p = Path(w["path"])
+    if w["main"]:
+        return False, "main folder"
+    if not w["haam_area"]:
+        return False, f"outside {WORKTREE_DIR} (created by hand; remove it yourself)"
+    if w["locked"]:
+        return False, "locked (an agent is using it)"
+    if not w["exists"]:
+        return True, "folder already gone (prune)"
+    changes = git_out(p, "status", "--porcelain")
+    if changes:
+        return False, f"{len(changes.splitlines())} unsaved change(s)"
+    unpushed = git_out(p, "rev-list", "--count", "HEAD", "--not", "--remotes") or "0"
+    own = git_out(p, "rev-list", "--count", f"{base}..HEAD") or "0"
+    pushed_before = bool(w["branch"]) and bool(git_out(p, "config", "--get", f"branch.{w['branch']}.merge"))
+    if pushed_before:
+        code, out, _ = run(["git", "ls-remote", "--heads", "origin", w["branch"]], cwd=main)
+        if code != 0:
+            return False, "couldn't reach origin to check the branch"
+        if out:
+            return False, f"branch {w['branch']} still on origin (PR open?)"
+        if unpushed == "0":
+            return True, f"branch {w['branch']} is gone from origin (PR merged or closed)"
+        code, prs, _ = run(["gh", "pr", "list", "--head", w["branch"], "--state", "all",
+                            "--json", "state,headRefOid"], cwd=main)
+        try:
+            done = any(pr["state"] in ("MERGED", "CLOSED") and pr["headRefOid"] == w.get("head")
+                       for pr in json.loads(prs or "[]")) if code == 0 else False
+        except ValueError:
+            done = False
+        if done:
+            return True, f"PR for {w['branch']} is merged or closed"
+        return False, f"branch gone from origin but {unpushed} commit(s) aren't on GitHub; check before removing"
+    if unpushed != "0":
+        return False, f"{unpushed} commit(s) not pushed"
+    idx = Path(git_out(p, "rev-parse", "--absolute-git-dir") or p) / "index"
+    idle = (time.time() - (idx.stat().st_mtime if idx.exists() else 0)) / 3600
+    if own == "0" and idle >= WORKTREE_IDLE_HOURS:
+        return True, f"nothing of its own and unused for {int(idle)}h"
+    return False, "in use or recently created"
+
+
+def cmd_worktree(args):
+    root = find_repo_root(Path.cwd())
+    top, main, linked = git_paths(root)
+    act = args.action
+
+    if act == "status":
+        info = {"in_worktree": linked, "path": str(top), "main_folder": str(main),
+                "branch": git_out(top, "branch", "--show-current") or "(detached)",
+                "worktrees": len([w for w in list_worktrees(root) if not w["main"]]),
+                "worktreeinclude": (main / WORKTREE_INCLUDE).exists()}
+        if args.json:
+            print(json.dumps(info, indent=2))
+            return
+        if linked:
+            print(f"{OK} This chat has its own worktree: {top}")
+        else:
+            print(f"{WARN} This is the main folder ({top}).")
+            print("   Agent chats that change code should each get their own worktree: run /work,")
+            print("   or `python3 tools/haam/haam.py worktree new` and open the folder it prints.")
+        print(f"   Branch: {info['branch']} · other worktrees: {info['worktrees']}")
+        return
+
+    if act == "new":
+        name = args.name or f"agent-{os.urandom(2).hex()}"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", name):
+            sys.exit("Use letters, numbers, dots, dashes or underscores for the name.")
+        dest = main / WORKTREE_DIR / name
+        if dest.exists():
+            sys.exit(f"{dest} already exists. Open it, or pick another name.")
+        run(["git", "fetch", "--quiet", "origin"], cwd=main)
+        base = args.base or default_base(main)
+        code, _, err = run(["git", "worktree", "add", "--quiet", "--detach", str(dest), base], cwd=main)
+        if code != 0:
+            sys.exit(f"Couldn't create the worktree: {err}")
+        copied, skipped = copy_includes(main, dest)
+        res = {"path": str(dest), "base": base, "copied": copied, "skipped": skipped}
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return
+        print(f"{OK} New worktree: {dest}  (from {base})")
+        if copied:
+            print(f"{OK} Copied from the main folder: {', '.join(copied)}")
+        for s_ in skipped:
+            print(f"{WARN} Not copied: {s_}")
+        print("Next: open that folder in a new window, start your agent there and run /work"
+              " (Codex: $work). Dependencies: run `make setup` there once.")
+        return
+
+    if act == "prep":
+        copied, skipped = copy_includes(main, top)
+        if args.json:
+            print(json.dumps({"in_worktree": linked, "copied": copied, "skipped": skipped}, indent=2))
+            return
+        if not linked:
+            print(f"{INFO} This is the main folder; nothing to copy.")
+        elif not include_patterns(main):
+            print(f"{WARN} No {WORKTREE_INCLUDE} in the main folder, so no local files (like .env) were copied.")
+        else:
+            print(f"{OK} Local files copied: {', '.join(copied) if copied else 'none needed'}")
+        for s_ in skipped:
+            print(f"{WARN} Not copied: {s_}")
+        return
+
+    base = default_base(main)
+    trees = list_worktrees(root)
+    if act == "list":
+        if args.json:
+            print(json.dumps(trees, indent=2))
+            return
+        for w in trees:
+            label = "main folder" if w["main"] else (w["branch"] or "(detached)")
+            changes = git_out(Path(w["path"]), "status", "--porcelain") if w["exists"] else ""
+            extra = f" · {len(changes.splitlines())} unsaved change(s)" if changes else ""
+            extra += " · locked" if w["locked"] else ""
+            print(f"  {w['path']}  [{label}]{extra}")
+        return
+
+    if act == "clean":
+        run(["git", "fetch", "--quiet", "origin"], cwd=main)
+        rep = Report()
+        rep.section("Worktrees")
+        remove = []
+        for w in trees:
+            if w["main"]:
+                continue
+            ok, why = worktree_finished(main, w, base)
+            rep.add("ok" if ok else "info", f"{'remove' if ok else 'keep'}: {w['path']}", why)
+            if ok:
+                remove.append(w)
+        if not remove:
+            rep.add("ok", "Nothing to clean")
+        elif not args.apply:
+            rep.action(WHO_AGENT, f"Remove {len(remove)} finished worktree(s)",
+                       "python3 tools/haam/haam.py worktree clean --apply")
+        else:
+            for w in remove:
+                if Path(w["path"]).exists():
+                    code, _, err = run(["git", "worktree", "remove", w["path"]], cwd=main)
+                    rep.add("ok" if code == 0 else "warn", f"removed {w['path']}" if code == 0 else
+                            f"couldn't remove {w['path']}", err[:160])
+            run(["git", "worktree", "prune"], cwd=main)
+        rep.print(args.json)
+        return
+
+
 # ----------------------------------------------------------------------------- invite
 
 def cmd_invite(args):
@@ -2029,6 +2274,20 @@ def cmd_doctor(args):
     for rel in SKILL_LINKS:
         rep.add("ok" if (root / rel).exists() else "warn", rel)
 
+    rep.section("Parallel chats")
+    _, main_dir, linked = git_paths(root)
+    rep.add("info", "This chat has its own worktree" if linked else "This is the main folder",
+            "" if linked else "agent chats that change code: start them with /work")
+    rep.add("ok" if (main_dir / WORKTREE_INCLUDE).exists() else "warn", WORKTREE_INCLUDE,
+            "lists local files (like .env) to copy into each new worktree")
+    ignored = run(["git", "check-ignore", "-q", f"{WORKTREE_DIR}/x"], cwd=main_dir)[0] == 0
+    rep.add("ok" if ignored else "warn", f"{WORKTREE_DIR}/ is git-ignored")
+    if not ignored:
+        rep.action(WHO_AGENT, f"Add `{WORKTREE_DIR}/` to .gitignore")
+    others = [w for w in list_worktrees(root) if not w["main"]]
+    if others:
+        rep.add("info", f"{len(others)} other worktree(s)", "python3 tools/haam/haam.py worktree list")
+
     if admin and have("gh") and cfg.get("github_repo") and run(["gh", "auth", "status"])[0] == 0:
         repo = cfg["github_repo"]
         rep.section(f"GitHub ({repo})")
@@ -2162,6 +2421,13 @@ def main():
     p.add_argument("--pr", required=True, type=int)
     p.add_argument("--event", required=True, choices=["opened", "merged"])
     p.set_defaults(func=cmd_sync_pr)
+
+    p = common(sub.add_parser("worktree", help="one worktree per agent chat (parallel work on one machine)"))
+    p.add_argument("action", choices=["status", "new", "prep", "list", "clean"])
+    p.add_argument("name", nargs="?", help="new: worktree name (default: agent-xxxx)")
+    p.add_argument("--base", help="new: start from this ref (default: origin's default branch)")
+    p.add_argument("--apply", action="store_true", help="clean: actually remove finished worktrees")
+    p.set_defaults(func=cmd_worktree)
 
     p = common(sub.add_parser("invite", help="invite a developer"))
     p.add_argument("--github", required=True, help="their GitHub username")

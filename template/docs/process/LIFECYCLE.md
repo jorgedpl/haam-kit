@@ -154,8 +154,8 @@ Order inside the same priority: bugs before features, older before newer, smalle
 
 ## 7. Working in parallel (multiple humans, multiple agents)
 
-1. **Claiming is done in the tracker, not in chat.** Before building, an agent re-reads the issue. If it is already *In Progress* or assigned to someone else, it skips it. Otherwise it assigns it to the human running the session, sets *In Progress* and posts a comment: `🤖 Claimed by <name>'s Claude session · branch <branch>`.
-2. **One issue per session.** A session works on one issue at a time. To run several agents at once on one machine, use a separate git worktree per session (`git worktree add`, see `docs/ONBOARDING.md`) so they don't share a working directory.
+1. **Claiming is done in the tracker, not in chat.** Before building, an agent re-reads the issue. If it is already *In Progress* or assigned to someone else, it skips it. Otherwise it assigns it to the human running the session, sets *In Progress* and posts a comment: `🤖 Claimed by <name> via <tool> [on <machine>] · branch <branch>`.
+2. **One issue per session, one folder per chat.** A session works on one issue at a time. To run several agents at once on one machine, each chat gets its own git worktree so they don't share a working directory: start each agent chat with `/work` (see `docs/ONBOARDING.md`).
 3. **Branch names come from the issue** (`123-short-title` on GitHub, `app-123-short-title` on Linear), so the link to the issue is automatic.
 4. **Always rebase on fresh `main`** before opening or updating a PR.
 5. **No personal state in shared files.** Personal preferences go in git-ignored files (`CLAUDE.local.md`, `AGENTS.local.md`, `.claude/settings.local.json`…).

@@ -82,7 +82,14 @@ Commit (`Adopt the Human-Agent Agile Methodology (HAAM)`), ask before pushing, p
 
 **Existing backlog** (GitHub issues, Jira, a spreadsheet…): offer to bring it into the tracker, everything into Triage first.
 
-## Phase 8: Verify and hand over
+## Phase 8: Prepare for parallel chats
+So the human can open several agent chats (on one or more computers) and type `/work` in each:
+1. **Local files:** check which git-ignored files the app needs to run locally (`.env`, `.env.local`, local certificates, a local config file) and make sure `.worktreeinclude` lists them. List paths only; never open or read them.
+2. **Test discovery:** worktrees live inside the project, under `.claude/worktrees/`. If the project's test runner, linter, type checker, file watcher or bundler scans the whole folder, exclude `.claude/worktrees/` in its config so the main folder doesn't pick up the worktrees' copies.
+3. **Dry run:** `python3 tools/haam/haam.py worktree new setup-check`, then in that folder `make setup && make check`. Fix anything that only worked because of files in the main folder. Then remove it: `git worktree remove .claude/worktrees/setup-check`.
+4. Tell the human how to start an agent from now on: open a new chat window in their tool (Claude Code in VS Code: Cmd/Ctrl+Shift+Esc) and type `/work bugs` (or `features`, `ideas`, or nothing); Codex: `$work`. Their own chat in the main folder is for ideas, decisions, UAT and releases.
+
+## Phase 9: Verify and hand over
 1. `python3 tools/haam/haam.py doctor --role admin`. Fix what you can; list the rest.
 2. Remind the human to merge the adoption PR (once checks are green they add `uat-passed` themselves; they can use `ai-review-overruled` if the reviewers nitpick the kit itself).
 3. Propose the trial loop (Phase 5 of the adoption guide) with a small real ticket.

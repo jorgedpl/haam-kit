@@ -33,6 +33,7 @@ Skills live in `.agents/skills/<name>/SKILL.md` (the shared Agent Skills format)
 | Assess an idea + feasibility | `/assess <ID>` | agent |
 | Record a decision (G1) | `/decide <ID> approve\|park\|reject` | **human only** |
 | Write the spec | `/spec <ID>` | agent |
+| Start an agent in a new chat window | `/work [bugs\|features\|ideas]` | anyone |
 | Pick the next work item | `/next` | agent |
 | Build a ready issue | `/build <ID>` | agent |
 | Prepare UAT | `/uat <ID>` | agent |
@@ -116,7 +117,7 @@ On GitHub Projects, `haam.py issue claim <number> --tool "<tool>" --machine "<ma
 - Spikes use `spike/<branch-name>` and are never merged.
 - Fill in `.github/pull_request_template.md` completely, including **Built with** (your agent tool and model).
 - Rebase on `main` before opening or updating a PR. Keep PRs small (target < 400 changed lines).
-- To run several agents in parallel on one machine, each uses its own git worktree.
+- **One chat, one folder.** Chats that share a folder overwrite each other's files and branches. When more than one agent chat may be open on a machine, each agent chat that changes files works in its own git worktree under `.claude/worktrees/`; `/work` sets one up (`python3 tools/haam/haam.py worktree status|new|prep|clean`). The main folder belongs to the human's chat. When unsure, use a worktree.
 
 ## 8. Commands (the contract between agents, CI and humans)
 

@@ -10,6 +10,9 @@ argument-hint: "[bugs|features|ideas]  (optional: restrict to one stream)"
 
 Filter: $ARGUMENTS (empty = all streams)
 
+## 0. Your own workspace
+If the item you pick will change files (build, spec, assessment), you need your own worktree when other agent chats may be open on this machine (`AGENTS.md` §7). Run `python3 tools/haam/haam.py worktree status`. In the main folder: Claude Code, move into a new worktree first (as in `/work` step 1); other tools, ask the human whether other chats are running and, if so, follow `/work` step 1.
+
 ## 1. Build the queue (unassigned or assigned to the current user, not In Progress)
 
 GitHub Projects: `python3 tools/haam/haam.py issue list --status Ready --unassigned --open-only` (and `--status Backlog`, `--status Triage` for steps 4–5). Linear: list the team's issues.

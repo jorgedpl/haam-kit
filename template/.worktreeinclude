@@ -1,0 +1,6 @@
+# Local-only files to copy into each new worktree, so a new agent chat can run the app.
+# Only git-ignored files are copied (never anything committed), and existing files are never overwritten.
+# Used by Claude Code's worktrees and by `python3 tools/haam/haam.py worktree new|prep`.
+# One path or glob per line, relative to the project root.
+.env
+.env.local

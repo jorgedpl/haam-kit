@@ -6,9 +6,10 @@
 ## Setup (local)
 ```bash
 git fetch origin
-git switch <branch-name>
+git switch --detach origin/<branch-name>   # detached: works even while the agent's worktree has the branch
 make setup
 make dev
+# when done: git switch main
 ```
 - Open: http://localhost:XXXX
 - Test account(s): <synthetic accounts / how to create them>

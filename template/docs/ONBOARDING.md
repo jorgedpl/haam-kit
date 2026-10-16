@@ -65,7 +65,8 @@ Commands are written `/name` below; in Codex use `$name`.
 | You want to… | Do this |
 |---|---|
 | See what's waiting | Tracker view **Agent queue** (to build) or **Waiting on me** |
-| Start work | `/next`, or `/build APP-123` |
+| Start an agent in a new chat window | `/work` (or `/work bugs`) |
+| Start work in this chat | `/next`, or `/build APP-123` |
 | Log an idea | `/idea …` |
 | Report a bug | `/bug …` |
 | Turn an approved idea into a spec | `/spec APP-123` |
@@ -73,12 +74,13 @@ Commands are written `/name` below; in Codex use `$name`.
 | Check your setup | `python3 tools/haam/haam.py doctor` |
 
 ### Running agents in parallel
-Each agent session works on one issue. To run two at once on your machine, give each its own worktree:
-```bash
-git worktree add ../app-123 -b app-123-short-title origin/main
-cd ../app-123   # open your agent here
-```
-Two people never work on the same issue: the claim protocol (assign + In Progress + comment) prevents it. Always check the tracker before starting.
+Open one new chat window per agent and type `/work` (or `/work bugs`, `/work features`; Codex: `$work`). The agent gets its own copy of the project (a git worktree under `.claude/worktrees/`), copies the local files listed in `.worktreeinclude` (like `.env`), picks the top item and works it through to the hand-over. Keep your own chat in the main folder for ideas, decisions and testing.
+
+- **Claude Code in VS Code:** new chat tab with Cmd+Shift+Esc (Mac) or Ctrl+Shift+Esc (Windows/Linux). In a terminal: `claude --worktree`.
+- **Other tools:** if the tool has its own worktree or parallel-agent option, use it; otherwise `/work` creates the worktree and tells you which folder to open in a new window.
+- **Another computer:** same thing. The claim on the tracker stops two agents taking the same issue; name the machine when asked so the claim comment shows where it's running.
+- **Tidy up** finished worktrees now and then: `python3 tools/haam/haam.py worktree clean` (plan), then `--apply`.
+- **Testing an agent's branch:** the UAT plan uses `git switch --detach origin/<branch>`, which works while the agent's worktree still has the branch.
 
 ### Running agents semi-autonomously
 - **Attended:** type `/next`, review its choice, let it run. Your tool should ask before it pushes or opens PRs (see safe settings in `docs/setup/AGENTS-SETUP.md`).

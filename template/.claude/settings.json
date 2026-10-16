@@ -26,6 +26,10 @@
       "Bash(bash scripts/scan-secrets.sh:*)",
       "Bash(python3 tools/haam/haam.py issue:*)",
       "Bash(python3 tools/haam/haam.py doctor:*)",
+      "Bash(python3 tools/haam/haam.py worktree status:*)",
+      "Bash(python3 tools/haam/haam.py worktree new:*)",
+      "Bash(python3 tools/haam/haam.py worktree prep:*)",
+      "Bash(python3 tools/haam/haam.py worktree list:*)",
       "Bash(python3 tools/haam/haam.py version:*)"
     ],
     "ask": [

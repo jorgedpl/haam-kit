@@ -6,6 +6,24 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-16
+
+### Added
+- **`/work` skill**: the one command to type in a new agent chat window. It gives the chat its own git worktree, copies local files like `.env`, then runs `/next` in just-pick mode and works the item through to the hand-over. `/work bugs`, `/work features` and `/work ideas` restrict it to one stream.
+- **`haam.py worktree status|new|prep|list|clean`**: one worktree per agent chat under `.claude/worktrees/` (the same place Claude Code uses). `new` and `prep` copy the git-ignored files listed in `.worktreeinclude`, never tracked files, never overwriting. `clean` removes only worktrees whose PR is merged or closed (or that were never used) and that have nothing unsaved; it shows the plan first.
+- `.worktreeinclude` (lists `.env` and `.env.local` to start with).
+- `/haam-setup` Phase 8, "Prepare for parallel chats": list the local files, keep test runners out of `.claude/worktrees/`, try a fresh worktree.
+- `doctor` has a "Parallel chats" section; the Claude Code session hook says whether the chat is in its own worktree.
+
+### Changed
+- `AGENTS.md` §7: one chat, one folder. Agent chats that change files work in their own worktree whenever other chats may be open; the main folder is the human's.
+- `/build` branches from `origin/main` (works inside a worktree); `/next` checks the workspace first.
+- UAT plans check the branch out detached (`git switch --detach origin/<branch>`), so the human can test while the agent's worktree still has it.
+- Onboarding, agent setup, lifecycle and adoption docs explain how to open agent chats in each tool.
+
+### Migration
+- `haam.py update` brings everything in. Then, once: check `.worktreeinclude` lists the local files your app needs, and exclude `.claude/worktrees/` from any tool that scans the whole project folder (test runner, linter, file watcher). `/haam-setup` Phase 8 walks you through it.
+
 ## [1.1.0] - 2026-10-16
 
 ### Added
@@ -40,6 +58,7 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/jorgedpl/haam-kit/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jorgedpl/haam-kit/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jorgedpl/haam-kit/releases/tag/v1.0.0

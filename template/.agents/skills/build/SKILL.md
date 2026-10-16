@@ -20,11 +20,13 @@ Target: $ARGUMENTS
 Re-fetch the issue → if claimed by someone else, stop → assign to current user → status `In Progress` → comment `🤖 Claimed by <user> via <agent tool> [on <machine>] · branch <branch>`.
 On GitHub Projects one command does it all and refuses if someone got there first: `python3 tools/haam/haam.py issue claim <number> --tool "<your tool>" --machine "<this computer>"` (bugs not yet in Ready: only with the human's OK, add `--force`).
 
-## 2. Branch
+## 2. Workspace and branch
+If other agent chats may be open on this machine, work in your own worktree (`AGENTS.md` §7; `/work` sets one up). Then branch from the latest `main` (this works in the main folder and in a worktree):
 ```bash
-git fetch origin && git switch main && git pull --ff-only
-git switch -c <branch name for this issue: 123-short-title (GitHub) or Linear's branch name>
+git fetch origin
+git switch -c <branch name for this issue: 123-short-title (GitHub) or Linear's branch name> origin/main
 ```
+Reworking an issue that already has a branch (review or UAT feedback): `git switch <branch> && git pull`. If git says the branch is checked out in another worktree, continue in that worktree's folder, or ask the human.
 
 ## 3. Plan
 Read the spec and the code it points at. Post a short plan as a comment on the issue (≤ 8 bullets: approach, files, tests). If the spec turns out wrong or ambiguous, comment the question, tell the user, and stop.

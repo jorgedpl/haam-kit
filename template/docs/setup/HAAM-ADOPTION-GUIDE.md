@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.1.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.2.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 
@@ -43,10 +43,11 @@ haam.config.json              Project settings for the setup tool (created by `c
 haam.lock.json                Installed kit version and file fingerprints (used by `update`)
 CHANGELOG.md                  Release notes, maintained by /release
 Makefile                      Command contract: setup, hooks, dev, test, check, audit, secrets, smoke, deploy
-tools/haam/haam.py            Setup tool: install, config, agents, github, linear, invite, dev, doctor
+tools/haam/haam.py            Setup tool: install, config, agents, github, github-project, linear, issue, worktree, invite, dev, doctor
 scripts/scan-secrets.sh       Secret scan (gitleaks) shared by all commit hooks
 .githooks/pre-commit          Blocks commits containing secrets (any human, any agent using git)
 .agents/skills/               One skill per stage, shared by all agent tools
+.worktreeinclude              Local files (like .env) to copy into each agent's worktree
 .claude/                      Claude Code: settings (guard-rails), hooks, skills link
 .cursor/mcp.json              Cursor: Linear connection (Linear projects)
 .grok/skills                  Grok Build: skills link
@@ -97,6 +98,7 @@ Written `/name` here (Claude Code, Cursor, Grok). In Codex use `$name`. Any othe
 | `/assess APP-12` | Evaluate value, effort, risk, feasibility | Agent |
 | `/decide APP-12 approve` | Gate G1 | Human only |
 | `/spec APP-12` | Write a build-ready spec | Agent |
+| `/work bugs` | Start an agent in a new chat window: own worktree, then `/next` | Anyone |
 | `/next` | Pick the next item from bugs, features and ideas | Agent |
 | `/build APP-12` | Implement with unit tests, open a PR | Agent |
 | `/uat APP-12` | Write your local test plan | Agent |
@@ -203,7 +205,9 @@ Delete `.haam/incoming/` when done.
 
 7. **Secrets hygiene** `[agent]`: `make hooks`, then scan history once: `gitleaks git --redact -v .` Anything real must be **revoked and rotated** with the provider: it's already exposed to anyone with repo access. You approve any false-positive fingerprints added to `.gitleaksignore`.
 
-8. **Check:** `python3 tools/haam/haam.py doctor` shows what's left.
+8. **Parallel chats** `[agent]`: list the local-only files the app needs (like `.env`) in `.worktreeinclude`, exclude `.claude/worktrees/` from any tool that scans the whole folder (test runner, linter, watcher), and try a fresh worktree: `python3 tools/haam/haam.py worktree new setup-check`, then `make setup && make check` in it, then `git worktree remove .claude/worktrees/setup-check`. From then on, every new agent chat starts with `/work`.
+
+9. **Check:** `python3 tools/haam/haam.py doctor` shows what's left.
 
 ---
 
@@ -308,7 +312,7 @@ Then try the edges once: ask the agent to commit a fake key on a throwaway branc
 | Level | How | When |
 |---|---|---|
 | **1. Supervised** | You type `/next` or `/build`, approve each push and PR | First 2–3 weeks |
-| **2. Batched** | 2–3 sessions in separate worktrees (any mix of tools), each runs `/next`; you review PRs in a batch | Once specs are reliably good |
+| **2. Batched** | 2–3 chat windows (any mix of tools and computers), each started with `/work`, which gives it its own worktree; you review PRs in a batch | Once specs are reliably good |
 | **3. Scheduled** | A scheduled task runs an agent headless with `/next` and stops at UAT | Once you trust the gates |
 
 At every level, agents stop at the human gates.
@@ -337,6 +341,9 @@ Decide everything in **Decision** · re-prioritise **Backlog**, revisit **Parked
 | `.claude/skills` or `.grok/skills` missing after clone (Windows) | Git symlinks off | `git config core.symlinks true` and re-clone, or `haam.py agents --apply` (copies instead) |
 | `haam.py github` says rulesets/approvals unavailable | Private repo on a free plan | Upgrade, or protect manually and rely on the checks |
 | `haam.py linear` errors on a step | API change or permissions | Finish that step by hand with `docs/setup/LINEAR-SETUP.md` |
+| Two chats changed the same files or branch | They shared one folder | Start every agent chat with `/work` (own worktree) |
+| Tests or linter find duplicate files under `.claude/worktrees/` | The tool scans the whole folder | Exclude `.claude/worktrees/` in that tool's config |
+| A worktree can't run the app | Local files missing | Add them to `.worktreeinclude`, then `haam.py worktree prep` in the worktree |
 | `/build` refuses to start | Issue not in Ready, or missing `agent-ready` | `/spec` and approve it, or move the issue to Ready yourself |
 | Linear statuses don't move on PR events | GitHub integration or automations not set | Team settings → Workflow → PR automations; PR title must start with the issue ID |
 | `release-gate` stays red after `uat-passed` | Workflow didn't re-run | Remove and re-add the label |

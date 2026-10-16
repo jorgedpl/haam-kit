@@ -2,8 +2,8 @@
 # HAAM kit bootstrap: fetch a released version of the kit and run its setup tool.
 #
 # Usage (from your project's root folder):
-#   bash install.sh install [--version v1.1.0] [tool options...]
-#   bash install.sh update  [--version v1.1.0] [tool options...]
+#   bash install.sh install [--version v1.2.0] [tool options...]
+#   bash install.sh update  [--version v1.2.0] [tool options...]
 #
 # Without --version, the latest release is used. The kit is downloaded from
 # https://github.com/jorgedpl/haam-kit to a temporary folder; nothing outside

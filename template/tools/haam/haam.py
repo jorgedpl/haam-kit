@@ -24,6 +24,11 @@ Testing and shipping (inside /test, after the human's verdict):
     checkout-pr ISSUE | --back              Put a change on this machine to test it
     ship ISSUE --human [--merged-only]      Merge, approve the production deploy, wait, close (exit 2: run again)
 
+CI cost:
+    ci-usage [--days 7]                     Where the Actions minutes went (by workflow, job, trigger, day)
+    ci-settings --runner X --review Y       Run CI on your own runner; run the AI reviews locally
+    review ISSUE                            Local AI reviews in fresh sessions, posted as the PR's statuses
+
 Parallel chats (one worktree per agent chat):
     worktree status|new|prep|list|clean [--apply]
 
@@ -60,7 +65,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -90,6 +95,7 @@ DEFAULT_CONFIG = {
     "deploy": "github",          # github: deploy.yml runs on merge; manual: the owner deploys by hand
     "max_open_prs": 5,           # agents hold new work when this many PRs are open (CI minutes and your review time)
     "max_in_uat": 3,             # ...or when this many changes are waiting for the owner to test
+    "review": "github",          # github: AI reviews run in Actions; local: `haam.py review` on the owner's computer
     "_applied": {"team_key": PLACEHOLDER_KEY, "product_name": ""},
 }
 
@@ -2450,6 +2456,241 @@ def cmd_capacity(args):
         print(f"{OK} Room for new work: {open_prs}/{max_prs} open PRs" + (f", {in_uat}/{max_uat} in UAT" if in_uat is not None else ""))
 
 
+# ----------------------------------------------------------------------------- CI cost: usage, settings, local review
+
+RUNNER_MULTIPLIER = {"linux": 1, "windows": 2, "macos": 10}   # how GitHub counts minutes of hosted runners
+
+
+def iso_time(s):
+    from datetime import datetime
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def cmd_ci_usage(args):
+    """Where the GitHub Actions minutes went over the last N days, by workflow, job, event and day."""
+    import math
+    from collections import defaultdict
+    from datetime import datetime, timedelta, timezone
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    repo = args.repo or cfg.get("github_repo")
+    if not repo:
+        sys.exit("Set github_repo first: python3 tools/haam/haam.py config --github-repo owner/name")
+    since = (datetime.now(timezone.utc) - timedelta(days=args.days)).date().isoformat()
+    runs, page = [], 1
+    while len(runs) < args.max_runs:
+        code, out, err = run(["gh", "api", f"repos/{repo}/actions/runs?created=%3E%3D{since}&per_page=100&page={page}"])
+        if code != 0:
+            sys.exit(f"Couldn't list workflow runs: {(err or out)[:200]}")
+        batch = json.loads(out or "{}").get("workflow_runs") or []
+        runs += batch
+        if len(batch) < 100:
+            break
+        page += 1
+    runs = runs[:args.max_runs]
+    by_wf, by_job, by_event, by_day = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
+    own_runner_min, total, prs = 0, 0, set()
+    for r in runs:
+        code, out, _ = run(["gh", "api", f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100"])
+        jobs = (json.loads(out or "{}").get("jobs") or []) if code == 0 else []
+        for j in jobs:
+            if not j.get("started_at") or not j.get("completed_at") or j.get("conclusion") == "skipped":
+                continue
+            secs = (iso_time(j["completed_at"]) - iso_time(j["started_at"])).total_seconds()
+            if secs <= 0:
+                continue
+            labels = " ".join(j.get("labels") or []).lower()
+            mins = math.ceil(secs / 60)                          # GitHub rounds each job up to the minute
+            if "self-hosted" in labels:
+                own_runner_min += mins
+                continue
+            mins *= RUNNER_MULTIPLIER["macos" if "mac" in labels else "windows" if "windows" in labels else "linux"]
+            total += mins
+            by_wf[r.get("name") or "?"] += mins
+            by_job[f"{r.get('name') or '?'} / {j.get('name') or '?'}"] += mins
+            by_event[r.get("event") or "?"] += mins
+            by_day[(r.get("created_at") or "")[:10]] += mins
+        for p in r.get("pull_requests") or []:
+            prs.add(p.get("number"))
+    res = {"repo": repo, "days": args.days, "runs": len(runs), "billable_minutes": total,
+           "own_runner_minutes": own_runner_min, "pull_requests": len(prs),
+           "minutes_per_pr": round(total / len(prs), 1) if prs else None,
+           "by_workflow": dict(sorted(by_wf.items(), key=lambda x: -x[1])),
+           "by_job": dict(sorted(by_job.items(), key=lambda x: -x[1])[:15]),
+           "by_event": dict(sorted(by_event.items(), key=lambda x: -x[1])), "by_day": dict(sorted(by_day.items()))}
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"{c('1', f'GitHub Actions minutes for {repo}, last {args.days} day(s)')}  ({len(runs)} runs)")
+    print(f"  Billable minutes (estimate): {total}" + (f"   ·  on your own runner: {own_runner_min} (not billed as hosted minutes)" if own_runner_min else ""))
+    if prs:
+        print(f"  Pull requests with runs: {len(prs)}  ·  about {res['minutes_per_pr']} minutes each")
+    for title, d in (("By workflow", res["by_workflow"]), ("Biggest jobs", res["by_job"]), ("By trigger", res["by_event"]),
+                     ("By day", res["by_day"])):
+        if d:
+            print(f"\n{c('1', title)}")
+            for k, v in d.items():
+                print(f"  {v:>6}  {k}")
+    print(c("2", "\nEstimate from job durations (rounded up per job; macOS counts 10x, Windows 2x). GitHub's billing page is the exact figure."))
+
+
+def cmd_ci_settings(args):
+    """Where CI runs and where the AI reviews run, set as repository variables the workflows read."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    rep = Report()
+    rep.section("CI settings")
+    if not gh_ready(rep, cfg):
+        rep.print(args.json)
+        return
+    repo = cfg["github_repo"]
+    code, out, _ = run(["gh", "variable", "list", "-R", repo, "--json", "name,value"])
+    current = {v["name"]: v["value"] for v in json.loads(out or "[]")} if code == 0 else {}
+    code, info, _ = gh_api("GET", f"repos/{repo}")
+    private = bool(info.get("private")) if isinstance(info, dict) else True
+    rep.add("info", f"Runner: {current.get('HAAM_RUNNER') or 'GitHub-hosted (ubuntu-24.04)'}")
+    rep.add("info", f"AI reviews: {current.get('HAAM_REVIEW') or 'github'}")
+    changes = []
+    if args.runner is not None:
+        want = "" if args.runner in ("github", "") else args.runner
+        if want and not private:
+            rep.add("fail", "Not on a public repository", "anyone's pull request could run code on your machine")
+            want = None
+        if want is not None and want != current.get("HAAM_RUNNER", ""):
+            changes.append(("HAAM_RUNNER", want))
+        if want:
+            rep.add("warn", f"Jobs will run on runners labelled '{want}'",
+                    "the machine must be on and registered (Settings → Actions → Runners → New self-hosted runner), "
+                    "with git, make, Python 3, curl and gitleaks installed, and your project's own tools")
+    if args.review is not None:
+        if args.review not in ("github", "local"):
+            sys.exit("--review must be github or local")
+        if args.review != (current.get("HAAM_REVIEW") or "github"):
+            changes.append(("HAAM_REVIEW", "" if args.review == "github" else "local"))
+        cfg["review"] = args.review
+        if args.review == "local":
+            rep.add("warn", "AI reviews will run on your computer (haam.py review), not on GitHub's runners",
+                    "uses your Claude plan instead of Actions minutes. Trade-off: GitHub no longer guarantees the "
+                    "result, since anything with your login could post it. PRs labelled human-review are still "
+                    "reviewed on GitHub.")
+    for name, value in changes:
+        if not args.apply:
+            rep.add("warn", f"Will set {name} = {value or '(default)'}")
+            continue
+        cmd = (["gh", "variable", "set", name, "--body", value, "-R", repo] if value
+               else ["gh", "variable", "delete", name, "-R", repo])
+        c2, _, e2 = run(cmd)
+        rep.add("ok" if c2 == 0 or not value else "fail", f"{name} = {value or '(default)'}", (e2 or "")[:120] if c2 else "")
+    if args.apply and args.review is not None:
+        save_config(root, cfg)
+    if changes and not args.apply:
+        rep.add("info", "Plan only. Re-run with --apply")
+    rep.print(args.json)
+
+
+REVIEW_TOOLS = ("Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),"
+                "Bash(git show:*),Bash(git log:*),Bash(git diff:*)")
+
+
+def review_prompts(repo, num, sha):
+    code = (f"You are the independent code reviewer for pull request #{num} in {repo}, at commit {sha}. You did not "
+            "write this code. Follow .github/review/REVIEWER.md exactly, with two differences: read files at the PR's "
+            f"commit with `git show {sha}:<path>` (the working folder may be on another branch), and post your review "
+            f"as one PR comment with `gh pr comment {num}`. Don't change any files. Your reply's last line must be "
+            "exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`.")
+    security = (f"You are an independent security reviewer for pull request #{num} in {repo}, at commit {sha}. You did "
+                f"not write this code. Read the diff (`gh pr diff {num}`) and the files it touches (`git show {sha}:<path>`). "
+                "Look for real, exploitable problems: secrets or credentials, injection, missing authorisation, unsafe "
+                "handling of personal data, insecure defaults, dangerous dependencies; also section D of "
+                ".github/review/REVIEWER.md. Report only findings you're confident about. If there are any, post them "
+                f"as one PR comment with `gh pr comment {num}`. Don't change any files. Your reply's last line must be "
+                "exactly `SECURITY_FINDINGS: <number>`.")
+    return code, security
+
+
+def run_reviewer(cfg, prompt, cwd, timeout_min):
+    template = cfg.get("review_command") or ["claude", "-p", "{prompt}", "--allowedTools", REVIEW_TOOLS]
+    cmd = [prompt if part == "{prompt}" else part for part in template]
+    if not shutil.which(cmd[0]):
+        raise RuntimeError(f"'{cmd[0]}' isn't installed. Install Claude Code, or set \"review_command\" in "
+                           "haam.config.json for your tool (with {prompt} where the instructions go).")
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout_min * 60,
+                           stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"The reviewer didn't finish within {timeout_min} minutes")
+    return p.stdout or ""
+
+
+def cmd_review(args):
+    """Run the two independent reviews on this machine, in fresh agent sessions, and post them as the PR's
+    ai-review and security-review statuses. For projects that chose `ci-settings --review local`."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    repo = cfg["github_repo"]
+    num = args.pr
+    if not num:
+        if not args.issue:
+            sys.exit("Give the issue (review 12) or the PR (--pr 34)")
+        try:
+            pr = find_pr(cfg, issue_ref(cfg, args.issue), ("open",))
+        except RuntimeError as e:
+            sys.exit(str(e))
+        if not pr:
+            sys.exit(f"No open pull request for {args.issue}")
+        num = pr["number"]
+    code, out, err = run(["gh", "pr", "view", str(num), "-R", repo, "--json", "headRefOid,labels,isDraft,url"])
+    if code != 0:
+        sys.exit(f"Couldn't read PR #{num}: {err}")
+    pr = json.loads(out)
+    labels = [l["name"] for l in pr.get("labels") or []]
+    if "human-review" in labels:
+        sys.exit(f"PR #{num} touches a protected area (label human-review): its AI reviews run on GitHub, not here.")
+    if pr.get("isDraft"):
+        sys.exit(f"PR #{num} is still a draft. Mark it ready first (gh pr ready {num}).")
+    sha = pr["headRefOid"]
+    run(["git", "fetch", "--quiet", "origin", f"+refs/pull/{num}/head:refs/remotes/origin/pr/{num}"], cwd=root)
+    who = gh_login() or "the owner"
+    machine = os.uname().nodename if hasattr(os, "uname") else "this computer"
+    code_prompt, sec_prompt = review_prompts(repo, num, sha)
+    results = {}
+
+    def post(context, state, desc):
+        c2, _, e2 = gh_api("POST", f"repos/{repo}/statuses/{sha}", {"state": state, "context": context,
+                                                                   "description": desc[:140]})
+        if c2 != 0:
+            raise RuntimeError(f"Couldn't post the {context} status: {str(e2)[:160]}")
+
+    try:
+        for context, prompt in (("ai-review", code_prompt), ("security-review", sec_prompt)):
+            if args.only and args.only != context:
+                continue
+            post(context, "pending", f"Local review running ({who} on {machine})")
+            text = run_reviewer(cfg, prompt, root, args.timeout)
+            tail = [l.strip().strip("`") for l in text.strip().splitlines()[-5:]]
+            if context == "ai-review":
+                verdict = next((l.split(":", 1)[1].strip() for l in reversed(tail) if l.startswith("VERDICT:")), "")
+                state = {"APPROVE": "success", "CHANGES_REQUESTED": "failure"}.get(verdict, "error")
+                desc = {"success": "Local AI review approved", "failure": "Changes requested: see PR comment"}.get(
+                    state, "Local review didn't finish: run it again")
+            else:
+                m = next((l for l in reversed(tail) if l.startswith("SECURITY_FINDINGS:")), "")
+                n = m.split(":", 1)[1].strip() if m else ""
+                state = "success" if n == "0" else "failure" if n.isdigit() else "error"
+                desc = {"success": "No security findings (local review)",
+                        "failure": f"{n} security finding(s): see PR comments"}.get(state, "Local security review didn't finish")
+            post(context, state, f"{desc} · {who} on {machine}")
+            results[context] = state
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if args.json:
+        print(json.dumps({"pr": num, "commit": sha, "results": results}, indent=2))
+        return
+    for k, v in results.items():
+        print(f"{OK if v == 'success' else BAD} {k}: {v}")
+    if any(v != "success" for v in results.values()):
+        print("Fix the findings (see the PR comments), push, and run the review again.")
+
 # ----------------------------------------------------------------------------- worktrees (parallel chats)
 
 WORKTREE_DIR = ".claude/worktrees"   # same place Claude Code uses, so both kinds are listed and cleaned together
@@ -3109,6 +3350,25 @@ def main():
 
     p = common(sub.add_parser("capacity", help="should agents start new work? open PRs and UAT queue vs limits"))
     p.set_defaults(func=cmd_capacity)
+
+    p = common(sub.add_parser("ci-usage", help="where the GitHub Actions minutes went"))
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--max-runs", type=int, default=500)
+    p.add_argument("--repo", help="owner/name (default: github_repo from haam.config.json)")
+    p.set_defaults(func=cmd_ci_usage)
+
+    p = common(sub.add_parser("ci-settings", help="where CI and the AI reviews run (repository variables)"))
+    p.add_argument("--runner", help="github (default) or a self-hosted runner label, e.g. self-hosted")
+    p.add_argument("--review", help="github (default) or local (haam.py review on this computer)")
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_ci_settings)
+
+    p = common(sub.add_parser("review", help="run the AI reviews locally in fresh sessions and post the statuses"))
+    p.add_argument("issue", nargs="?", help="issue number (#12) or Linear ID")
+    p.add_argument("--pr", type=int, help="the PR number instead of the issue")
+    p.add_argument("--only", choices=["ai-review", "security-review"])
+    p.add_argument("--timeout", type=float, default=15, help="minutes per review")
+    p.set_defaults(func=cmd_review)
 
     p = common(sub.add_parser("worktree", help="one worktree per agent chat (parallel work on one machine)"))
     p.add_argument("action", choices=["status", "new", "prep", "list", "clean"])

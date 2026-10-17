@@ -84,7 +84,7 @@ Changes touching any of these get the `human-review` label and need a human code
 
 You never review your own work, and you never decide that a review is wrong on your own.
 - Before opening a PR: `make check`, then do a security self-review of your diff and fix what it finds (Claude Code: `/security-review`; other tools: review `git diff origin/main...` against section D of `.github/review/REVIEWER.md`).
-- After opening: `secrets`, `dependencies`, `ai-review` and `security-review` run automatically. The reviewer agent posts a comment with **Blocking / Should fix / Nits**.
+- When the PR is marked ready: `secrets`, `dependencies`, `ai-review` and `security-review` run (on GitHub, or `ai-review`/`security-review` via `haam.py review` on the owner's computer when the project chose local reviews). The reviewer agent posts a comment with **Blocking / Should fix / Nits**.
 - Fix every Blocking item and push. Should-fix items: fix if small and in scope, otherwise log a `/bug`. Ignore nits unless trivial.
 - If you disagree with a finding, reply on the PR with your reasoning and ask the human. Never push changes just to game the reviewer.
 - After **two** failing review rounds, stop and hand over to the human (issue comment + chat).
@@ -122,7 +122,7 @@ On GitHub Projects, `haam.py issue claim <number> --tool "<tool>" --machine "<ma
 
 - The assessment and spec are committed on the issue's own branch, without a PR, and ship with the code in one PR (epics and split specs are the exception: they get a docs PR). Fewer PRs means fewer CI runs.
 - Spikes use `spike/<branch-name>` and are never merged.
-- **Keep CI cost down:** before starting new work, `/next` checks `haam.py capacity` (open PRs and the UAT queue against the limits in `haam.config.json`).
+- **Keep CI cost down:** open PRs as **drafts** (CI and reviews skip them), make the ready version complete (UAT plan and release note included), mark it ready once (`gh pr ready`), and group each round of fixes into one push. Before starting new work, `/next` checks `haam.py capacity`. If `haam.config.json` says `"review": "local"`, run `haam.py review <ID>` after marking ready (a fresh session reviews it; you don't review your own work).
 - Fill in `.github/pull_request_template.md` completely, including **Built with** (your agent tool and model).
 - Rebase on `main` before opening or updating a PR. Keep PRs small (target < 400 changed lines).
 - **One chat, one folder.** Chats that share a folder overwrite each other's files and branches. When more than one agent chat may be open on a machine, each agent chat that changes files works in its own git worktree under `.claude/worktrees/`; `/work` sets one up (`python3 tools/haam/haam.py worktree status|new|prep|clean`). The main folder belongs to the human's chat. When unsure, use a worktree.

@@ -243,6 +243,19 @@ if a[:2] == ["pr", "merge"]:
     save(); sys.exit(0)
 if a[:2] == ["run", "list"]:
     out([r for r in st.get("runs", []) if r["headSha"] == opt(a, "--commit")])
+if a[:2] == ["variable", "list"]:
+    out([{"name": k, "value": v} for k, v in st.get("variables", {}).items()])
+if a[:2] == ["variable", "set"]:
+    st.setdefault("variables", {})[a[2]] = opt(a, "--body"); save(); sys.exit(0)
+if a[:2] == ["variable", "delete"]:
+    st.setdefault("variables", {}).pop(a[2], None); save(); sys.exit(0)
+if a and a[0] == "api" and len(a) > 1 and "/actions/runs?" in a[1]:
+    out({"workflow_runs": st.get("runs_api", [])})
+if a and a[0] == "api" and len(a) > 1 and a[1].split("?")[0].endswith("/jobs"):
+    rid = a[1].split("/actions/runs/")[1].split("/")[0]
+    out({"jobs": st.get("jobs_api", {}).get(rid, [])})
+if a and a[0] == "api" and len(a) > 3 and "/statuses/" in a[3]:
+    st.setdefault("statuses", []).append(json.loads(stdin)); save(); out({})
 if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/pending_deployments"):
     if a[2] == "GET":
         out([{"environment": {"id": 1, "name": "production"}}])
@@ -322,7 +335,7 @@ if a[:2] == ["api", "graphql"]:
         out({"data": {"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}})
     out({"errors": [{"message": "fake gh: unhandled query"}]})
 if a and a[0] == "api":
-    out({"permissions": {"admin": True}, "private": False})
+    out({"permissions": {"admin": True}, "private": bool(os.environ.get("FAKE_GH_PRIVATE"))})
 sys.exit(0)
 '''
 

@@ -24,7 +24,9 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: ubuntu-24.04
+    # A draft PR moves its issue when it's marked ready, not when it's opened.
+    if: github.event.action != 'opened' || !github.event.pull_request.draft
+    runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

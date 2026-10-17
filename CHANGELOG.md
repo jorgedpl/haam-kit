@@ -6,6 +6,27 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-18
+
+Spending far fewer GitHub Actions minutes per pull request.
+
+### Added
+- **Draft first, check once.** Agents open PRs as drafts and push freely; CI, the secret scan, the dependency audit, both AI reviews, the UAT gate and the board sync skip drafts. When the change is complete (code, tests, UAT plan, release note, rebased), the agent marks it ready (`gh pr ready`) and everything runs once. Each round of review fixes goes in one push.
+- **`haam.py ci-usage [--days 7]`**: where the minutes went, by workflow, job, trigger and day (rounded up per job; macOS counted 10x, Windows 2x; own runners shown separately).
+- **`haam.py ci-settings`**, two switches stored as repository variables the workflows read:
+  - `--review local`: the AI reviews run on the owner's computer instead of in Actions (`haam.py review <ID>`: two fresh agent sessions, `claude -p` by default or `"review_command"` in `haam.config.json`, posting the `ai-review` and `security-review` statuses). PRs labelled `human-review` are always reviewed on GitHub. Trade-off: the result is no longer tamper-proof.
+  - `--runner self-hosted` (private repos only): every job except the deploy runs on your own machine (`runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}`).
+- Batches cover an epic's small features with approved specs as well as its bugs: one branch, one PR, one CI run, tested together.
+
+### Changed
+- `/build` writes the UAT plan and release note before marking the PR ready, so `/uat` no longer pushes (which re-ran everything).
+- The secret-scan job reuses gitleaks if the runner already has it.
+- Setup (`/haam-setup` Phase 6), `GITHUB-SETUP.md` §8 and the product manager guide §10 explain the cost switches.
+
+### Migration
+- `haam.py update`. Nothing else is required: drafts and the new triggers work straight away.
+- Optional: `haam.py ci-usage` to see your spend; `haam.py ci-settings --review local --apply` and/or `--runner self-hosted --apply`.
+
 ## [1.5.0] - 2026-10-17
 
 Fixes from running HAAM on a real project with several agent chats in parallel.
@@ -141,7 +162,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/jorgedpl/haam-kit/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/jorgedpl/haam-kit/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/jorgedpl/haam-kit/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/jorgedpl/haam-kit/compare/v1.2.0...v1.3.0

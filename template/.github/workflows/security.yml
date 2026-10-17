@@ -6,6 +6,7 @@ name: Security
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]   # draft PRs wait until they're marked ready
   schedule:
     - cron: "37 3 * * *"   # nightly dependency audit on main
   workflow_dispatch:
@@ -19,7 +20,8 @@ env:
 jobs:
   secrets:
     name: secrets
-    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -28,8 +30,11 @@ jobs:
 
       - name: Install gitleaks
         run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C /usr/local/bin gitleaks
+          # Your own runner can have gitleaks installed already.
+          if ! command -v gitleaks >/dev/null; then
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+              | tar -xz -C /usr/local/bin gitleaks
+          fi
           gitleaks version
 
       - name: Scan commits for secrets
@@ -57,7 +62,8 @@ jobs:
 
   dependencies:
     name: dependencies
-    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

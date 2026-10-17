@@ -7,10 +7,15 @@
 #     parts a PR touches (e.g. skip the mobile app's tests when only the backend changed).
 #   - main is not re-checked after every merge; a full run happens nightly (and on demand) instead.
 #   - A newer push to the same PR cancels the older run.
+#   - Draft PRs don't run at all: agents open their PR as a draft, run `make check` locally while they work,
+#     and mark it ready when done. That's when CI runs, once.
+#   - Runner: GitHub's ubuntu-24.04, or your own machine if the repository variable HAAM_RUNNER is set
+#     (`haam.py ci-settings --runner self-hosted`).
 name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     - cron: "17 3 * * *"   # nightly full run on main
   workflow_dispatch:
@@ -25,7 +30,8 @@ permissions:
 jobs:
   ci:
     name: ci
-    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

@@ -16,7 +16,7 @@ name: Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 concurrency:
   group: review-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && 'label' || 'code' }}
@@ -38,9 +38,16 @@ env:
 jobs:
   scope:
     name: review scope
-    # Label events only matter for the overrule label: skip the rest without starting a runner.
-    if: github.event.action != 'labeled' || github.event.label.name == 'ai-review-overruled'
-    runs-on: ubuntu-24.04
+    # No runner is started for: draft PRs (reviewed once, when marked ready), labels other than the
+    # overrule label, and projects that review on the owner's computer (repository variable
+    # HAAM_REVIEW=local, `haam.py review`), except PRs labelled human-review, which are always reviewed here.
+    if: >-
+      (github.event.action != 'labeled' || github.event.label.name == 'ai-review-overruled' ||
+       (vars.HAAM_REVIEW == 'local' && github.event.label.name == 'human-review')) &&
+      (github.event.action == 'labeled' || !github.event.pull_request.draft) &&
+      (vars.HAAM_REVIEW != 'local' || contains(github.event.pull_request.labels.*.name, 'human-review') ||
+       github.event.label.name == 'ai-review-overruled')
+    runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
       run: ${{ steps.decide.outputs.run }}
@@ -57,8 +64,9 @@ jobs:
           both() { status ai-review "$1" "$2"; status security-review "$1" "$2"; }
           labels=$(gh pr view "$PR" -R "$REPO" --json labels -q '.labels[].name')
 
-          # Label events: only the overrule label matters; anything else changes nothing.
-          if [ "$EVENT_ACTION" = "labeled" ]; then
+          # Label events: only the overrule label matters (and, when reviews normally run locally, the
+          # human-review label, which brings the review back to GitHub); anything else changes nothing.
+          if [ "$EVENT_ACTION" = "labeled" ] && [ "$LABEL" != "human-review" ]; then
             if [ "$LABEL" = "ai-review-overruled" ]; then
               both success "Overruled by a human (label ai-review-overruled)"
             fi
@@ -91,7 +99,7 @@ jobs:
     name: ai review runner
     needs: scope
     if: needs.scope.outputs.run == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -131,7 +139,7 @@ jobs:
     name: security review runner
     needs: scope
     if: needs.scope.outputs.run == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4

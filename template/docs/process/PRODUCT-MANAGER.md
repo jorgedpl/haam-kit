@@ -243,7 +243,16 @@ As on GitHub, agents follow the priority field, not the manual order of a list.
 
 ---
 
-## 10. Traps to avoid
+## 10. Keeping GitHub Actions costs down
+
+Every pull request runs CI and two AI reviews on GitHub's machines, and private repositories have a monthly allowance of minutes. Agents work fast, so the allowance can go in days. What helps most, in order:
+1. **Look first:** `python3 tools/haam/haam.py ci-usage` shows which workflows and jobs used the minutes.
+2. **Fewer pull requests:** batch an epic's small items into one (`/work epic #9`), and keep the open-PR limit low (`max_open_prs` in `haam.config.json`).
+3. **Reviews on your computer:** `haam.py ci-settings --review local --apply`. The AI reviews then use your Claude plan instead of minutes; protected areas are still reviewed on GitHub.
+4. **Your own runner:** `haam.py ci-settings --runner self-hosted --apply` after registering a machine that stays on (`docs/setup/GITHUB-SETUP.md` §8).
+5. **Ask for smaller CI:** if the project has separate parts (e.g. backend and mobile app), have an agent make `make check` run only the parts a PR touches.
+
+## 11. Traps to avoid
 
 - **Everything is High.** Then nothing is. Demote until roughly one item in five is High or Urgent.
 - **More agents than you can test.** Work piles up in UAT and goes stale. Fewer, smaller items move faster.
@@ -256,7 +265,7 @@ As on GitHub, agents follow the priority field, not the manual order of a list.
 
 ---
 
-## 11. Checklists
+## 12. Checklists
 
 **Daily**
 - [ ] Everything in UAT tested with `/test`

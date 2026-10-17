@@ -27,12 +27,12 @@ jobs:
     # Only events that can change the result start a runner: code pushes, the two gate labels,
     # and override comments (contains() ignores case).
     if: >-
-      (github.event_name == 'pull_request' &&
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
         ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
          github.event.label.name == 'uat-passed' || github.event.label.name == 'gate-override')) ||
       (github.event.issue.pull_request &&
         (contains(github.event.comment.body, 'OVERRIDE:') || contains(github.event.comment.body, 'EMERGENCY BYPASS:')))
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - name: Check UAT / override

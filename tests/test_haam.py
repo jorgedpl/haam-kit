@@ -663,6 +663,59 @@ class TestGitHubProjects(ToolTestCase):
         self.assertEqual((st["issues"][str(a)]["state"], st["issues"][str(b)]["state"]), ("CLOSED", "CLOSED"))
         self.assertNotIn("approved", st)                                     # nothing to approve on manual deploys
 
+    def test_ci_usage_adds_up_minutes(self):
+        self.setup_board()
+        st = self.gh_state()
+        st["runs_api"] = [
+            {"id": 1, "name": "Review", "event": "pull_request", "created_at": "2026-10-17T10:00:00Z", "pull_requests": [{"number": 5}]},
+            {"id": 2, "name": "CI", "event": "pull_request", "created_at": "2026-10-17T11:00:00Z", "pull_requests": [{"number": 5}]},
+            {"id": 3, "name": "CI", "event": "schedule", "created_at": "2026-10-18T03:00:00Z", "pull_requests": []}]
+        job = lambda name, a, b, labels=("ubuntu-24.04",), concl="success": {
+            "name": name, "started_at": a, "completed_at": b, "labels": list(labels), "conclusion": concl}
+        st["jobs_api"] = {
+            "1": [job("ai review runner", "2026-10-17T10:00:00Z", "2026-10-17T10:09:10Z"),     # 10 min (rounded up)
+                  job("review scope", "2026-10-17T10:00:00Z", "2026-10-17T10:00:05Z")],        # 1
+            "2": [job("ci", "2026-10-17T11:00:00Z", "2026-10-17T11:02:00Z", ("macos-15",)),       # 2 x 10
+                  job("skipped", "2026-10-17T11:00:00Z", "2026-10-17T11:05:00Z", concl="skipped")],
+            "3": [job("ci", "2026-10-18T03:00:00Z", "2026-10-18T03:30:00Z", ("self-hosted",))]}   # not billed
+        self.state.write_text(json.dumps(st))
+        res = json.loads(self.tool("ci-usage", "--json").stdout)
+        self.assertEqual(res["billable_minutes"], 31)
+        self.assertEqual(res["by_workflow"], {"CI": 20, "Review": 11})
+        self.assertEqual(res["own_runner_minutes"], 30)
+        self.assertEqual(res["pull_requests"], 1)
+
+    def test_ci_settings_and_local_review(self):
+        self.setup_board()
+        self.tool("ci-settings", "--review", "local", "--runner", "self-hosted")             # plan only
+        self.assertEqual(self.gh_state().get("variables", {}), {})
+        self.tool("ci-settings", "--review", "local", "--runner", "self-hosted", "--apply")
+        self.assertEqual(self.gh_state()["variables"], {"HAAM_REVIEW": "local"})     # no own runner on a public repo
+        self.env = {**self.env, "FAKE_GH_PRIVATE": "1"}
+        self.tool("ci-settings", "--runner", "self-hosted", "--apply")
+        self.assertEqual(self.gh_state()["variables"], {"HAAM_REVIEW": "local", "HAAM_RUNNER": "self-hosted"})
+        self.tool("ci-settings", "--runner", "github", "--apply")
+        self.assertEqual(self.gh_state()["variables"], {"HAAM_REVIEW": "local"})
+        # A fake reviewer agent: approves the code, finds nothing in security
+        bin_dir = self.tmp / "bin"
+        (bin_dir / "claude").write_text("#!/bin/sh\ncase \"$2\" in *security*) echo 'SECURITY_FINDINGS: 0';; "
+                                        "*) printf 'Looks fine.\\nVERDICT: APPROVE\\n';; esac\n")
+        (bin_dir / "claude").chmod(0o755)
+        git(self.proj, "remote", "set-url", "origin", str(self.tmp / "nowhere.git"))
+        st = self.gh_state()
+        st["prs"] = {"5": {"title": "#12: Fix", "headRefName": "12-fix", "state": "OPEN", "labels": [], "url": "u",
+                           "isDraft": False, "headRefOid": "abc"}}
+        self.state.write_text(json.dumps(st))
+        res = json.loads(self.tool("review", "12", "--json").stdout)
+        self.assertEqual(res["results"], {"ai-review": "success", "security-review": "success"})
+        final = {s["context"]: s["state"] for s in self.gh_state()["statuses"]}
+        self.assertEqual(final, {"ai-review": "success", "security-review": "success"})
+        # Protected areas are reviewed on GitHub
+        st = self.gh_state(); st["prs"]["5"]["labels"] = [{"name": "human-review"}]; self.state.write_text(json.dumps(st))
+        p = self.tool("review", "12", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("protected area", p.stderr)
+
     def test_triage_reject_closes_as_not_planned_and_needs_human(self):
         self.setup_board()
         n = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Dark mode", "--json").stdout)["number"]

@@ -33,7 +33,7 @@ git switch <branch>                      # existing branch: tracks origin/<branc
                                          # `git switch --detach origin/main` first (ask the human if it's another chat's)
 git switch -c <branch> origin/main       # new: 123-short-title (GitHub) or Linear's branch name
 ```
-**Batch of an epic's bugs** (from `/next` or `/work epic <ID>`): claim each bug (GitHub: `issue claim <n> --branch <branch>`), use one branch named after the first (`12-<epic-slug>-bugs`), and one PR titled `#12 #13 #14: <summary> (epic #9)` whose description has a `Refs #n` line for each. Each bug still gets its own failing test first.
+**Batch of an epic's items** (from `/next` or `/work epic <ID>`): claim each one (GitHub: `issue claim <n> --branch <branch>`), use one branch named after the first (`12-<epic-slug>`), and one PR titled `#12 #13 #14: <summary> (epic #9)` whose description has a `Refs #n` line for each. Each bug still gets its own failing test first, and each feature's acceptance criteria their tests. Keep the batch under ~400 changed lines; if it grows past that, open a second batch.
 Reworking an issue that already has a branch (review feedback, or label `uat-failed`): read the `❌ UAT failed` comment and fix every item on it; `git switch <branch> && git pull`. If git says the branch is checked out in another worktree under `.claude/worktrees/`, continue in that worktree (Claude Code: enter it); otherwise ask the human. When the fixes are pushed and the checks are green, run `/uat` again so it comes back to the human.
 
 ## 3. Plan
@@ -52,19 +52,22 @@ Run `make check` until it passes. Also run any project-specific test skills list
 ## 6. Self-review before the PR
 Do a security self-review of your diff and fix anything you find (Claude Code: `/security-review`; other tools: check `git diff origin/main...` against section D of `.github/review/REVIEWER.md`). Re-read your own diff (`git diff origin/main...`) against each acceptance criterion.
 
-## 7. Pull request
-- Commits: `<ID>: <imperative summary>`. Rebase on `origin/main`.
-- **Rework** (label `uat-failed` or review feedback): the PR already exists; push your fixes to the same branch and comment on the PR what you changed. Skip the rest of this step.
-- `git push -u origin <branch>`, then `gh pr create` with title `<ID>: <summary>` and the body from `.github/pull_request_template.md`, fully filled in (acceptance criteria checklist with test names, screenshots/notes, risks).
-- Add PR label `human-review` if the issue has it.
+## 7. Pull request: draft while you work, ready once
+CI and the AI reviews don't run on draft PRs. They run once, when you mark the PR ready, and again on each push after that. So push as often as you like while it's a draft, and make the ready version complete.
+- Commits: `<ID>: <imperative summary>`.
+- **Rework** (label `uat-failed` or review feedback): the PR already exists; collect all the fixes for the round, push them in **one** push, and comment on the PR what you changed. Skip the rest of this step.
+- `git push -u origin <branch>`, then `gh pr create --draft` with title `<ID>: <summary>`, the body from `.github/pull_request_template.md` fully filled in (acceptance criteria checklist with test names, screenshots/notes, risks), and `--label human-review` if the issue has it.
+- **Before marking it ready**, put everything the human needs on the branch, so nothing has to be pushed later (each push after ready re-runs CI and both reviews): the UAT plan `docs/uat/<FILE-ID>-<slug>.md` and the release note `docs/changes/<FILE-ID>.md` (both as `/uat` describes), rebased on `origin/main`, `make check` green.
+- Then `gh pr ready <number>`. That starts CI and the reviews, once.
 - On GitHub Projects the PR description must contain `Refs #<number>` (not `Closes`).
-- The tracker moves the issue to `In Review` when the PR opens (Linear's GitHub integration, or the `tracker-sync` workflow). If it hasn't moved after a few minutes, move it yourself. Comment the PR link on the issue.
+- The tracker moves the issue to `In Review` when the PR is marked ready (Linear's GitHub integration, or the `tracker-sync` workflow). If it hasn't moved after a few minutes, move it yourself. Comment the PR link on the issue.
 
 ## 8. Wait for checks and reviews
-1. `gh pr checks` until `ci`, `secrets`, `dependencies`, `ai-review` and `security-review` have finished.
+1. If `haam.config.json` says `"review": "local"`, run the AI reviews on this computer now, in fresh sessions: `python3 tools/haam/haam.py review <ID>` (give it a timeout of at least 20 minutes; skip this for PRs labelled `human-review`, which GitHub reviews). It posts the `ai-review` and `security-review` results on the PR.
+   Then `gh pr checks` until `ci`, `secrets`, `dependencies`, `ai-review` and `security-review` have finished.
 2. Failing `ci`/`dependencies`: fix and push.
 3. Failing `secrets`: **stop and tell the human immediately**. A secret in a pushed commit must be rotated and the branch history rewritten; you can't fix that alone.
-4. `ai-review` / `security-review` comments: fix every Blocking item, push, and comment on the PR which commit addresses which finding. If you disagree with a finding, reply with your reasoning and ask the human; don't change code just to satisfy the reviewer.
+4. `ai-review` / `security-review` comments: fix every Blocking item, push once, run the local review again if the project uses it, and comment on the PR which commit addresses which finding. If you disagree with a finding, reply with your reasoning and ask the human; don't change code just to satisfy the reviewer.
 5. After **two** rounds that still fail, stop: post a handover comment on the issue and tell the human.
 6. When everything is green, run `/uat <ID>`.
 

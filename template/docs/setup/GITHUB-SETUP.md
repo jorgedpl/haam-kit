@@ -75,7 +75,22 @@ Edit `Makefile` (including `audit`) and the runtime setup steps in `.github/work
 ## 7. Optional: Claude GitHub app
 If you want to tag an agent on a PR for a quick fix (e.g. the Claude GitHub app via `/install-github-app` in Claude Code, or your other tool's GitHub integration), install it. Any such app is bound by the same branch protection and checks, so it can't bypass the gates.
 
-## 8. Check it works
+## 8. Keeping Actions minutes down
+
+Private repositories get a monthly allowance of Actions minutes; agents opening many PRs use it fast. What the kit already does: draft PRs don't run anything (agents mark a PR ready once, when it's complete); docs-only PRs skip the checks; `main` is checked nightly instead of after every merge; labels, comments and new issues don't start runners; agents hold new work at 5 open PRs (`max_open_prs`).
+
+Find out where the minutes go: `python3 tools/haam/haam.py ci-usage` (last 7 days, by workflow, job, trigger and day).
+
+Two switches, set with `python3 tools/haam/haam.py ci-settings … --apply` (they're repository variables the workflows read):
+
+| Switch | What changes | Trade-off |
+|---|---|---|
+| `--review local` | The two AI reviews run on your computer in fresh Claude sessions (`haam.py review`), using your Claude plan instead of Actions minutes. PRs labelled `human-review` are still reviewed on GitHub | GitHub no longer guarantees the review result: anything with your login could post it |
+| `--runner self-hosted` | All jobs except the deploy run on your own machine (registered under Settings → Actions → Runners) instead of GitHub's | The machine must be on, with git, make, Python 3, curl, gitleaks and your project's tools; private repositories only. Check GitHub's current pricing for self-hosted runners |
+
+Also worth checking: jobs on macOS runners count 10 minutes for every minute they run (Windows: 2). Run mobile builds only when the mobile code changed (`make check` gets the changed files in `$CI_CHANGED_FILES`), or nightly.
+
+## 9. Check it works
 1. Open a tiny test PR (e.g. a typo fix in code). `ci`, `secrets` and `dependencies` run; the reviewer agent posts a comment and `ai-review` / `security-review` report back; `release-gate` shows **failure: waiting for UAT**.
    - **Secret test:** on a throwaway branch, commit a fake AWS-style key such as `AKIA` followed by 16 capital letters/digits in a code file. The local hook should block the commit; if you bypass it with `--no-verify`, the `secrets` check should fail. Delete the branch afterwards.
 2. Add label `uat-passed` → `release-gate` turns green → merge is allowed.

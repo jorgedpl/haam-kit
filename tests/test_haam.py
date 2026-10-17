@@ -477,6 +477,23 @@ class TestGitHubProjects(ToolTestCase):
         self.assertIn("is an epic", p.stderr)
         other = mk("--stream", "idea", "--epic", "--title", "Other")["number"]
         self.assertNotEqual(self.tool("issue", "link", str(other), "--parent", str(epic), check=False).returncode, 0)
+        self.assertNotEqual(self.tool("issue", "create", "--epic", "--parent", str(epic), "--title", "Nested",
+                                      check=False).returncode, 0)
+        # Sub-issues added in GitHub's own UI (not on the board) still count
+        st = self.gh_state()
+        st["issues"][str(st["next_issue"])] = {"id": "I_web", "title": "Added in the browser", "body": "", "state": "OPEN",
+                                               "url": "u", "labels": [], "assignees": [], "created": "2026-01-02T00:00:00Z",
+                                               "parent": epic}
+        st["next_issue"] += 1
+        Path(self.env["FAKE_GH_STATE"]).write_text(json.dumps(st))
+        kids = json.loads(self.tool("issue", "children", str(epic), "--json").stdout)
+        self.assertEqual(len(kids["children"]), 4)
+        self.assertTrue(any(k.get("not_on_board") for k in kids["children"]))
+        # Rewrite and move out
+        self.tool("issue", "edit", str(a), "--title", "Export reports to CSV", "--body", "Part of epic")
+        self.assertEqual(self.gh_state()["issues"][str(a)]["title"], "Export reports to CSV")
+        self.tool("issue", "unlink", str(b))
+        self.assertIsNone(json.loads(self.tool("issue", "view", str(b), "--json").stdout)["issue"]["parent"])
 
     def test_triage_reject_closes_as_not_planned_and_needs_human(self):
         self.setup_board()

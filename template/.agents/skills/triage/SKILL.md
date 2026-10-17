@@ -34,7 +34,7 @@ Cluster the issues that belong to the same outcome: the same journey, screen, mo
 
 plus a short list of issues that stay on their own, and of likely duplicates. At most 6 epics per round. Ask: *"Reply `ok`, or tell me what to change (e.g. `merge 2 and 3`, `#40 out of 1`, `rename 4 to …`)."* Wait.
 
-Then apply exactly what was confirmed: create each new epic (GitHub: `issue create --epic --stream idea --title "<outcome-focused title>" --body-file <short summary and member list>`, status Triage), link each member (`issue link <n> --parent <epic>`), and comment on each member `🧩 Grouped into epic <ID>: <title>`. Finish by listing the epics in suggested order and offering `/epic <ID>` for the first: that's where the questions about each feature get asked. Skip steps 3–4 in group mode.
+Then apply exactly what was confirmed: create each new epic (GitHub: `issue create --epic --stream idea --title "<outcome-focused title>" --body-file <short summary and member list>`, status Triage; if none of its members is an idea, i.e. only bugs and approved features, use `--stream feature --status Backlog` instead, since there's nothing to decide), link each member (`issue link <n> --parent <epic>`), and comment on each member `🧩 Grouped into epic <ID>: <title>`. Finish by listing the epics in suggested order and offering `/epic <ID>` for the first: that's where the questions about each feature get asked. Skip steps 3–4 in group mode.
 
 ## 3. Propose, as one table
 | # | ID | Title | Stream | Priority | Next step | Why (≤ 12 words) |
@@ -43,7 +43,7 @@ Then apply exactly what was confirmed: create each new epic (GitHub: `issue crea
 - **Stream:** confirm or correct (`bug` = doesn't work as intended; `idea` = new or changed behaviour).
 - **Priority:** Urgent / High / Medium / Low, using the levels and the bug matrix; say which current priority it serves, if any.
 - **Next step**, one of:
-  - inbox: `Ready` (bug with usable repro) · `needs info: <question>` · `assess` (idea → Discovery) · `park until <trigger>` · `reject: <reason>` · `duplicate of <ID>`
+  - inbox: `Ready` (bug with usable repro) · `needs info: <question>` · `assess` (idea → Discovery; for an idea inside an undecided epic, propose `decided with epic <ID>` and leave it in Triage) · `park until <trigger>` · `reject: <reason>` · `duplicate of <ID>`
   - backlog: `keep` · `priority → X` · `split` · `needs spec` · `park until <trigger>`
   - stale: `nudge` (comment asking for status) · `release the claim` · `remind the human to test/decide` · `revisit now`
 - Never propose approving an idea (G1) or approving a spec (G2); those are `/decide` and the spec PR. If an idea looks obviously right, propose `assess` and say "quick assessment".

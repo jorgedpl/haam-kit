@@ -10,8 +10,8 @@ argument-hint: "<ID> [--spike]"
 
 Target: $ARGUMENTS
 
-1. **Load the issue** from the tracker. It should be `stream:idea` in `Triage` or `Discovery`. If not, tell the user and stop. Set status to `Discovery` and comment `🔎 Assessment started`.
-2. **Epics:** if the issue is an epic, assess the feature as a whole: read its brief in `docs/epics/` and every sub-issue; size is the sum of the slices; risks cover all of them.
+1. **Load the issue** from the tracker. It should be `stream:idea` in `Triage` or `Discovery`. If not, tell the user and stop. If it belongs to an epic that is still an idea, stop and suggest assessing the epic instead (`/assess <epic>`): the pieces are decided together. Set status to `Discovery` and comment `🔎 Assessment started`.
+2. **Epics:** if the issue is an epic, assess the feature as a whole: read its brief in `docs/epics/` (or, if the brief's PR isn't merged yet, from that PR's branch) and every sub-issue; size is the sum of the slices; risks cover all of them.
 3. **Read context:** `docs/product/PRODUCT.md` (priorities, non-negotiables), `docs/product/ARCHITECTURE.md`, related issues and specs in `docs/specs/`.
 4. **Investigate the codebase** to ground effort and feasibility in reality: which modules change, what data model changes, which external services are involved, which protected areas (`AGENTS.md` §4) are touched.
 5. **Spike (only if `--spike` is passed, or if a key unknown can't be resolved by reading):**

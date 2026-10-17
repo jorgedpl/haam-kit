@@ -45,6 +45,7 @@ And these standalone labels:
 | `human-review` | Touches a protected area; human code review required | Agent or human |
 | `human-only` | Agents must not pick this up | Human |
 | `override-followup` | Created after a gate override | `/override` |
+| `epic` | Parent issue grouping the sub-issues of one feature | `/triage group`, `/epic`, or a human |
 
 Optional: area labels (`area:onboarding`, `area:billing`, `area:checkout`…) to filter the board.
 

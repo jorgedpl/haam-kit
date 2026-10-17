@@ -37,6 +37,8 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Create an epic** | `haam.py issue create --epic --stream idea --title "…"` | Create issue with label `epic` |
 | **Put an issue in an epic** | `haam.py issue link 14 --parent 9` | Set the issue's parent to the epic |
 | **Create an issue inside an epic** (e.g. spec slices, gaps) | `haam.py issue create --stream feature --parent 9 --title "…"` | Create sub-issue of the epic |
+| **Take an issue out of an epic** | `haam.py issue unlink 14` | Clear the issue's parent |
+| **Rewrite an issue** (title, description) | `haam.py issue edit 14 --title "…" --body-file new.md` | Update issue |
 | **An epic's issues** | `haam.py issue children 9` (with progress) | List the epic's sub-issues |
 | **Issues not in any epic** | `haam.py issue list --open-only --no-parent --no-label epic` | List issues without a parent |
 | **Claim** (before any code) | `haam.py issue claim 123 --tool "Claude Code" --machine laptop` (refuses if already claimed or not Ready; `--force` for bugs being fixed straight from Triage only when the human said so) | Re-fetch; if In Progress or assigned to someone else, stop; else assign to you, set In Progress, comment |

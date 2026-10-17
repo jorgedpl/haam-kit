@@ -15,7 +15,7 @@ An **epic** is a parent issue (label `epic`) whose sub-issues together deliver o
 
 ## 1. Find the epic and its issues
 - **An epic ID:** load it and its sub-issues (GitHub: `python3 tools/haam/haam.py issue children <n>`).
-- **A theme in quotes:** search open issues for ones that belong to it (titles, descriptions, comments, the screens, journeys or modules they mention). Show the candidates with a one-line reason each and ask the human which belong. On their OK, create the epic (GitHub: `issue create --epic --stream idea --title "<outcome-focused title>"`, status Triage) and link each confirmed issue (`issue link <n> --parent <epic>`).
+- **A theme in quotes:** search open issues for ones that belong to it (titles, descriptions, comments, the screens, journeys or modules they mention). Show the candidates with a one-line reason each and ask the human which belong. On their OK, create the epic (GitHub: `issue create --epic --stream idea --title "<outcome-focused title>"`, status Triage; if none of the issues is an idea, use `--stream feature --status Backlog`) and link each confirmed issue (`issue link <n> --parent <epic>`).
 - **Nothing:** list open epics without a brief in `docs/epics/` and ask which one to shape.
 
 ## 2. Read everything first
@@ -37,14 +37,15 @@ Record every answer in the brief's *Questions and answers* (with the date) and u
 | # | Change | Issue(s) | Why |
 |---|---|---|---|
 
-Possible changes: close a duplicate (link the original), merge two issues, rewrite an unclear issue's description (add the context and a line `Part of epic <ID>: <outcome>`), split one that is bigger than M, create a missing issue (a gap), move an issue out of the epic, set order (`Blocked by <ID>`), suggest a priority for the epic and its issues. Then ask: *"Reply `ok` to apply, or tell me what to change."* Wait.
+Possible changes: close a duplicate (link the original), merge two issues (move the content into one, close the other as a duplicate), rewrite an unclear issue's title or description (add the context and a line `Part of epic <ID>: <outcome>`), split one that is bigger than M, create a missing issue (a gap), move an issue out of the epic, set order (a `Blocked by <ID>` line in the description), suggest a priority for the epic and its issues. Then ask: *"Reply `ok` to apply, or tell me what to change."* Wait.
 
 ## 6. Apply what was confirmed
-- Tracker: create, link, rewrite, comment, set priorities exactly as confirmed. New issues get the epic as parent (GitHub: `issue create … --parent <epic>`). Closing duplicates is a Canceled move: on GitHub add `--human` (allowed here because the human confirmed it). Comment on each changed issue: `🧩 Epic <ID>: <what changed and why>`.
+- Tracker: create, link, rewrite, comment, set priorities exactly as confirmed. GitHub: new issues `issue create … --parent <epic>`; rewrites `issue edit <n> --title "…" --body-file <file>`; moving out `issue unlink <n>`. Closing duplicates is a Canceled move: on GitHub add `--human` (allowed here because the human confirmed it). Comment on each changed issue: `🧩 Epic <ID>: <what changed and why>`.
 - Git: commit the brief on a docs branch from `origin/main` (`docs/<issue-id>-epic`), open a docs PR, and link it on the epic with a comment.
 
 ## 7. Next step
 Tell the human where the epic stands and what comes next:
+- First, the human merges the brief's docs PR, so other agents (who branch from `main`) can read it.
 - **Not decided yet** (stream `idea`): `/assess <epic>` adds effort and feasibility for the whole, then `/decide <epic> approve|park|reject`. Approving the epic approves its idea sub-issues too.
 - **Approved** (stream `feature`): the sub-issues without a spec get one (`/spec <ID>`, or agents via `/work features`), in the order of the slices table.
 - Bugs inside the epic keep their own path and can be fixed at any time.

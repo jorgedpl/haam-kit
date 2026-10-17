@@ -23,9 +23,9 @@ Take the first match, in this order:
 2. **Features**: status `Ready`, label `agent-ready`, by priority (Urgent → Low), then oldest first.
 3. **Bugs**: label `stream:bug`, status `Ready`, priority Medium or Low.
 4. **Specs to write**: status `Backlog`, label `stream:feature`, has a priority, no spec yet → run `/spec`.
-5. **Ideas to assess**: label `stream:idea`, status `Discovery` and unassigned (triaged for assessment, by priority), then status `Triage` → run `/assess`.
+5. **Ideas to assess**: label `stream:idea`, status `Discovery` and unassigned (triaged for assessment, by priority), then status `Triage` → run `/assess`. Epics (label `epic`) that are still ideas are assessed here as a whole. Skip ideas that belong to an epic still being decided: they are decided with their epic.
 
-Skip epics (label `epic`: build their sub-issues instead), any issue with label `human-only`, any with no priority (except ideas in step 5), and any whose `blocked by` relations are not Done.
+**Epics:** never build or spec an epic itself (steps 1–4 skip label `epic`); build and spec its sub-issues. Also skip any issue with label `human-only`, any with no priority (except ideas in step 5), and any whose `blocked by` relations are not Done.
 
 ## 2. Confirm or go
 - **If a human is present**, show the top 3 candidates (ID, title, priority, stream, size if known) and recommend one. Wait for a choice.

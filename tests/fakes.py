@@ -175,7 +175,8 @@ def issue_view(n):
     i = st["issues"][str(n)]
     items = [it for it in st["items"] if it["issue"] == n]
     return {"id": i["id"], "number": n, "title": i["title"], "state": i["state"], "url": i["url"], "body": i["body"],
-            "createdAt": i["created"], "parent": {"number": i["parent"]} if i.get("parent") else None,
+            "createdAt": i["created"],
+            "parent": {"number": i["parent"], "repository": {"nameWithOwner": "example-org/example-app"}} if i.get("parent") else None,
             "assignees": {"nodes": [{"login": x} for x in i["assignees"]]},
             "labels": {"nodes": [{"name": x} for x in i["labels"]]},
             "projectItems": {"nodes": [{"id": it["id"], "project": {"id": it["project"], "number": next(
@@ -198,6 +199,10 @@ if a[:2] == ["issue", "create"]:
     save(); print(f"https://github.com/example-org/example-app/issues/{n}"); sys.exit(0)
 if a[:2] == ["issue", "edit"]:
     i = st["issues"][a[2]]
+    if "--title" in a:
+        i["title"] = opt(a, "--title")
+    if "--body" in a:
+        i["body"] = opt(a, "--body")
     for x in opts(a, "--add-assignee"):
         i["assignees"].append(st["me"] if x == "@me" else x)
     for x in opts(a, "--add-label"):
@@ -239,6 +244,16 @@ if a[:2] == ["api", "graphql"]:
     if "projectV2(number:" in q:
         p = next((p for p in st["projects"] if p["number"] == v["n"]), None)
         out({"data": {"repositoryOwner": {"projectV2": proj_view(p) if p else None}}})
+    if "removeSubIssue" in q:
+        cn = next(int(k) for k, i in st["issues"].items() if i["id"] == v["c"])
+        st["issues"][str(cn)].pop("parent", None)
+        out({"data": {"removeSubIssue": {"issue": {"number": 0}}}})
+    if "subIssues(first:100)" in q:
+        pi = st["issues"].get(str(v["n"]))
+        kids = [{"number": int(k), "title": i["title"], "state": i["state"],
+                 "repository": {"nameWithOwner": "example-org/example-app"}}
+                for k, i in st["issues"].items() if i.get("parent") == v["n"]]
+        out({"data": {"repository": {"issue": {"id": pi["id"], "subIssues": {"nodes": kids}} if pi else None}}})
     if "addSubIssue" in q:
         pn = next(int(k) for k, i in st["issues"].items() if i["id"] == v["p"])
         cn = next(int(k) for k, i in st["issues"].items() if i["id"] == v["c"])

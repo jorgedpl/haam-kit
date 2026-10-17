@@ -18,7 +18,7 @@ Admin (first-time adoption and upgrades):
     invite    --github USER [--linear-email EMAIL] [--apply]
 
 Agents, when the tracker is GitHub Projects:
-    issue create|view|list|claim|status|priority|label|comment|close|link|children ...
+    issue create|view|list|claim|status|priority|label|comment|close|link|unlink|children|edit ...
 
 Parallel chats (one worktree per agent chat):
     worktree status|new|prep|list|clean [--apply]
@@ -1375,7 +1375,7 @@ class GHProject:
     # --- issues
     def issue(self, number):
         d = gql("""query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){
-                     id number title state url body createdAt parent{ number }
+                     id number title state url body createdAt parent{ number repository{ nameWithOwner } }
                      assignees(first:10){ nodes{ login } } labels(first:30){ nodes{ name } }
                      projectItems(first:20){ nodes{ id project{ id number }
                        fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue {
@@ -1398,8 +1398,14 @@ class GHProject:
             "labels": [l["name"] for l in iss["labels"]["nodes"]],
             "item_id": item["id"] if item else None,
             "status": values.get("Status"), "priority": values.get("Priority"),
-            "parent": (iss.get("parent") or {}).get("number"),
+            "parent": self._parent(iss.get("parent")),
         }
+
+    def _parent(self, p):
+        """Parent epic number, only when the epic lives in this project's repository."""
+        if not p or (p.get("repository") or {}).get("nameWithOwner", self.repo).lower() != self.repo.lower():
+            return None
+        return p["number"]
 
     def ensure_item(self, iss):
         if iss.get("item_id"):
@@ -1422,13 +1428,26 @@ class GHProject:
         gql("""mutation($p:ID!,$c:ID!){ addSubIssue(input:{issueId:$p, subIssueId:$c, replaceParent:true}){
                  issue{ number } subIssue{ number } } }""", {"p": parent["node_id"], "c": child["node_id"]})
 
+    def unlink(self, parent_node_id, child):
+        gql("""mutation($p:ID!,$c:ID!){ removeSubIssue(input:{issueId:$p, subIssueId:$c}){ issue{ number } } }""",
+            {"p": parent_node_id, "c": child["node_id"]})
+
+    def sub_issues(self, number):
+        """All sub-issues of an epic, straight from GitHub (including ones not on the board)."""
+        d = gql("""query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){
+                     id subIssues(first:100){ nodes{ number title state repository{ nameWithOwner } } } } } }""",
+                {"o": self.repo_owner, "r": self.repo_name, "n": int(number)})
+        iss = (d.get("repository") or {}).get("issue") or {}
+        return iss.get("id"), [k for k in (iss.get("subIssues") or {}).get("nodes") or []
+                               if k["repository"]["nameWithOwner"].lower() == self.repo.lower()]
+
     def items(self):
         proj = self.data or self.load()
         out, after = [], None
         while True:
             d = gql("""query($p:ID!,$a:String){ node(id:$p){ ... on ProjectV2 { items(first:100, after:$a){
                          pageInfo{ hasNextPage endCursor }
-                         nodes{ id content{ __typename ... on Issue { number title state url createdAt parent{ number }
+                         nodes{ id content{ __typename ... on Issue { number title state url createdAt parent{ number repository{ nameWithOwner } }
                            repository{ nameWithOwner } assignees(first:10){ nodes{ login } } labels(first:30){ nodes{ name } } } }
                            fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue {
                              name field{ ... on ProjectV2FieldCommon { name } } } } } } } } } }""",
@@ -1444,7 +1463,7 @@ class GHProject:
                             "assignees": [a["login"] for a in c["assignees"]["nodes"]],
                             "labels": [l["name"] for l in c["labels"]["nodes"]],
                             "status": vals.get("Status"), "priority": vals.get("Priority"),
-                            "parent": (c.get("parent") or {}).get("number")})
+                            "parent": self._parent(c.get("parent"))})
             if not page["pageInfo"]["hasNextPage"]:
                 return out
             after = page["pageInfo"]["endCursor"]
@@ -1674,6 +1693,8 @@ def issue_action(args, cfg, board):
         body = Path(args.body_file).read_text() if args.body_file else (args.body or "")
         labels = [f"stream:{args.stream}"] + (args.label or []) + ([EPIC_LABEL] if args.epic else [])
         parent = None
+        if args.parent and args.epic:
+            raise RuntimeError("Epics don't nest in HAAM: an epic can't have a parent epic")
         if args.parent:
             parent = board.issue(parse_issue_number(args.parent))
             if EPIC_LABEL not in parent["labels"]:
@@ -1722,13 +1743,38 @@ def issue_action(args, cfg, board):
         return {"number": number, "parent": epic["number"], "message": f"#{number} is now part of epic #{epic['number']}"}
 
     if a == "children":
-        kids = [i for i in board.items() if i.get("parent") == number]
+        _, subs = board.sub_issues(number)
+        on_board = {i["number"]: i for i in board.items() if i["repo"].lower() == repo.lower()}
+        kids = [on_board.get(k["number"]) or {"number": k["number"], "title": k["title"], "state": k["state"],
+                                               "status": None, "priority": None, "created": "", "not_on_board": True}
+                for k in subs]
         order = {n: k for k, (n, _, _) in enumerate(GH_PRIORITIES)}
         kids.sort(key=lambda i: (order.get(i["priority"], 9), i["created"]))
         done = len([k for k in kids if k["status"] in ("Done", "Canceled") or k["state"] == "CLOSED"])
         lines = [f"Epic #{number} {iss['title']}: {done}/{len(kids)} done"] + [
-            f"  #{k['number']:<5} {k['status'] or '-':<12} {k['priority'] or '-':<7} {k['title']}" for k in kids]
+            f"  #{k['number']:<5} {k['status'] or '-':<12} {k['priority'] or '-':<7} {k['title']}"
+            + ("  (not on the board: issue add " + str(k["number"]) + ")" if k.get("not_on_board") else "") for k in kids]
         return {"epic": number, "children": kids, "done": done, "message": "\n".join(lines)}
+
+    if a == "unlink":
+        if not iss.get("parent"):
+            return {"number": number, "message": f"#{number} isn't in an epic"}
+        epic_id, _ = board.sub_issues(iss["parent"])
+        board.unlink(epic_id, iss)
+        return {"number": number, "message": f"#{number} is no longer part of epic #{iss['parent']}"}
+
+    if a == "edit":
+        if not (args.title or args.body or args.body_file):
+            sys.exit("Give --title and/or --body / --body-file")
+        cmd = ["gh", "issue", "edit", str(number), "-R", repo]
+        if args.title:
+            cmd += ["--title", args.title]
+        if args.body or args.body_file:
+            cmd += ["--body", Path(args.body_file).read_text() if args.body_file else args.body]
+        code, out, err = run(cmd)
+        if code != 0:
+            raise RuntimeError(err or out)
+        return {"number": number, "message": f"#{number} updated"}
 
     if a == "add":
         board.ensure_item(iss)
@@ -2453,7 +2499,7 @@ def main():
 
     p = common(sub.add_parser("issue", help="work with issues on the GitHub Projects board (for agents)"))
     p.add_argument("action", choices=["list", "create", "view", "add", "claim", "status", "priority", "label",
-                                      "comment", "close", "link", "children"])
+                                      "comment", "close", "link", "unlink", "children", "edit"])
     p.add_argument("number", nargs="?", help="issue number (#123 or 123)")
     p.add_argument("value", nargs="?", help="new status or priority")
     p.add_argument("--title")

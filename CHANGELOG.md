@@ -21,7 +21,7 @@ Each release lists **Migration** steps when a project needs to do more than run 
 - `/uat` adds the release note on the PR branch, so it ships with the change; `/release` now only finishes changes merged some other way (`ship --merged-only`).
 - Test results are recorded as comments on the issue and the PR, not commits, so recording a result never changes what was tested. The UAT plan's Results table is gone.
 - `/uat-result fail` sends the issue back to Ready with `uat-failed` (it used to go to In Progress, assigned); `/next` takes `uat-failed` items first; `/build` reworks them on the same branch and PR and runs `/uat` again.
-- `AGENTS.md`: agents may merge and approve the deploy only through `ship --human`, inside `/test` or `/release`, after the human said `pass` and `ship`.
+- `AGENTS.md`: agents may merge and approve the deploy only through `ship --human`, inside `/test`, after the human said `pass` and `ship` (`/release` uses `--merged-only`, which never merges).
 - The product manager guide has a new §2a, "Testing a change: the whole loop".
 
 ### Migration

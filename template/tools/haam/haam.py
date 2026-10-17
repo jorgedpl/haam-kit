@@ -22,7 +22,7 @@ Agents, when the tracker is GitHub Projects:
 
 Testing and shipping (inside /test, after the human's verdict):
     checkout-pr ISSUE | --back              Put a change on this machine to test it
-    ship ISSUE --human                      Merge, approve the production deploy, wait, close the issue
+    ship ISSUE --human [--merged-only]      Merge, approve the production deploy, wait, close (exit 2: run again)
 
 Parallel chats (one worktree per agent chat):
     worktree status|new|prep|list|clean [--apply]
@@ -1942,24 +1942,48 @@ def file_id(ref):
 
 
 def pr_matches(pr, ref):
+    """Strict: the PR's branch or title names this issue (never a mere mention in the description)."""
+    head = (pr.get("headRefName") or "").lower()
+    title = (pr.get("title") or "").lower().strip()
     if isinstance(ref, int):
-        return ref in linked_issue_numbers(pr)
+        return bool(re.match(rf"^{ref}-", head) or re.match(rf"^#{ref}\s*:", title))
     key = ref.lower()
-    return ((pr.get("title") or "").lower().startswith(key + ":")
-            or (pr.get("headRefName") or "").lower().startswith(key + "-"))
+    return bool(re.search(rf"(^|/){re.escape(key)}-", head) or title.startswith(key + ":"))
 
 
 def find_pr(cfg, ref, states=("open", "merged")):
-    """The newest PR for an issue: 'Refs #12' / '#12:' / branch 12-… on GitHub, 'APP-12:' / app-12-… on Linear."""
+    """The PR for an issue (branch `12-…` or title `#12: …`; Linear: `app-12-…` or `APP-12: …`).
+    Refuses to guess when more than one PR in the same state matches."""
     for state in states:
         code, out, err = run(["gh", "pr", "list", "-R", cfg["github_repo"], "--state", state, "--limit", "100",
-                              "--json", "number,title,body,headRefName,state,labels,url,isDraft"])
+                              "--json", "number,title,headRefName,state,labels,url,isDraft"])
         if code != 0:
             raise RuntimeError(err or out)
         prs = [p for p in json.loads(out or "[]") if pr_matches(p, ref)]
+        if len(prs) > 1:
+            raise RuntimeError(f"More than one {state} PR matches {show_ref(ref)}: "
+                               + ", ".join(f"#{p['number']}" for p in prs) + ". Close the extra one(s) first.")
         if prs:
-            return max(prs, key=lambda p: p["number"])
+            return prs[0]
     return None
+
+
+def tested_file(root):
+    _, main, _ = git_paths(root)
+    return main / ".haam" / "tested.json"
+
+
+def remember_tested(root, ref, sha):
+    f = tested_file(root)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    data = json.loads(f.read_text()) if f.exists() else {}
+    data[show_ref(ref)] = sha
+    f.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def tested_sha(root, ref):
+    f = tested_file(root)
+    return (json.loads(f.read_text()) if f.exists() else {}).get(show_ref(ref))
 
 
 def cmd_checkout_pr(args):
@@ -1982,32 +2006,50 @@ def cmd_checkout_pr(args):
     try:
         pr = find_pr(cfg, ref, ("open",))
     except RuntimeError as e:
-        sys.exit(f"Couldn't look up pull requests: {e}")
+        sys.exit(f"Couldn't pick the pull request: {e}")
     if not pr:
         sys.exit(f"No open pull request found for {show_ref(ref)}.")
     run(["git", "fetch", "--quiet", "origin"], cwd=root)
     code, _, err = run(["git", "switch", "--quiet", "--detach", f"origin/{pr['headRefName']}"], cwd=root)
     if code != 0:
         sys.exit(f"Couldn't check out {pr['headRefName']}: {err}")
+    sha = git_out(root, "rev-parse", "HEAD")
+    remember_tested(root, ref, sha)
     plans = [p.relative_to(root).as_posix() for p in sorted((root / "docs/uat").glob(f"{file_id(ref)}-*.md"))]
     res = {"issue": show_ref(ref), "pr": pr["number"], "pr_url": pr["url"], "branch": pr["headRefName"],
-           "uat_plan": plans[0] if plans else None}
+           "commit": sha, "uat_plan": plans[0] if plans else None}
     if args.json:
         print(json.dumps(res, indent=2))
         return
-    print(f"{OK} {show_ref(ref)}: testing PR #{pr['number']} ({pr['headRefName']}), {pr['url']}")
+    print(f"{OK} {show_ref(ref)}: testing PR #{pr['number']} ({pr['headRefName']} at {sha[:8]}), {pr['url']}")
     print(f"   Test plan: {res['uat_plan'] or 'not found in docs/uat/ (ask the agent to run /uat)'}")
     print("   Next: make setup && make dev, then follow the plan. Afterwards: python3 tools/haam/haam.py checkout-pr --back")
 
 
+SHIP_NOT_FINISHED = 2   # exit code: nothing went wrong, it just isn't finished; run the same command again
+
+
+def pr_checks(repo, num):
+    """(passed, pending, failed) check names for a PR, from GitHub."""
+    code, out, err = run(["gh", "pr", "checks", str(num), "-R", repo, "--json", "name,bucket"])
+    if code not in (0, 8) or not out:   # gh exits 8 while checks are pending
+        raise RuntimeError(f"Couldn't read the PR's checks: {(err or out)[:200]}")
+    checks = json.loads(out)
+    passed = [c["name"] for c in checks if c["bucket"] in ("pass", "skipping")]
+    pending = [c["name"] for c in checks if c["bucket"] == "pending"]
+    failed = [c["name"] for c in checks if c["bucket"] in ("fail", "cancel")]
+    return passed, pending, failed
+
+
 def cmd_ship(args):
     """After the human passed UAT and said 'ship': merge, approve the production deploy, wait, close the issue.
-    Safe to run again: it carries on from wherever the last run stopped."""
+    Safe to run again: it carries on from wherever the last run stopped.
+    Exit codes: 0 live, 2 not finished yet (run again), 1 stopped (needs a human)."""
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     if not args.human:
-        sys.exit("Shipping is the human's decision. Run it only inside /test or /release after the human said "
-                 "'ship' in this session, and add --human.")
+        sys.exit("Shipping is the human's decision. Run it only inside /test (after the human said 'pass' and "
+                 "'ship') or /release (with --merged-only), and add --human.")
     ref = issue_ref(cfg, args.issue)
     repo = cfg["github_repo"]
     deadline = time.time() + args.wait * 60
@@ -2018,46 +2060,85 @@ def cmd_ship(args):
         if not args.json:
             print(msg, flush=True)
 
-    def finish(state, ok=True, **extra):
-        res = {"ok": ok, "issue": show_ref(ref), "state": state, "steps": steps, **extra}
+    def finish(state, code=0, message="", **extra):
         if args.json:
-            print(json.dumps(res, indent=2))
-        sys.exit(0 if ok else 1)
+            print(json.dumps({"ok": code == 0, "issue": show_ref(ref), "state": state, "message": message,
+                              "steps": steps, **extra}, indent=2))
+        elif message:
+            print(message, flush=True)
+        sys.exit(code)
+
+    def stop(message):
+        say(f"{BAD} {message}")
+        finish("stopped", 1, "Stopped: this needs the human. " + message)
+
+    def later(state, message):
+        finish(state, SHIP_NOT_FINISHED, f"Not finished yet ({state}). {message} Run the same command again.")
 
     try:
         pr = find_pr(cfg, ref)
     except RuntimeError as e:
-        sys.exit(f"Couldn't look up pull requests: {e}")
+        stop(str(e))
     if not pr:
-        sys.exit(f"No pull request found for {show_ref(ref)}.")
+        stop(f"No pull request found for {show_ref(ref)}.")
     num = str(pr["number"])
     labels = [l["name"] for l in pr.get("labels") or []]
 
-    # 1. Merge
+    # 1. Merge (only from /test, after pass + ship)
     if pr["state"] == "OPEN":
+        if args.merged_only:
+            stop(f"PR #{num} isn't merged yet. Use /test, so the human tests it and says 'ship'.")
         if "uat-passed" not in labels and "gate-override" not in labels:
-            sys.exit(f"PR #{num} hasn't passed UAT yet (no 'uat-passed' label). Record the test result first.")
+            stop(f"PR #{num} hasn't passed UAT (no 'uat-passed' label). Record the human's test result first.")
         if pr.get("isDraft"):
-            sys.exit(f"PR #{num} is still a draft.")
-        waiting_said = False
+            stop(f"PR #{num} is still a draft.")
+        sha = tested_sha(root, ref)
+        if not sha:
+            say(f"{WARN} No record of which commit the human tested (they didn't use checkout-pr); merging the current head")
+        said_waiting = False
         while True:
-            code, out, err = run(["gh", "pr", "merge", num, "-R", repo, "--squash"])
-            if code == 0:
-                say(f"{OK} Merged PR #{num}")
-                break
+            try:
+                passed, pending, failed = pr_checks(repo, num)
+            except RuntimeError as e:
+                stop(str(e))
+            if failed:
+                stop(f"Checks failing on PR #{num}: {', '.join(failed)}. Send it back to an agent.")
+            if "release-gate" not in passed and "release-gate" not in pending:
+                stop(f"PR #{num} has no 'release-gate' check. The UAT gate isn't set up (haam.py github --apply).")
+            if not pending:
+                code2, out2, _ = run(["gh", "pr", "view", num, "-R", repo, "--json", "headRefOid"])
+                head = (json.loads(out2).get("headRefOid") if code2 == 0 and out2 else "") or ""
+                if sha and head and head != sha:
+                    stop(f"PR #{num} changed after the human tested it. Test it again with /test.")
+                cmd = ["gh", "pr", "merge", num, "-R", repo, "--squash"] + (["--match-head-commit", sha] if sha else [])
+                code, out, err = run(cmd)
+                if code == 0:
+                    say(f"{OK} Merged PR #{num}")
+                    break
+                msg = (err or out)[:300]
+                code2, out2, _ = run(["gh", "pr", "view", num, "-R", repo, "--json", "mergeStateStatus"])
+                mstate = (json.loads(out2).get("mergeStateStatus") if code2 == 0 and out2 else "") or ""
+                if mstate == "DIRTY":
+                    stop(f"PR #{num} has merge conflicts with main. Send it back to an agent to rebase.")
+                if mstate not in ("BLOCKED", "UNKNOWN", "UNSTABLE", ""):
+                    stop(f"GitHub refused the merge: {msg}")
+                if mstate == "BLOCKED" and not pending:
+                    stop(f"GitHub is blocking the merge (a required review or another rule): {msg}")
             if time.time() > deadline:
-                say(f"{WARN} PR #{num} can't merge yet: {(err or out)[:200]}")
-                finish("waiting for checks", message="Still waiting for the checks. Run the same command again.")
-            if not waiting_said:
+                later("waiting for checks", f"Checks still running on PR #{num}: {', '.join(pending) or 'starting'}.")
+            if not said_waiting:
                 say(f"{INFO} Waiting for the checks to finish before merging…")
-                waiting_said = True
+                said_waiting = True
             time.sleep(poll_seconds())
         gh_api("DELETE", f"repos/{repo}/git/refs/heads/{pr['headRefName']}")
-    code, out, err = run(["gh", "pr", "view", num, "-R", repo, "--json", "state,mergeCommit,url"])
+
+    code, out, err = run(["gh", "pr", "view", num, "-R", repo, "--json", "state,mergeCommit,mergedAt,files,url"])
     view = json.loads(out) if code == 0 and out else {}
-    sha = ((view.get("mergeCommit") or {}).get("oid"))
+    sha = (view.get("mergeCommit") or {}).get("oid")
     if view.get("state") != "MERGED" or not sha:
-        sys.exit(f"PR #{num} isn't merged (state {view.get('state') or pr['state']}).")
+        stop(f"PR #{num} isn't merged (state {view.get('state') or pr['state']}).")
+    files = [f.get("path", "") for f in view.get("files") or []]
+    docs_only = bool(files) and all(p.startswith("docs/") or p.endswith(".md") for p in files)
 
     board = None
     if cfg.get("tracker") == "github":
@@ -2070,51 +2151,64 @@ def cmd_ship(args):
     # 2. Deploy: approve the production environment and wait
     run_info = None
     if args.no_deploy:
-        say(f"{INFO} Skipping the deploy check (--no-deploy): the human confirmed it's live")
+        say(f"{INFO} Not waiting for a deploy (--no-deploy: the human confirmed it's live)")
+    elif docs_only:
+        say(f"{INFO} Docs-only change: nothing to deploy")
     else:
-        approved = False
         while True:
-            code, out, _ = run(["gh", "run", "list", "-R", repo, "--workflow", args.workflow, "--commit", sha,
-                                "--json", "databaseId,status,conclusion,url"])
-            runs = json.loads(out) if code == 0 and out else []
+            code, out, err = run(["gh", "run", "list", "-R", repo, "--workflow", args.workflow, "--commit", sha,
+                                  "--json", "databaseId,status,conclusion,url"])
+            if code != 0:
+                stop(f"Couldn't list the deploy runs: {(err or out)[:200]}")
+            runs = json.loads(out or "[]")
             run_info = runs[0] if runs else None
             if run_info and run_info["status"] == "completed":
                 if run_info["conclusion"] == "success":
                     say(f"{OK} Deployed: {run_info['url']}")
                     break
                 say(f"{BAD} The deploy failed: {run_info['url']}")
-                finish("deploy failed", ok=False, run=run_info["url"],
-                       message="The deploy failed. Open the run, and report it as an Urgent bug if production is affected.")
-            if run_info and run_info["status"] == "waiting" and not approved:
-                code, pend, _ = gh_api("GET", f"repos/{repo}/actions/runs/{run_info['databaseId']}/pending_deployments")
-                env_ids = [p["environment"]["id"] for p in pend or [] if isinstance(p, dict)]
-                if env_ids:
+                finish("deploy failed", 1, "The deploy failed. Show the human the run; report it as an Urgent bug "
+                       "if production is affected.", run=run_info["url"])
+            if run_info and run_info["status"] == "waiting":
+                code, pend, err = gh_api("GET", f"repos/{repo}/actions/runs/{run_info['databaseId']}/pending_deployments")
+                pend = pend if isinstance(pend, list) else []
+                mine = [p["environment"]["id"] for p in pend if p.get("current_user_can_approve", True)]
+                if pend and not mine:
+                    later("waiting for deploy approval", "You can't approve this environment: the approver must "
+                          "approve it in GitHub (Actions → the run → Review deployments).")
+                if mine:
                     code, _, err = gh_api("POST", f"repos/{repo}/actions/runs/{run_info['databaseId']}/pending_deployments",
-                                          {"environment_ids": env_ids, "state": "approved",
+                                          {"environment_ids": mine, "state": "approved",
                                            "comment": f"Approved by {gh_login() or 'the product owner'} after UAT (HAAM ship)"})
                     if code != 0:
-                        say(f"{WARN} Couldn't approve the deploy: {str(err)[:200]}")
-                        finish("waiting for deploy approval", run=run_info["url"],
-                               message="Approve it in GitHub (Actions → the run → Review deployments), then run this again.")
+                        stop(f"Couldn't approve the deploy ({str(err)[:150]}). Approve it in GitHub: Actions → "
+                             "the run → Review deployments.")
                     say(f"{OK} Approved the production deploy")
-                    approved = True
             if time.time() > deadline:
-                if not run_info:
-                    say(f"{WARN} No '{args.workflow}' run found for the merge commit yet")
-                    finish("no deploy run", message="No deploy started. If this project deploys another way, check "
-                           "it's live, then run again with --no-deploy.")
-                finish("deploying", run=run_info["url"], message="Still deploying. Run the same command again.")
+                if run_info:
+                    later("deploying", f"Deploy run: {run_info['url']}.")
+                merged_at = view.get("mergedAt") or ""
+                try:
+                    from datetime import datetime, timezone
+                    age = (datetime.now(timezone.utc) - datetime.fromisoformat(merged_at.replace("Z", "+00:00"))).total_seconds()
+                except ValueError:
+                    age = 0
+                if age < 600:
+                    later("waiting for the deploy to start", f"No '{args.workflow}' run for the merge yet.")
+                stop(f"No '{args.workflow}' run started for the merge commit. Ask the human how this project "
+                     "deploys; only if they confirm it's live, run again with --no-deploy.")
             time.sleep(poll_seconds())
 
-    # 3. Close the issue
+    # 3. Close the issue (once)
     where = f" · deploy run {run_info['url']}" if run_info else ""
     if board:
         iss = board.issue(ref)
-        board.set_option(iss, "Status", "Done")
-        run(["gh", "issue", "comment", str(ref), "-R", repo, "--body", f"🚀 Released to production{where}"])
-        if iss["state"] == "OPEN":
-            run(["gh", "issue", "close", str(ref), "-R", repo, "--reason", "completed"])
-        say(f"{OK} {show_ref(ref)} is Done")
+        if iss["status"] != "Done" or iss["state"] == "OPEN":
+            board.set_option(iss, "Status", "Done")
+            run(["gh", "issue", "comment", str(ref), "-R", repo, "--body", f"🚀 Released to production{where}"])
+            if iss["state"] == "OPEN":
+                run(["gh", "issue", "close", str(ref), "-R", repo, "--reason", "completed"])
+        say(f"{OK} {show_ref(ref)} is live and Done")
         if iss.get("parent"):
             _, subs = board.sub_issues(iss["parent"])
             if subs and all(k["state"] == "CLOSED" or k["number"] == ref for k in subs):
@@ -2122,7 +2216,12 @@ def cmd_ship(args):
                     f"issue close {iss['parent']} --human")
     else:
         say(f"{INFO} Now set {show_ref(ref)} to Done in Linear and comment: Released to production{where}")
-    finish("live", run=run_info["url"] if run_info else None)
+    tf = tested_file(root)
+    if tf.exists():
+        data = json.loads(tf.read_text())
+        data.pop(show_ref(ref), None)
+        tf.write_text(json.dumps(data, indent=2) + "\n")
+    finish("live", 0, f"{show_ref(ref)} is live.", run=run_info["url"] if run_info else None)
 
 
 # ----------------------------------------------------------------------------- worktrees (parallel chats)
@@ -2757,7 +2856,8 @@ def main():
     p = common(sub.add_parser("ship", help="after UAT passed and the human said ship: merge, deploy, close"))
     p.add_argument("issue", help="issue number (#12) or Linear ID (APP-12)")
     p.add_argument("--human", action="store_true", help="the human said 'ship' in this session")
-    p.add_argument("--wait", type=float, default=8, help="minutes to wait before handing back (run again to continue)")
+    p.add_argument("--wait", type=float, default=1.5, help="minutes to wait before handing back (exit 2: run again)")
+    p.add_argument("--merged-only", action="store_true", help="/release: never merge, only finish an already-merged PR")
     p.add_argument("--workflow", default="deploy.yml", help="the deploy workflow file")
     p.add_argument("--no-deploy", action="store_true", help="the human confirmed it's live another way")
     p.set_defaults(func=cmd_ship)

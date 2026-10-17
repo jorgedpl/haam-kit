@@ -41,7 +41,7 @@ AGENTS.md                     Rules every agent reads, whatever the tool
 CLAUDE.md                     Pointer to AGENTS.md for Claude Code
 haam.config.json              Project settings for the setup tool (created by `config`; no secrets)
 haam.lock.json                Installed kit version and file fingerprints (used by `update`)
-CHANGELOG.md                  Release notes, maintained by /release
+docs/changes/                 One release note per shipped change (added by /uat)
 Makefile                      Command contract: setup, hooks, dev, test, check, audit, secrets, smoke, deploy
 tools/haam/haam.py            Setup tool: install, config, agents, github, github-project, linear, issue, worktree, invite, dev, doctor
 scripts/scan-secrets.sh       Secret scan (gitleaks) shared by all commit hooks

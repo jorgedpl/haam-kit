@@ -17,21 +17,21 @@ This skill runs only when a human types it, in their own chat in the project's m
 If no ID was given, list what's waiting: issues in `UAT` (GitHub: `python3 tools/haam/haam.py issue list --status UAT --open-only`), oldest first. One item → take it. Several → show them (ID, title, waiting since) and suggest the oldest; wait for the choice.
 
 ## 2. Get it running
-1. `python3 tools/haam/haam.py checkout-pr <ID>`. It refuses if the human has unsaved changes in this folder; if so, say so and offer `git stash`.
+1. `python3 tools/haam/haam.py checkout-pr <ID>`. It refuses if the human has unsaved changes in this folder; if so, say so and offer `git stash`. It also remembers which commit the human is testing, so `ship` won't merge anything else.
 2. `make setup`, then start `make dev` **in the background** (if your tool can't run background commands, ask the human to run `make dev` in a terminal). Wait until it's up.
 3. Tell the human, in one short message: the URL to open, any test account from the plan (synthetic only), and the test cases from the plan (`docs/uat/<FILE-ID>-*.md`) as a numbered checklist: *do this → you should see that*. Include the plan's "Agent pre-check" result if there is one.
 4. End with: *"Reply `pass`, or tell me what went wrong (which step, what you saw)."* Wait.
 
 ## 3a. It passed
-1. Record it as `/uat-result <ID> pass` does: fill the Results table in the plan, commit on the PR branch (you're on a detached checkout: `git commit` then `git push origin HEAD:<branch>`), add PR label `uat-passed`, remove `uat-failed` if present, comment `✅ UAT passed by <user>`.
+1. Record it as `/uat-result <ID> pass` does: comment `✅ UAT passed by <user> on <date>` on the issue and the PR (don't commit anything to the PR branch: that would change what was tested and re-run the checks), add PR label `uat-passed`, remove issue label `uat-failed` if present.
 2. Ask: *"Ship it to production now? Reply `ship` or `later`."* Wait.
-3. On `ship`: `python3 tools/haam/haam.py ship <ID> --human`. It waits for the checks, merges, approves the production deploy for the human, waits for it, then closes the issue. If it hands back with "Still waiting…", run the same command again. If the human says it was deployed some other way, add `--no-deploy`.
+3. On `ship`: `python3 tools/haam/haam.py ship <ID> --human` (give the command a timeout of at least 3 minutes if your tool lets you). It waits for the checks, merges exactly the commit the human tested, approves the production deploy for them, waits for it, then closes the issue. Exit code **2** means *not finished yet*: run the same command again until it exits 0. Exit code **1** means it stopped and why: tell the human. Never add `--no-deploy` unless the human tells you it was deployed some other way.
 4. If `make smoke` exists, run it against production and report. If it fails, tell the human at once and offer `/bug` with priority Urgent.
 5. Reply: *"<ID> is live."* plus anything the tool said (for example, that it was the last issue in its epic).
 6. On `later`: *"Passed. Type `/test <ID>` and reply `ship` when you're ready, or merge it in GitHub yourself."*
 
 ## 3b. It failed
-1. Record it as `/uat-result <ID> fail` does: fill the Results table, comment `❌ UAT failed` on the issue with each failure as a checklist item (step, expected, actual), make sure the PR doesn't have `uat-passed`.
+1. Record it as `/uat-result <ID> fail` does: comment `❌ UAT failed` on the issue with each failure as a checklist item (step, expected, actual), and make sure the PR doesn't have `uat-passed`.
 2. Send it back to the agents: add issue label `uat-failed`, set status `Ready`, remove the assignee. Agents take `uat-failed` items before anything else.
 3. If something the human found is outside this change's scope, offer to log it as a separate `/bug` instead.
 4. Restart the fix straight away if you can: in Claude Code, start a background worker in its own worktree that runs `/build <ID>` (it continues on the same branch). Otherwise tell the human: *"Open a new chat and type `/work bugs`: it takes this one first."*

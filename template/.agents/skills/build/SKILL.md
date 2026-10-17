@@ -48,6 +48,7 @@ Do a security self-review of your diff and fix anything you find (Claude Code: `
 
 ## 7. Pull request
 - Commits: `<ID>: <imperative summary>`. Rebase on `origin/main`.
+- **Rework** (label `uat-failed` or review feedback): the PR already exists; push your fixes to the same branch and comment on the PR what you changed. Skip the rest of this step.
 - `git push -u origin <branch>`, then `gh pr create` with title `<ID>: <summary>` and the body from `.github/pull_request_template.md`, fully filled in (acceptance criteria checklist with test names, screenshots/notes, risks).
 - Add PR label `human-review` if the issue has it.
 - On GitHub Projects the PR description must contain `Refs #<number>` (not `Closes`).

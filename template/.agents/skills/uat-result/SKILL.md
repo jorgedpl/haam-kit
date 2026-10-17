@@ -1,6 +1,6 @@
 ---
 name: uat-result
-description: Record the human tester's UAT outcome (Gate G4). Pass labels the PR uat-passed; fail sends the issue back to In Progress with recorded failures.
+description: Record the human tester's UAT outcome (Gate G4). Pass labels the PR uat-passed; fail labels the issue uat-failed and sends it back to Ready with the failures recorded.
 argument-hint: "<ID> pass|fail [notes on what failed]"
 disable-model-invocation: true
 ---
@@ -14,11 +14,11 @@ Result: $ARGUMENTS
 You are recording the human's verdict. Never decide it yourself. (Most of the time the human uses `/test`, which does this and more.)
 
 1. **Parse** issue ID and `pass`/`fail`. If unclear, ask.
-2. **Update the UAT plan** `docs/uat/<FILE-ID>-*.md` on the PR branch: fill the Results table (date, tester = current user, outcome, notes). Commit `<ID>: UAT result <pass|fail>` and push.
+2. **Record the result as comments**, not commits (a commit would change what was tested and re-run the checks): on the issue and the PR, `UAT <pass|fail> by <user> on <date>` plus the notes.
 
 ### On pass
 3. `gh pr edit <pr> --add-label uat-passed` (this satisfies the `release-gate` check); remove issue label `uat-failed` if present.
-4. Comment on the issue: `✅ UAT passed by <user>`. Status stays `UAT` until merge; the tracker moves it to `Deploying` on merge.
+4. (The comment in step 2 is the record.) Status stays `UAT` until merge; the tracker moves it to `Deploying` on merge.
 5. Reply: "UAT passed. Say `ship` and I'll merge, deploy and close it (`haam.py ship <ID> --human`), or merge it in GitHub yourself."
 
 ### On fail

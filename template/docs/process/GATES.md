@@ -89,7 +89,7 @@ Review is layered so that **no agent ever reviews its own work** and **secrets a
 - [ ] PR merged to `main` by a human, or by `haam.py ship --human` after the human said `ship`
 - [ ] Production deploy approved (environment `production`): in GitHub, or by `ship` on the human's word
 - [ ] Post-deploy smoke check passed (`make smoke`, if defined)
-- [ ] `/release` marks the issue Done and updates `CHANGELOG.md`
+- [ ] The issue is marked Done (`ship`, or `/release` for changes merged another way); the release note in `docs/changes/` shipped with it
 
 ---
 

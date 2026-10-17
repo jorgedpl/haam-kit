@@ -219,12 +219,18 @@ if a[:2] == ["pr", "view"]:
 if a[:2] == ["pr", "list"]:
     want = {"open": "OPEN", "merged": "MERGED"}.get(opt(a, "--state", "open"))
     out([dict(p, number=int(k)) for k, p in st["prs"].items() if p.get("state", "OPEN") == want])
-if a[:2] == ["pr", "merge"]:
-    p = st["prs"][a[2]]
+if a[:2] == ["pr", "checks"]:
     if st.get("checks_pending"):
         st["checks_pending"] -= 1; save()
-        print("Required status check \"release-gate\" is expected", file=sys.stderr); sys.exit(1)
-    p["state"] = "MERGED"; p["mergeCommit"] = {"oid": "abc123"}
+        print(json.dumps([{"name": "ci", "bucket": "pass"}, {"name": "release-gate", "bucket": "pending"}])); sys.exit(8)
+    out(st["prs"][a[2]].get("checks", [{"name": "ci", "bucket": "pass"}, {"name": "release-gate", "bucket": "pass"}]))
+if a[:2] == ["pr", "merge"]:
+    p = st["prs"][a[2]]
+    m = opt(a, "--match-head-commit")
+    if m and m != p.get("headRefOid"):
+        print("Head branch was modified", file=sys.stderr); sys.exit(1)
+    p["state"] = "MERGED"; p["mergeCommit"] = {"oid": "abc123"}; p["mergedAt"] = "2026-01-01T00:00:00Z"
+    p.setdefault("files", [{"path": "src/export.py"}])
     st.setdefault("runs", []).append({"databaseId": 7, "status": "waiting", "conclusion": "", "url": "https://run/7",
                                       "headSha": "abc123"})
     save(); sys.exit(0)

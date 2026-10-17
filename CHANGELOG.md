@@ -13,12 +13,14 @@ Each release lists **Migration** steps when a project needs to do more than run 
   - **`pass`** → asks *"Ship it?"*; on **`ship`** it merges, approves the production deploy on the human's behalf, waits for it, runs the smoke check and closes the issue.
   - **what went wrong** → records it on the issue, labels it `uat-failed`, sends it back to Ready, and (in Claude Code) starts a worker on the fix straight away. Agents take `uat-failed` items first; the fix comes back to `/test`.
 - `haam.py checkout-pr ISSUE` / `--back`: put an issue's PR on this machine to test (detached, so agents' worktrees aren't disturbed; refuses over unsaved work).
-- `haam.py ship ISSUE --human`: merge when the checks are green, approve the waiting `production` deploy, wait, close the issue, and say when it was the last issue in its epic. Safe to run again; hands back after `--wait` minutes.
+- `haam.py ship ISSUE --human`: merge exactly the commit the human tested once every check (including `release-gate`) is green, approve the waiting `production` deploy, wait, close the issue, and say when it was the last issue in its epic. Exit code 2 means "not finished, run again"; it stops (exit 1) on failing checks, merge conflicts, a changed PR or a failed deploy. `--merged-only` (used by `/release`) never merges. Docs-only changes skip the deploy wait.
+- `docs/changes/<FILE-ID>.md`: one release note per change, added by `/uat`, so parallel PRs never conflict.
 - New issue label `uat-failed` (GitHub and Linear).
 
 ### Changed
-- `/uat` adds the `CHANGELOG.md` line on the PR branch, so it ships with the change; `/release` now only handles changes merged some other way, using `ship`.
-- `/uat-result fail` sends the issue back to Ready with `uat-failed` (it used to go to In Progress, assigned); `/next` takes `uat-failed` items first; `/build` reworks them on the same branch and runs `/uat` again.
+- `/uat` adds the release note on the PR branch, so it ships with the change; `/release` now only finishes changes merged some other way (`ship --merged-only`).
+- Test results are recorded as comments on the issue and the PR, not commits, so recording a result never changes what was tested. The UAT plan's Results table is gone.
+- `/uat-result fail` sends the issue back to Ready with `uat-failed` (it used to go to In Progress, assigned); `/next` takes `uat-failed` items first; `/build` reworks them on the same branch and PR and runs `/uat` again.
 - `AGENTS.md`: agents may merge and approve the deploy only through `ship --human`, inside `/test` or `/release`, after the human said `pass` and `ship`.
 - The product manager guide has a new §2a, "Testing a change: the whole loop".
 

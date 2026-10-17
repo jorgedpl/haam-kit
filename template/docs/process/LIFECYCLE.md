@@ -124,7 +124,7 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
 
 ### Stage 8: Release (Deploying → Done, Gate G5, human)
 - After a pass, `/test` asks the human *"Ship it?"*. On `ship`, the agent (`haam.py ship <ID> --human`) merges the PR (the tracker moves the issue to **Deploying**), approves the waiting `production` deploy on the human's behalf, waits for it, runs the smoke check if defined, and closes the issue as **Done**. The human can also do each step by hand: merge, approve the deploy in GitHub, then `/release APP-123`.
-- The `CHANGELOG.md` line is added on the PR branch by `/uat`, so it ships with the change.
+- The release note (`docs/changes/<FILE-ID>.md`, one file per change) is added on the PR branch by `/uat`, so it ships with the change.
 
 ---
 
@@ -178,8 +178,8 @@ How to triage and choose priorities (levels, bug impact × reach, value/confiden
 | Epic brief | `docs/epics/APP-123-*.md` | `/epic` |
 | Feature spec | `docs/specs/APP-123-*.md` | `/spec` |
 | Code + unit tests | `src/`, `tests/` (per stack) | `/build` |
-| UAT plan and results | `docs/uat/APP-123-*.md` | `/uat`, `/test` |
-| Release notes | `CHANGELOG.md` | `/release` |
+| UAT plan | `docs/uat/APP-123-*.md` (results: comments on the issue and PR) | `/uat`, `/test` |
+| Release notes | `docs/changes/<FILE-ID>.md` (one per change); `CHANGELOG.md` when you cut a version | `/uat` |
 | Product context | `docs/product/PRODUCT.md` | Humans |
 | Architecture map | `docs/product/ARCHITECTURE.md` | Agents keep it current |
 

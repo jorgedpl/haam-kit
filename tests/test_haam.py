@@ -501,7 +501,9 @@ class TestGitHubProjects(ToolTestCase):
                                  "--json").stdout)["number"]
         st = self.gh_state()
         st["prs"] = {"5": {"title": f"#{n}: Fix export", "body": f"Refs #{n}", "headRefName": f"{n}-fix-export",
-                           "isDraft": False, "state": "OPEN", "labels": [], "url": "https://pr/5"}}
+                           "isDraft": False, "state": "OPEN", "labels": [], "url": "https://pr/5", "headRefOid": "t1"},
+                     "6": {"title": "Unrelated", "body": f"Refs #{n}", "headRefName": "other-thing", "isDraft": False,
+                           "state": "OPEN", "labels": [{"name": "uat-passed"}], "url": "https://pr/6", "headRefOid": "o1"}}
         st["checks_pending"] = 1
         self.state.write_text(json.dumps(st))
         env = {**self.env, "HAAM_POLL_SECONDS": "0"}
@@ -509,12 +511,30 @@ class TestGitHubProjects(ToolTestCase):
         self.assertNotEqual(self.tool("ship", str(n), env=env, check=False).returncode, 0)
         p = self.tool("ship", str(n), "--human", env=env, check=False)
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("hasn't passed UAT", p.stderr)
+        self.assertIn("hasn't passed UAT", p.stdout + p.stderr)
         st = self.gh_state()
         st["prs"]["5"]["labels"] = [{"name": "uat-passed"}]
         self.state.write_text(json.dumps(st))
+        # /release never merges
+        p = self.tool("ship", str(n), "--human", "--merged-only", env=env, check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(self.gh_state()["prs"]["5"]["state"], "OPEN")
+        # The PR changed after the human tested it: refuse
+        tested = self.proj / ".haam" / "tested.json"
+        tested.parent.mkdir(exist_ok=True)
+        tested.write_text(json.dumps({f"#{n}": "old"}))
+        p = self.tool("ship", str(n), "--human", env=env, check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("changed after the human tested it", p.stdout + p.stderr)
+        tested.write_text(json.dumps({f"#{n}": "t1"}))
+        # Not finished in time: exit 2 with a clear message, then a re-run finishes
+        st = self.gh_state(); st["checks_pending"] = 1; self.state.write_text(json.dumps(st))
+        p = self.tool("ship", str(n), "--human", "--wait", "0", env=env, check=False)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("Run the same command again", p.stdout)
         res = json.loads(self.tool("ship", str(n), "--human", "--json", env=env).stdout)
         self.assertEqual(res["state"], "live", res)
+        self.assertEqual(self.gh_state()["prs"]["6"]["state"], "OPEN")   # only the issue's own PR
         st = self.gh_state()
         self.assertEqual(st["prs"]["5"]["state"], "MERGED")
         self.assertEqual(st["approved"]["state"], "approved")
@@ -522,8 +542,9 @@ class TestGitHubProjects(ToolTestCase):
         self.assertIn(f"repos/example-org/example-app/git/refs/heads/{n}-fix-export", st["deleted_refs"])
         self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "Done")
         self.assertTrue(any("Released to production" in c["body"] for c in st["comments"]))
-        # Running it again is harmless
+        # Running it again is harmless and doesn't post twice
         self.assertEqual(json.loads(self.tool("ship", str(n), "--human", "--json", env=env).stdout)["state"], "live")
+        self.assertEqual(sum("Released to production" in c["body"] for c in self.gh_state()["comments"]), 1)
 
     def test_triage_reject_closes_as_not_planned_and_needs_human(self):
         self.setup_board()

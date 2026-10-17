@@ -30,6 +30,4 @@ make dev
 <!-- Filled by the agent if it ran the plan with a browser tool or `make e2e` first. -->
 
 ## Results
-| Date | Tester | Outcome | Notes |
-|---|---|---|---|
-| | | | |
+Recorded as comments on the issue and the PR by `/test` (or `/uat-result`), so recording a result never changes the code that was tested.

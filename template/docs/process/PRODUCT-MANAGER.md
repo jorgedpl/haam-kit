@@ -18,8 +18,7 @@ Examples use GitHub Projects IDs (`#12`); on Linear the same item is `APP-12`. C
 | Set and change priorities | Daily and weekly | `/triage`, `/triage backlog` | Priority field |
 | Decide on assessed ideas (G1) | Weekly | `/decide #12 approve high` | Status, labels, comment (§7–8) |
 | Approve specs (G2) | As they arrive | Merge the spec PR, then "spec for #12 approved, mark it ready" | Merge the spec PR, Status Ready, label `agent-ready` |
-| Test changes locally (G4) | Daily | Follow the UAT plan, then `/uat-result #12 pass` | (needs the skill: it adds the PR label) |
-| Merge and approve deploys (G5) | When UAT passes | Merge, approve the deploy, `/release #12` | GitHub: merge and approve |
+| Test changes (G4) and ship them (G5) | Daily | `/test`, then reply `pass` → `ship`, or say what's wrong | GitHub: label `uat-passed`, merge, approve the deploy |
 | Close override follow-ups | Weekly | "Show the open override follow-ups" | View: label `override-followup` |
 
 Everything you decide goes into the tracker or Git, never only into a chat. If it isn't written down there, the next agent doesn't know it.
@@ -29,10 +28,17 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
 ## 2. Your rhythm
 
 ### Daily (10–15 minutes)
-1. **Test first.** Open **Waiting on me** and test anything in **UAT**, oldest first. Agents can't finish until you do, and their context goes stale.
+1. **Test first.** Type `/test`: the agent sets up the oldest change waiting for you and walks you through it (§2a). Agents can't finish until you do, and their context goes stale.
 2. **Empty the Triage inbox** (`/triage`, or the Triage view). Nothing should sit there for more than two working days.
 3. **Urgent bugs:** if one exists, start an agent on it now: new chat window, `/work bugs`.
 4. Skim the handover and "blocked" comments from agents and answer their questions.
+
+### 2a. Testing a change: the whole loop
+1. Type **`/test`** (or `/test #12`). The agent puts the change on your computer, starts the app, and gives you the link and a short checklist: *do this → you should see that*.
+2. Try it. Then reply with one word or one sentence:
+   - **`pass`** → the agent asks *"Ship it?"* Reply **`ship`**: it merges, approves the production deploy for you, waits, and closes the issue. You get *"#12 is live."* Reply `later` to hold it.
+   - **What went wrong** (*"step 3: the export button is still missing on mobile"*) → the agent records it on the issue, labels it `uat-failed` and sends it back to the agents, who fix it first. When it's fixed it comes back to `/test`.
+3. That's all. You don't need to touch branches, labels or the board.
 
 ### Weekly (30–45 minutes)
 1. **Group** loose issues into epics (`/triage group`) and shape the top epic with the agent (`/epic #9`).
@@ -89,7 +95,7 @@ Single issues often lack context. "Export button missing on mobile", "Export to 
 2. **Shape.** `/epic #9`: the agent reads every issue in the epic, the product context and the relevant code, drafts the brief, then **asks you up to five questions per round**: who it's for, what success looks like, must-haves versus nice-to-haves, constraints, what must not change, how it ranks. Then it proposes a clean-up: duplicates to close, gaps to add as new issues, unclear issues to rewrite, big ones to split, an order. Nothing changes until you confirm.
 3. **Decide once (G1).** `/assess #9` adds effort and feasibility for the whole epic; `/decide #9 approve high` approves it and the ideas inside it in one go.
 4. **Spec and build slice by slice.** Each sub-issue gets its own spec and passes G2 on its own. Agents build sub-issues, never the epic itself.
-5. **Finish.** When the last sub-issue is released, `/release` offers to close the epic.
+5. **Finish.** When the last sub-issue ships, the agent offers to close the epic.
 
 **Priorities:** give the epic a priority; its issues take the same one unless you say otherwise. A bug inside an epic can still be more urgent than the epic.
 
@@ -165,8 +171,8 @@ Use **your own chat in the project's main folder**, not one of the agent chats r
 | Get an idea assessed | `/assess #12` (or let `/work ideas` pick it) |
 | Decide (G1) | `/decide #12 approve high "start with the admin side"` · `park` · `reject` |
 | Approve a spec (G2) | Review and merge the spec PR, then: "spec for #12 approved, mark it ready" |
-| Record a test result (G4) | `/uat-result #12 pass` or `/uat-result #12 fail <what went wrong>` |
-| Close after deploy (G5) | `/release #12` |
+| Test a change, then ship it or send it back (G4, G5) | `/test` (or `/test #12`), then `pass` → `ship`, or say what's wrong |
+| Close something that was merged another way | `/release #12` |
 | Emergency | `/override #12 "<reason>"` |
 
 **How `/triage` works.** The agent reads `PRODUCT.md` and the items, then shows you one table: proposed stream, priority, next step and a short reason for each. Reply `ok` to apply it all, or with changes (`#14 Low, #9 park until Q3`). It changes nothing until you reply, applies exactly what you confirmed, and comments on each item so the reason is on record. It never approves ideas for you; for that it points you to `/decide`.
@@ -207,7 +213,7 @@ Everything above can be done by hand on the board. The saved views (set up with 
 | Group issues into an epic | Create an issue with label `epic`; add the others as its sub-issues |
 | Re-rank many items | Table layout, grouped or sorted by Priority; edit the cells (you can copy a value and paste it into several selected cells) |
 
-Leave these to the skills: claiming (**In Progress**) is the agents' job; **UAT pass** needs `/uat-result` (it adds the PR label that unlocks merging); **Done** needs `/release` (it closes the issue and updates the changelog after the deploy).
+Leave these to the skills: claiming (**In Progress**) is the agents' job. Testing and shipping is easiest with `/test`; by hand it's: add the label `uat-passed` to the PR (that unlocks merging), merge it, approve the deploy (Actions → the run → Review deployments), then set the issue to **Done** and close it. If it failed, comment what's wrong on the issue, add the label `uat-failed`, set it back to **Ready** and remove the assignee.
 
 ---
 
@@ -251,7 +257,7 @@ As on GitHub, agents follow the priority field, not the manual order of a list.
 ## 11. Checklists
 
 **Daily**
-- [ ] UAT items tested, oldest first
+- [ ] Everything in UAT tested with `/test`
 - [ ] Triage inbox empty
 - [ ] Urgent bugs have an agent on them
 - [ ] Agents' questions answered

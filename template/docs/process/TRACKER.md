@@ -19,7 +19,7 @@ Skills say "in the tracker"; this page says how to do each operation in each tra
 | Files for the issue | `docs/specs/GH-123-slug.md` (same for assessments, UAT) | `docs/specs/APP-123-slug.md` |
 | 12 statuses | Board's **Status** field | Team workflow statuses |
 | Priority | Board's **Priority** field (Urgent/High/Medium/Low) | Built-in priority |
-| Streams, `agent-ready`, `human-only`, `override-followup`, `epic` | Issue labels | Issue labels |
+| Streams, `agent-ready`, `human-only`, `override-followup`, `epic`, `uat-failed` | Issue labels | Issue labels |
 | Epic (groups the issues of one feature) | Issue labelled `epic`; its issues are GitHub **sub-issues** | Issue labelled `epic`; its issues are **sub-issues** (parent set) |
 | Who is working on it | Issue assignee | Issue assignee |
 | Status moves on PR open/merge | `tracker-sync.yml` workflow | Linear's GitHub integration |
@@ -43,11 +43,13 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Issues not in any epic** | `haam.py issue list --open-only --no-parent --no-label epic` | List issues without a parent |
 | **Claim** (before any code) | `haam.py issue claim 123 --tool "Claude Code" --machine laptop` (refuses if already claimed or not Ready; `--force` for bugs being fixed straight from Triage only when the human said so) | Re-fetch; if In Progress or assigned to someone else, stop; else assign to you, set In Progress, comment |
 | **Change status** | `haam.py issue status 123 "UAT"` | Update issue status |
-| **Human-only status** (Done, Parked, Canceled, Decision→Backlog) | Same, plus `--human`, **only** inside `/triage`, `/epic`, `/decide`, `/release` or `/override` typed by a human | Same rule |
+| **Human-only status** (Done, Parked, Canceled, Decision→Backlog) | Same, plus `--human`, **only** inside `/triage`, `/epic`, `/decide`, `/test`, `/release` or `/override` typed by a human | Same rule |
 | **Priority** | `haam.py issue priority 123 High` | Update priority |
 | **Labels** | `haam.py issue label 123 --add stream:feature --remove stream:idea` (`agent-ready` also needs `--human`, after the human approved the spec) | Update labels |
 | **Comment** | `haam.py issue comment 123 --body "…"` or `--body-file` | Create comment |
 | **Reject or duplicate** (in `/triage`, `/epic` or `/decide`) | `haam.py issue status 123 Canceled --human` (also closes the issue as not planned); comment the reason or the original's ID | Status Canceled, comment |
+| **Test a change** (human, in `/test`) | `haam.py checkout-pr 123`, then `haam.py checkout-pr --back` | Same (the code is in GitHub either way) |
+| **Ship after a pass** (human said `ship`) | `haam.py ship 123 --human`: merge, approve deploy, wait, close | `haam.py ship APP-123 --human`, then set Done in Linear |
 | **Close after release** | `haam.py issue close 123 --human` (sets Done and closes; `/release` only) | Status Done |
 
 ## Rules that apply to both

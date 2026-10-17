@@ -19,6 +19,7 @@ GitHub Projects: `python3 tools/haam/haam.py issue list --status Ready --unassig
 
 Take the first match, in this order:
 
+0. **Rework**: status `Ready` with label `uat-failed` (the human tested it and found problems): always first.
 1. **Bugs**: label `stream:bug`, status `Ready`, priority Urgent or High.
 2. **Features**: status `Ready`, label `agent-ready`, by priority (Urgent → Low), then oldest first.
 3. **Bugs**: label `stream:bug`, status `Ready`, priority Medium or Low.

@@ -71,7 +71,8 @@ Commands are written `/name` below; in Codex use `$name`.
 | Log an idea | `/idea …` |
 | Report a bug | `/bug …` |
 | Turn an approved idea into a spec | `/spec APP-123` |
-| Test someone's change | Follow `docs/uat/APP-123-*.md`, then tell the product owner |
+| Test a change (product owner) | `/test`, then `pass` → `ship`, or say what's wrong |
+| Test someone's change (developer) | Follow `docs/uat/APP-123-*.md`, then tell the product owner |
 | Check your setup | `python3 tools/haam/haam.py doctor` |
 
 ### Running agents in parallel

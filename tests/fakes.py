@@ -216,6 +216,29 @@ if a[:2] == ["issue", "close"]:
     st["issues"][a[2]]["state"] = "CLOSED"; save(); sys.exit(0)
 if a[:2] == ["pr", "view"]:
     out(st["prs"][a[2]])
+if a[:2] == ["pr", "list"]:
+    want = {"open": "OPEN", "merged": "MERGED"}.get(opt(a, "--state", "open"))
+    out([dict(p, number=int(k)) for k, p in st["prs"].items() if p.get("state", "OPEN") == want])
+if a[:2] == ["pr", "merge"]:
+    p = st["prs"][a[2]]
+    if st.get("checks_pending"):
+        st["checks_pending"] -= 1; save()
+        print("Required status check \"release-gate\" is expected", file=sys.stderr); sys.exit(1)
+    p["state"] = "MERGED"; p["mergeCommit"] = {"oid": "abc123"}
+    st.setdefault("runs", []).append({"databaseId": 7, "status": "waiting", "conclusion": "", "url": "https://run/7",
+                                      "headSha": "abc123"})
+    save(); sys.exit(0)
+if a[:2] == ["run", "list"]:
+    out([r for r in st.get("runs", []) if r["headSha"] == opt(a, "--commit")])
+if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/pending_deployments"):
+    if a[2] == "GET":
+        out([{"environment": {"id": 1, "name": "production"}}])
+    for r in st.get("runs", []):
+        r["status"], r["conclusion"] = "completed", "success"
+    st["approved"] = json.loads(stdin) if stdin else True
+    out([])
+if a and a[0] == "api" and a[2:3] == ["DELETE"]:
+    st.setdefault("deleted_refs", []).append(a[3]); out({})
 if a[:2] == ["api", "user"]:
     print(st["me"]); sys.exit(0)
 if a[:2] == ["api", "graphql"]:

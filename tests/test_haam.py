@@ -495,6 +495,36 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("issue", "unlink", str(b))
         self.assertIsNone(json.loads(self.tool("issue", "view", str(b), "--json").stdout)["issue"]["parent"])
 
+    def test_ship_merges_approves_deploy_and_closes(self):
+        self.setup_board()
+        n = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "Export broken", "--status", "UAT",
+                                 "--json").stdout)["number"]
+        st = self.gh_state()
+        st["prs"] = {"5": {"title": f"#{n}: Fix export", "body": f"Refs #{n}", "headRefName": f"{n}-fix-export",
+                           "isDraft": False, "state": "OPEN", "labels": [], "url": "https://pr/5"}}
+        st["checks_pending"] = 1
+        self.state.write_text(json.dumps(st))
+        env = {**self.env, "HAAM_POLL_SECONDS": "0"}
+        # Only with --human, and only after UAT passed
+        self.assertNotEqual(self.tool("ship", str(n), env=env, check=False).returncode, 0)
+        p = self.tool("ship", str(n), "--human", env=env, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("hasn't passed UAT", p.stderr)
+        st = self.gh_state()
+        st["prs"]["5"]["labels"] = [{"name": "uat-passed"}]
+        self.state.write_text(json.dumps(st))
+        res = json.loads(self.tool("ship", str(n), "--human", "--json", env=env).stdout)
+        self.assertEqual(res["state"], "live", res)
+        st = self.gh_state()
+        self.assertEqual(st["prs"]["5"]["state"], "MERGED")
+        self.assertEqual(st["approved"]["state"], "approved")
+        self.assertEqual(st["issues"][str(n)]["state"], "CLOSED")
+        self.assertIn(f"repos/example-org/example-app/git/refs/heads/{n}-fix-export", st["deleted_refs"])
+        self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "Done")
+        self.assertTrue(any("Released to production" in c["body"] for c in st["comments"]))
+        # Running it again is harmless
+        self.assertEqual(json.loads(self.tool("ship", str(n), "--human", "--json", env=env).stdout)["state"], "live")
+
     def test_triage_reject_closes_as_not_planned_and_needs_human(self):
         self.setup_board()
         n = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Dark mode", "--json").stdout)["number"]
@@ -608,6 +638,41 @@ class TestWorktrees(ToolTestCase):
         self.wt("clean", "--apply")
         self.assertFalse(done.exists())
         self.assertTrue(busy.exists() and fresh.exists())
+
+    def test_checkout_pr_detaches_the_branch_and_comes_back(self):
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        state = self.tmp / "gh-state.json"
+        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state)}
+        self.run_tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM",
+                      tool=self.installed_tool(), env=env)
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "config")
+        git(self.proj, "push", "-q", "origin", "main")
+        git(self.proj, "switch", "-q", "-c", "12-fix-export")
+        (self.proj / "docs/uat").mkdir(parents=True, exist_ok=True)
+        (self.proj / "docs/uat/GH-12-fix-export.md").write_text("# UAT plan\n")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "#12: fix")
+        git(self.proj, "push", "-q", "origin", "12-fix-export")
+        git(self.proj, "switch", "-q", "main")
+        git(self.proj, "branch", "-D", "12-fix-export")
+        state.write_text(json.dumps({"me": "tester", "projects": [], "issues": {}, "items": [], "next_issue": 1,
+                                     "next_id": 1, "comments": [], "labels": [], "secrets": [], "prs": {
+            "5": {"title": "#12: Fix export", "body": "Refs #12", "headRefName": "12-fix-export", "isDraft": False,
+                  "state": "OPEN", "labels": [], "url": "https://pr/5"}}}))
+        res = json.loads(self.run_tool("checkout-pr", "12", "--json", tool=self.installed_tool(), env=env).stdout)
+        self.assertEqual(res["pr"], 5)
+        self.assertEqual(res["uat_plan"], "docs/uat/GH-12-fix-export.md")
+        self.assertTrue((self.proj / "docs/uat/GH-12-fix-export.md").exists())
+        self.run_tool("checkout-pr", "--back", tool=self.installed_tool(), env=env)
+        self.assertEqual(subprocess.run(["git", "branch", "--show-current"], cwd=self.proj, capture_output=True,
+                                        text=True).stdout.strip(), "main")
+        # Refuses to switch over unsaved work
+        (self.proj / "README.md").write_text("changed\n")
+        p = self.run_tool("checkout-pr", "12", tool=self.installed_tool(), env=env, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("unsaved changes", p.stderr)
 
     def test_doctor_reports_parallel_chat_setup(self):
         out = json.loads(self.run_tool("doctor", "--json", tool=self.installed_tool()).stdout)

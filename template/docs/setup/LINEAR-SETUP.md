@@ -46,6 +46,7 @@ And these standalone labels:
 | `human-only` | Agents must not pick this up | Human |
 | `override-followup` | Created after a gate override | `/override` |
 | `epic` | Parent issue grouping the sub-issues of one feature | `/triage group`, `/epic`, or a human |
+| `uat-failed` | Failed the human test; agents rework it first | `/test`, `/uat-result` |
 
 Optional: area labels (`area:onboarding`, `area:billing`, `area:checkout`…) to filter the board.
 

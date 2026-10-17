@@ -6,6 +6,25 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-17
+
+### Added
+- **`/test`** (human-invoked): the product owner's one command for testing and shipping. It picks the oldest change waiting in UAT, puts it on this machine and starts the app, shows a short checklist, then:
+  - **`pass`** → asks *"Ship it?"*; on **`ship`** it merges, approves the production deploy on the human's behalf, waits for it, runs the smoke check and closes the issue.
+  - **what went wrong** → records it on the issue, labels it `uat-failed`, sends it back to Ready, and (in Claude Code) starts a worker on the fix straight away. Agents take `uat-failed` items first; the fix comes back to `/test`.
+- `haam.py checkout-pr ISSUE` / `--back`: put an issue's PR on this machine to test (detached, so agents' worktrees aren't disturbed; refuses over unsaved work).
+- `haam.py ship ISSUE --human`: merge when the checks are green, approve the waiting `production` deploy, wait, close the issue, and say when it was the last issue in its epic. Safe to run again; hands back after `--wait` minutes.
+- New issue label `uat-failed` (GitHub and Linear).
+
+### Changed
+- `/uat` adds the `CHANGELOG.md` line on the PR branch, so it ships with the change; `/release` now only handles changes merged some other way, using `ship`.
+- `/uat-result fail` sends the issue back to Ready with `uat-failed` (it used to go to In Progress, assigned); `/next` takes `uat-failed` items first; `/build` reworks them on the same branch and runs `/uat` again.
+- `AGENTS.md`: agents may merge and approve the deploy only through `ship --human`, inside `/test` or `/release`, after the human said `pass` and `ship`.
+- The product manager guide has a new §2a, "Testing a change: the whole loop".
+
+### Migration
+- `haam.py update`, then add the `uat-failed` label: GitHub Projects `haam.py github-project --apply`; Linear `haam.py linear --apply` (in your terminal). From now on, test with `/test`.
+
 ## [1.3.0] - 2026-10-16
 
 ### Added
@@ -78,7 +97,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/jorgedpl/haam-kit/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/jorgedpl/haam-kit/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jorgedpl/haam-kit/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jorgedpl/haam-kit/compare/v1.0.0...v1.1.0

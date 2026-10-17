@@ -82,12 +82,12 @@ Review is layered so that **no agent ever reviews its own work** and **secrets a
 - [ ] UAT plan exists in `docs/uat/` with numbered steps and expected results
 - [ ] Human ran it locally on the PR branch
 - [ ] All steps pass, or failures are recorded and accepted as follow-up issues
-- [ ] `/uat-result <ID> pass` adds the `uat-passed` label to the PR
+- [ ] The human's pass (`/test` or `/uat-result <ID> pass`) adds the `uat-passed` label to the PR
 
 ## G5 Released
 
-- [ ] PR merged to `main` by a human
-- [ ] Production deploy approved in GitHub (environment `production`)
+- [ ] PR merged to `main` by a human, or by `haam.py ship --human` after the human said `ship`
+- [ ] Production deploy approved (environment `production`): in GitHub, or by `ship` on the human's word
 - [ ] Post-deploy smoke check passed (`make smoke`, if defined)
 - [ ] `/release` marks the issue Done and updates `CHANGELOG.md`
 

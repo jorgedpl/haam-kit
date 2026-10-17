@@ -28,7 +28,7 @@ If other agent chats may be open on this machine, work in your own worktree (`AG
 git fetch origin
 git switch -c <branch name for this issue: 123-short-title (GitHub) or Linear's branch name> origin/main
 ```
-Reworking an issue that already has a branch (review or UAT feedback): `git switch <branch> && git pull`. If git says the branch is checked out in another worktree, continue in that worktree's folder, or ask the human.
+Reworking an issue that already has a branch (review feedback, or label `uat-failed`): read the `❌ UAT failed` comment and fix every item on it; `git switch <branch> && git pull`. If git says the branch is checked out in another worktree under `.claude/worktrees/`, continue in that worktree (Claude Code: enter it); otherwise ask the human. When the fixes are pushed and the checks are green, run `/uat` again so it comes back to the human.
 
 ## 3. Plan
 Read the spec and the code it points at. Post a short plan as a comment on the issue (≤ 8 bullets: approach, files, tests). If the spec turns out wrong or ambiguous, comment the question, tell the user, and stop.

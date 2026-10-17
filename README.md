@@ -13,7 +13,8 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 - **A lifecycle with five human gates**: decide the idea, approve the spec, automated checks with independent AI review, human acceptance test, production approval. Every gate can be overridden in an emergency, and every override is recorded and followed up.
 - **Three work streams** agents pull from: bugs, ready features, and ideas to assess. The tracker (GitHub Projects or Linear) holds the backlog, priorities and status.
-- **17 shared skills** (`/idea`, `/bug`, `/assess`, `/triage`, `/epic`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`), in the open Agent Skills format.
+- **18 shared skills** (`/idea`, `/bug`, `/assess`, `/triage`, `/epic`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/test`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`), in the open Agent Skills format.
+- **Testing in one word**: type `/test`, try the change, reply `pass` then `ship` (the agent merges, deploys and closes it), or just say what's wrong (it goes straight back to the agents and returns to you when fixed).
 - **Epics with an agent that asks the right questions**: `/triage group` turns a pile of loose issues into epics (one per feature); `/epic` reads each one, writes a short brief, asks you a few focused questions, then tidies the issues: duplicates, gaps, splits, order.
 - **A guide for the product manager** ([PRODUCT-MANAGER.md](template/docs/process/PRODUCT-MANAGER.md)): daily and weekly rhythm, how to triage, priority rules with a bug impact × reach matrix, healthy queue sizes, done with an agent (`/triage`) or directly in GitHub Projects or Linear.
 - **Parallel agents without collisions**: open a new chat window, type `/work bugs`, and the agent gets its own copy of the project (a git worktree), picks the top bug and works it through to your test. Run as many as you like, on one computer or several.
@@ -27,7 +28,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.3.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.4.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -60,8 +61,9 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `agents [--apply]` | admin | Wire up skills and Linear for Claude Code, Cursor, Codex, Grok, Gemini, Copilot |
 | `github [--apply]` | admin | Labels, branch ruleset with required checks, production approval, security features |
 | `github-project [--apply]` | admin | GitHub Projects board: 12 statuses, Priority field, labels, repo link |
-| `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 8 labels |
+| `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 9 labels |
 | `issue list\|create\|claim\|status\|…` | agents | Work the GitHub Projects board from any agent tool |
+| `checkout-pr ISSUE`, `ship ISSUE --human` | `/test` | Put a change on this machine to test; after `pass` + `ship`: merge, approve the deploy, wait, close |
 | `worktree status\|new\|prep\|list\|clean` | agents, anyone | One worktree per agent chat; copies local files from `.worktreeinclude`; tidies finished ones |
 | `invite --github USER [--linear-email EMAIL] [--apply]` | admin | Invite a developer (GitHub write, not admin; board access or Linear team) |
 | `dev [--apply] [--run-checks]` | developer | Machine check, commit hook, `.env` from example, project checks |

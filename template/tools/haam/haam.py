@@ -20,6 +20,10 @@ Admin (first-time adoption and upgrades):
 Agents, when the tracker is GitHub Projects:
     issue create|view|list|claim|status|priority|label|comment|close|link|unlink|children|edit ...
 
+Testing and shipping (inside /test, after the human's verdict):
+    checkout-pr ISSUE | --back              Put a change on this machine to test it
+    ship ISSUE --human                      Merge, approve the production deploy, wait, close the issue
+
 Parallel chats (one worktree per agent chat):
     worktree status|new|prep|list|clean [--apply]
 
@@ -56,7 +60,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -120,6 +124,7 @@ LINEAR_LABELS = [
     ("human-only", "#95A2B3", "Agents must not pick this up"),
     ("override-followup", "#FC7840", "Created after a gate override"),
     ("epic", "#3E4B9E", "Groups the issues that make up one feature (its sub-issues)"),
+    ("uat-failed", "#D93F0B", "Failed the human test: rework first, then test again"),
 ]
 
 # Files the rename step rewrites (team key / product name)
@@ -1293,6 +1298,7 @@ GH_ISSUE_LABELS = [
     ("human-only", "95A2B3", "Agents must not pick this up"),
     ("override-followup", "FC7840", "Created after a gate override"),
     ("epic", "3E4B9E", "Groups the issues that make up one feature (its sub-issues)"),
+    ("uat-failed", "D93F0B", "Failed the human test: rework first, then test again"),
 ]
 EPIC_LABEL = "epic"
 # Moving into these needs a human decision (they're done through human-only skills)
@@ -1903,6 +1909,220 @@ def cmd_sync_pr(args):
             continue
         board.set_option(iss, "Status", target)
         print(f"#{n}: {iss['status'] or '-'} → {target}")
+
+
+# ----------------------------------------------------------------------------- testing and shipping
+
+def poll_seconds():
+    try:
+        return float(os.environ.get("HAAM_POLL_SECONDS", "15"))
+    except ValueError:
+        return 15.0
+
+
+def issue_ref(cfg, text):
+    """The issue the human means: a number on GitHub Projects, an ID like APP-12 on Linear."""
+    t = (text or "").strip()
+    if cfg.get("tracker") == "github":
+        n = parse_issue_number(t)
+        if n is None:
+            sys.exit(f"Give the issue number, e.g. #12 (got '{text}')")
+        return n
+    if not re.fullmatch(r"[A-Za-z]{2,5}-\d+", t):
+        sys.exit(f"Give the Linear issue ID, e.g. {cfg['team_key']}-12 (got '{text}')")
+    return t.upper()
+
+
+def show_ref(ref):
+    return f"#{ref}" if isinstance(ref, int) else ref
+
+
+def file_id(ref):
+    return f"GH-{ref}" if isinstance(ref, int) else ref
+
+
+def pr_matches(pr, ref):
+    if isinstance(ref, int):
+        return ref in linked_issue_numbers(pr)
+    key = ref.lower()
+    return ((pr.get("title") or "").lower().startswith(key + ":")
+            or (pr.get("headRefName") or "").lower().startswith(key + "-"))
+
+
+def find_pr(cfg, ref, states=("open", "merged")):
+    """The newest PR for an issue: 'Refs #12' / '#12:' / branch 12-… on GitHub, 'APP-12:' / app-12-… on Linear."""
+    for state in states:
+        code, out, err = run(["gh", "pr", "list", "-R", cfg["github_repo"], "--state", state, "--limit", "100",
+                              "--json", "number,title,body,headRefName,state,labels,url,isDraft"])
+        if code != 0:
+            raise RuntimeError(err or out)
+        prs = [p for p in json.loads(out or "[]") if pr_matches(p, ref)]
+        if prs:
+            return max(prs, key=lambda p: p["number"])
+    return None
+
+
+def cmd_checkout_pr(args):
+    """Put the change for an issue on this machine, ready to test (detached, so agents' worktrees aren't disturbed)."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if args.back:
+        b = default_base(root)
+        base = b.split("/", 1)[1] if b.startswith("origin/") else "main"
+        code, _, err = run(["git", "switch", base], cwd=root)
+        if code != 0:
+            sys.exit(f"Couldn't switch back to {base}: {err}")
+        print(f"{OK} Back on {base}. Stop the app if it's still running.")
+        return
+    if not args.issue:
+        sys.exit("Give the issue, e.g. checkout-pr 12")
+    ref = issue_ref(cfg, args.issue)
+    if git_out(root, "status", "--porcelain", "--untracked-files=no"):
+        sys.exit("You have unsaved changes in this folder. Commit or stash them first (git stash), then try again.")
+    try:
+        pr = find_pr(cfg, ref, ("open",))
+    except RuntimeError as e:
+        sys.exit(f"Couldn't look up pull requests: {e}")
+    if not pr:
+        sys.exit(f"No open pull request found for {show_ref(ref)}.")
+    run(["git", "fetch", "--quiet", "origin"], cwd=root)
+    code, _, err = run(["git", "switch", "--quiet", "--detach", f"origin/{pr['headRefName']}"], cwd=root)
+    if code != 0:
+        sys.exit(f"Couldn't check out {pr['headRefName']}: {err}")
+    plans = [p.relative_to(root).as_posix() for p in sorted((root / "docs/uat").glob(f"{file_id(ref)}-*.md"))]
+    res = {"issue": show_ref(ref), "pr": pr["number"], "pr_url": pr["url"], "branch": pr["headRefName"],
+           "uat_plan": plans[0] if plans else None}
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"{OK} {show_ref(ref)}: testing PR #{pr['number']} ({pr['headRefName']}), {pr['url']}")
+    print(f"   Test plan: {res['uat_plan'] or 'not found in docs/uat/ (ask the agent to run /uat)'}")
+    print("   Next: make setup && make dev, then follow the plan. Afterwards: python3 tools/haam/haam.py checkout-pr --back")
+
+
+def cmd_ship(args):
+    """After the human passed UAT and said 'ship': merge, approve the production deploy, wait, close the issue.
+    Safe to run again: it carries on from wherever the last run stopped."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if not args.human:
+        sys.exit("Shipping is the human's decision. Run it only inside /test or /release after the human said "
+                 "'ship' in this session, and add --human.")
+    ref = issue_ref(cfg, args.issue)
+    repo = cfg["github_repo"]
+    deadline = time.time() + args.wait * 60
+    steps = []
+
+    def say(msg):
+        steps.append(msg)
+        if not args.json:
+            print(msg, flush=True)
+
+    def finish(state, ok=True, **extra):
+        res = {"ok": ok, "issue": show_ref(ref), "state": state, "steps": steps, **extra}
+        if args.json:
+            print(json.dumps(res, indent=2))
+        sys.exit(0 if ok else 1)
+
+    try:
+        pr = find_pr(cfg, ref)
+    except RuntimeError as e:
+        sys.exit(f"Couldn't look up pull requests: {e}")
+    if not pr:
+        sys.exit(f"No pull request found for {show_ref(ref)}.")
+    num = str(pr["number"])
+    labels = [l["name"] for l in pr.get("labels") or []]
+
+    # 1. Merge
+    if pr["state"] == "OPEN":
+        if "uat-passed" not in labels and "gate-override" not in labels:
+            sys.exit(f"PR #{num} hasn't passed UAT yet (no 'uat-passed' label). Record the test result first.")
+        if pr.get("isDraft"):
+            sys.exit(f"PR #{num} is still a draft.")
+        waiting_said = False
+        while True:
+            code, out, err = run(["gh", "pr", "merge", num, "-R", repo, "--squash"])
+            if code == 0:
+                say(f"{OK} Merged PR #{num}")
+                break
+            if time.time() > deadline:
+                say(f"{WARN} PR #{num} can't merge yet: {(err or out)[:200]}")
+                finish("waiting for checks", message="Still waiting for the checks. Run the same command again.")
+            if not waiting_said:
+                say(f"{INFO} Waiting for the checks to finish before merging…")
+                waiting_said = True
+            time.sleep(poll_seconds())
+        gh_api("DELETE", f"repos/{repo}/git/refs/heads/{pr['headRefName']}")
+    code, out, err = run(["gh", "pr", "view", num, "-R", repo, "--json", "state,mergeCommit,url"])
+    view = json.loads(out) if code == 0 and out else {}
+    sha = ((view.get("mergeCommit") or {}).get("oid"))
+    if view.get("state") != "MERGED" or not sha:
+        sys.exit(f"PR #{num} isn't merged (state {view.get('state') or pr['state']}).")
+
+    board = None
+    if cfg.get("tracker") == "github":
+        board = GHProject(cfg)
+        board.load()
+        iss = board.issue(ref)
+        if iss["status"] not in ("Deploying", "Done"):
+            board.set_option(iss, "Status", "Deploying")
+
+    # 2. Deploy: approve the production environment and wait
+    run_info = None
+    if args.no_deploy:
+        say(f"{INFO} Skipping the deploy check (--no-deploy): the human confirmed it's live")
+    else:
+        approved = False
+        while True:
+            code, out, _ = run(["gh", "run", "list", "-R", repo, "--workflow", args.workflow, "--commit", sha,
+                                "--json", "databaseId,status,conclusion,url"])
+            runs = json.loads(out) if code == 0 and out else []
+            run_info = runs[0] if runs else None
+            if run_info and run_info["status"] == "completed":
+                if run_info["conclusion"] == "success":
+                    say(f"{OK} Deployed: {run_info['url']}")
+                    break
+                say(f"{BAD} The deploy failed: {run_info['url']}")
+                finish("deploy failed", ok=False, run=run_info["url"],
+                       message="The deploy failed. Open the run, and report it as an Urgent bug if production is affected.")
+            if run_info and run_info["status"] == "waiting" and not approved:
+                code, pend, _ = gh_api("GET", f"repos/{repo}/actions/runs/{run_info['databaseId']}/pending_deployments")
+                env_ids = [p["environment"]["id"] for p in pend or [] if isinstance(p, dict)]
+                if env_ids:
+                    code, _, err = gh_api("POST", f"repos/{repo}/actions/runs/{run_info['databaseId']}/pending_deployments",
+                                          {"environment_ids": env_ids, "state": "approved",
+                                           "comment": f"Approved by {gh_login() or 'the product owner'} after UAT (HAAM ship)"})
+                    if code != 0:
+                        say(f"{WARN} Couldn't approve the deploy: {str(err)[:200]}")
+                        finish("waiting for deploy approval", run=run_info["url"],
+                               message="Approve it in GitHub (Actions → the run → Review deployments), then run this again.")
+                    say(f"{OK} Approved the production deploy")
+                    approved = True
+            if time.time() > deadline:
+                if not run_info:
+                    say(f"{WARN} No '{args.workflow}' run found for the merge commit yet")
+                    finish("no deploy run", message="No deploy started. If this project deploys another way, check "
+                           "it's live, then run again with --no-deploy.")
+                finish("deploying", run=run_info["url"], message="Still deploying. Run the same command again.")
+            time.sleep(poll_seconds())
+
+    # 3. Close the issue
+    where = f" · deploy run {run_info['url']}" if run_info else ""
+    if board:
+        iss = board.issue(ref)
+        board.set_option(iss, "Status", "Done")
+        run(["gh", "issue", "comment", str(ref), "-R", repo, "--body", f"🚀 Released to production{where}"])
+        if iss["state"] == "OPEN":
+            run(["gh", "issue", "close", str(ref), "-R", repo, "--reason", "completed"])
+        say(f"{OK} {show_ref(ref)} is Done")
+        if iss.get("parent"):
+            _, subs = board.sub_issues(iss["parent"])
+            if subs and all(k["state"] == "CLOSED" or k["number"] == ref for k in subs):
+                say(f"{INFO} That was the last open issue in epic #{iss['parent']}. Close the epic too if the human agrees: "
+                    f"issue close {iss['parent']} --human")
+    else:
+        say(f"{INFO} Now set {show_ref(ref)} to Done in Linear and comment: Released to production{where}")
+    finish("live", run=run_info["url"] if run_info else None)
 
 
 # ----------------------------------------------------------------------------- worktrees (parallel chats)
@@ -2528,6 +2748,19 @@ def main():
     p.add_argument("--pr", required=True, type=int)
     p.add_argument("--event", required=True, choices=["opened", "merged"])
     p.set_defaults(func=cmd_sync_pr)
+
+    p = common(sub.add_parser("checkout-pr", help="put an issue's change on this machine to test it (detached)"))
+    p.add_argument("issue", nargs="?", help="issue number (#12) or Linear ID (APP-12)")
+    p.add_argument("--back", action="store_true", help="return to the main branch after testing")
+    p.set_defaults(func=cmd_checkout_pr)
+
+    p = common(sub.add_parser("ship", help="after UAT passed and the human said ship: merge, deploy, close"))
+    p.add_argument("issue", help="issue number (#12) or Linear ID (APP-12)")
+    p.add_argument("--human", action="store_true", help="the human said 'ship' in this session")
+    p.add_argument("--wait", type=float, default=8, help="minutes to wait before handing back (run again to continue)")
+    p.add_argument("--workflow", default="deploy.yml", help="the deploy workflow file")
+    p.add_argument("--no-deploy", action="store_true", help="the human confirmed it's live another way")
+    p.set_defaults(func=cmd_ship)
 
     p = common(sub.add_parser("worktree", help="one worktree per agent chat (parallel work on one machine)"))
     p.add_argument("action", choices=["status", "new", "prep", "list", "clean"])

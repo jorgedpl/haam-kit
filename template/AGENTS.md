@@ -40,6 +40,7 @@ Skills live in `.agents/skills/<name>/SKILL.md` (the shared Agent Skills format)
 | Pick the next work item | `/next` | agent |
 | Build a ready issue | `/build <ID>` | agent |
 | Prepare UAT | `/uat <ID>` | agent |
+| Test a change, then ship it or send it back (G4, G5) | `/test [<ID>]` | **human only** |
 | Record UAT result (G4) | `/uat-result <ID> pass\|fail` | **human only** |
 | Override a gate | `/override <ID> "<reason>"` | **human only** |
 | Close after deploy (G5) | `/release <ID>` | **human only** |
@@ -53,8 +54,8 @@ The setup skills drive `tools/haam/haam.py`; run `python3 tools/haam/haam.py doc
 
 ## 3. Hard rules: never break these
 
-1. **Never push to `main`, never merge a PR, never deploy, never run production commands.** Humans do that.
-2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/epic`, `/decide`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
+1. **Never push to `main`, never merge a PR, never deploy, never run production commands.** Humans do that. The one exception: inside `/test` or `/release`, typed by a human, after the human said `pass` and `ship` in this session, `haam.py ship <ID> --human` merges, approves the deploy and closes the issue for them.
+2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/epic`, `/decide`, `/test`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
 3. **Only build issues that are in `Ready` and have the `agent-ready` label** (bugs: `Ready` is enough). If something isn't ready, help make it ready (`/spec`) instead of building it. **Never build an epic** (label `epic`) as one piece: build its sub-issues, and read the epic's brief in `docs/epics/` for context.
 4. **Claim before you build** (see §6). Never work on an issue someone else has claimed.
 5. **Never put secrets or real personal data** (names, emails, dates of birth, addresses, document numbers of real people) in code, tests, fixtures, logs, commits, the tracker or docs. Use the synthetic fixtures in the test folder.

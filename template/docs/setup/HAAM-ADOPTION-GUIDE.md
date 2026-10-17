@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.3.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.4.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 
@@ -104,7 +104,8 @@ Written `/name` here (Claude Code, Cursor, Grok). In Codex use `$name`. Any othe
 | `/next` | Pick the next item from bugs, features and ideas | Agent |
 | `/build APP-12` | Implement with unit tests, open a PR | Agent |
 | `/uat APP-12` | Write your local test plan | Agent |
-| `/uat-result APP-12 pass` | Gate G4 | Human only |
+| `/test` | Test a change, then `pass` → `ship`, or say what's wrong (G4 and G5) | Human only |
+| `/uat-result APP-12 pass` | Record a test result by itself (G4) | Human only |
 | `/override APP-12 "reason"` | Skip UAT in an emergency | Human only |
 | `/release APP-12` | Close out after deploy | Human only |
 | `/haam-setup` | Adopt HAAM in a repo | Project admin |
@@ -265,7 +266,7 @@ Agents use `python3 tools/haam/haam.py issue …` for every board operation (`do
    python3 tools/haam/haam.py linear           # plan; asks for the key securely
    python3 tools/haam/haam.py linear --apply
    ```
-   It creates the team if needed, turns on Triage, creates the 12 statuses (renaming Linear's default "Todo" to "Ready"), and the 8 labels. It never deletes anything; it lists extra statuses for you to archive.
+   It creates the team if needed, turns on Triage, creates the 12 statuses (renaming Linear's default "Todo" to "Ready"), and the 9 labels. It never deletes anything; it lists extra statuses for you to archive.
 2. **Browser-only settings** `[YOU, in the browser]`: connect GitHub, PR automations (PR opened → In Review, merged → Deploying), branch name format `{issue-identifier}-{issue-title}`, saved views. See `docs/setup/LINEAR-SETUP.md`.
 3. **Connect your agent** to Linear (`docs/setup/AGENTS-SETUP.md`) and test: *"List the issues in Linear team ACM."*
 
@@ -291,11 +292,10 @@ Pick something small and real. Walk it through every stage once:
 | 6 | `/build #1` | Claims it, branches, codes, writes tests, self-reviews, opens PR; the tracker shows In Review |
 | 6b | (automatic) | `ci`, `secrets`, `dependencies` run; the reviewer agent comments; the building agent fixes Blocking findings |
 | 7 | (when all green) `/uat #1` | UAT plan committed; issue moves to UAT; you're notified |
-| 8 | Test locally following the plan | – |
-| 9 | `/uat-result #1 pass` | PR gets `uat-passed`; `release-gate` turns green |
-| 10 | Merge the PR | The tracker moves it to Deploying; deploy waits for your approval |
-| 11 | Approve the deploy in GitHub (Actions → run → Review deployments) | Production updated |
-| 12 | `/release #1` | Smoke check, CHANGELOG entry, issue Done |
+| 8 | `/test #1` | The agent puts the change on your machine, starts the app and gives you a short checklist |
+| 9 | Try it, reply `pass` | PR gets `uat-passed`; `release-gate` turns green; the agent asks "Ship it?" |
+| 10 | Reply `ship` | The agent merges, approves the production deploy for you, waits, and closes the issue: Done |
+| 11 | (try once) `/test` on a change and describe a problem instead | It goes back to the agents with your notes (`uat-failed`) and returns to you when fixed |
 
 (On Linear the IDs look like `ACM-1`.)
 

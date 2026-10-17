@@ -117,15 +117,14 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
 - Full detail: `docs/process/GATES.md` § How code review works.
 
 ### Stage 7: User acceptance testing (UAT, Gate G4, human)
-- **Skill:** `/uat APP-123` (agent prepares), `/uat-result APP-123 pass|fail` (human records).
+- **Skill:** `/uat APP-123` (agent prepares), then the human types `/test` (or records a result with `/uat-result APP-123 pass|fail`).
 - When CI is green the agent writes `docs/uat/APP-123-<slug>.md` from `docs/templates/uat-plan.md`: how to run locally (`make dev` on the PR branch), test data, numbered steps with expected results and checkboxes, edge cases, what is out of scope.
 - The agent posts a short version on the issue and moves it to **UAT**. The human is notified by the tracker.
-- Human tests on **local** first. Pass → `/uat-result pass` adds the PR label `uat-passed`. Fail → `/uat-result fail <notes>` sends it back to **In Progress** with the failures recorded as a checklist on the issue.
+- Human tests on **local** first: `/test` sets the change up and walks them through the plan. Pass → the PR gets the label `uat-passed`. Fail → the failures are recorded as a checklist on the issue, which gets the label `uat-failed` and goes back to **Ready**; agents fix `uat-failed` items before anything else, and the fix comes back to UAT.
 
 ### Stage 8: Release (Deploying → Done, Gate G5, human)
-- Human merges the PR. The tracker moves the issue to **Deploying**.
-- The deploy workflow starts and waits on the GitHub `production` environment, which requires a human approval.
-- After deploy, `/release APP-123` runs a smoke check (if defined), closes the issue as **Done**, and appends a line to `CHANGELOG.md`.
+- After a pass, `/test` asks the human *"Ship it?"*. On `ship`, the agent (`haam.py ship <ID> --human`) merges the PR (the tracker moves the issue to **Deploying**), approves the waiting `production` deploy on the human's behalf, waits for it, runs the smoke check if defined, and closes the issue as **Done**. The human can also do each step by hand: merge, approve the deploy in GitHub, then `/release APP-123`.
+- The `CHANGELOG.md` line is added on the PR branch by `/uat`, so it ships with the change.
 
 ---
 
@@ -179,7 +178,7 @@ How to triage and choose priorities (levels, bug impact × reach, value/confiden
 | Epic brief | `docs/epics/APP-123-*.md` | `/epic` |
 | Feature spec | `docs/specs/APP-123-*.md` | `/spec` |
 | Code + unit tests | `src/`, `tests/` (per stack) | `/build` |
-| UAT plan and results | `docs/uat/APP-123-*.md` | `/uat`, `/uat-result` |
+| UAT plan and results | `docs/uat/APP-123-*.md` | `/uat`, `/test` |
 | Release notes | `CHANGELOG.md` | `/release` |
 | Product context | `docs/product/PRODUCT.md` | Humans |
 | Architecture map | `docs/product/ARCHITECTURE.md` | Agents keep it current |

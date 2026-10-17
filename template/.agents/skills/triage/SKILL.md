@@ -59,4 +59,4 @@ For each item, in the tracker:
 Anything the human didn't confirm stays exactly as it was.
 
 ## 5. Report
-Counts by outcome; what is now in the **Agent queue**; anything Urgent (suggest starting an agent: new chat, `/work bugs`); what is waiting on the human (Decision, UAT, spec PRs). If items are left, offer the next round.
+Counts by outcome; what is now in the **Agent queue**; anything Urgent (suggest starting an agent: new chat, `/work bugs`); what is waiting on the human (Decision, UAT, specs waiting for approval). If items are left, offer the next round.

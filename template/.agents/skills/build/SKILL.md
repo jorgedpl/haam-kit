@@ -29,6 +29,8 @@ If the issue's branch already exists on `origin` (the assessment and spec were c
 ```bash
 git fetch origin
 git switch <branch>                      # existing branch: tracks origin/<branch>
+                                         # "already checked out at …"? the other worktree must
+                                         # `git switch --detach origin/main` first (ask the human if it's another chat's)
 git switch -c <branch> origin/main       # new: 123-short-title (GitHub) or Linear's branch name
 ```
 **Batch of an epic's bugs** (from `/next` or `/work epic <ID>`): claim each bug (GitHub: `issue claim <n> --branch <branch>`), use one branch named after the first (`12-<epic-slug>-bugs`), and one PR titled `#12 #13 #14: <summary> (epic #9)` whose description has a `Refs #n` line for each. Each bug still gets its own failing test first.

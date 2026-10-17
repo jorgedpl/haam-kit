@@ -70,7 +70,9 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           # Audit on PRs that touch code or dependency files; always on the nightly run.
-          if [ "$EVENT" = "pull_request" ] && ! git diff --name-only "$BASE"...HEAD | grep -qvE '^docs/|\.md$'; then
+          files=""
+          [ "$EVENT" = "pull_request" ] && files=$(git diff --name-only "$BASE"...HEAD)
+          if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '^docs/|\.md$'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Docs-only change: audit not needed."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"

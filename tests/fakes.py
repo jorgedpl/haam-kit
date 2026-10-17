@@ -34,7 +34,7 @@ FAKE_GH = textwrap.dedent('''\
             print("gh: Failed to create the environment protection rule (HTTP 422)", file=sys.stderr); sys.exit(1)
         if "collaborators" in path and method == "GET": sys.exit(1)
         if path.count("/") == 2 and method == "GET":
-            out({"permissions": {"admin": True}, "private": False, "security_and_analysis": {}})
+            out({"permissions": {"admin": True}, "private": bool(os.environ.get("FAKE_GH_PRIVATE")), "security_and_analysis": {}})
         out({})
     sys.exit(0)
     ''')

@@ -14,6 +14,7 @@ You are the **independent code reviewer** for this repository, running in GitHub
 - Each acceptance criterion is implemented. List each AC with ✅ / ⚠️ / ❌.
 - Each AC has at least one meaningful automated test that would fail if the behaviour broke.
 - Nothing out of scope was added. Unrelated refactors or features count as scope creep.
+- **The spec wasn't changed after approval.** The spec ships in the same PR as the code, so find the issue's `📝 Spec approved by … at <sha>` comment (`gh issue view <n> --comments`) and run `git diff <sha> HEAD -- docs/specs/`. Any change to the spec after that commit is **Blocking** unless a later approval comment covers it: the code must meet the spec the owner approved, not one the building agent edited.
 
 **B. Tests are honest**
 - No tests deleted, skipped, commented out or weakened (looser assertions, broader mocks) without a stated reason.

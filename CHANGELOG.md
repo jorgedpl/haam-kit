@@ -14,7 +14,8 @@ Fixes from running HAAM on a real project with several agent chats in parallel.
 - The Claude Code secret hook scans the folder the commit happens in (the agent's worktree, or the folder named by `git -C` / `cd … &&`), not always the main folder. It used to block commits over unrelated files and miss what a worktree was committing.
 - New rulesets let admins bypass only when merging a pull request, never by pushing straight to `main` (agents work under a human's login, often an admin's). `github` warns if an existing ruleset still allows "always".
 - `github --apply` no longer overwrites an existing ruleset: it adds only what HAAM needs (missing rules and required checks), keeps the project's own settings and shows what it will change. `--reset` restores HAAM's defaults.
-- `issue status` refuses to move an issue another chat has claimed, unless this chat is on the issue's branch or the human asked (`--force`).
+- `issue status` refuses to move an issue that's In Progress for another chat, unless this chat is on the issue's branch (or the batch branch named in the claim), or the human asked (`--force`, or `--human` inside a human-only skill).
+- Because the spec now ships in the code's PR, the "spec approved" comment records the approved commit, and the reviewer agent blocks any later change to the spec.
 - `ship` refuses to run inside an agent's worktree: only the owner's own chat ships. `AGENTS.md` and `/work` say so.
 - `/test` and `checkout-pr` no longer suggest `git stash` (all worktrees share one stash list).
 
@@ -26,10 +27,10 @@ Fixes from running HAAM on a real project with several agent chats in parallel.
 - New rulesets don't require branches to be up to date before merging (which re-ran CI on every open PR after each merge).
 - Assessments and specs are committed on the issue's own branch, without a PR, and ship with the code in one PR. Epic briefs and split specs still get a (now cheap) docs PR.
 - Dependabot: monthly, grouped, at most 2 open PRs per ecosystem.
-- `haam.py capacity` and new config `max_open_prs` (default 5) and `max_in_uat` (3): `/next` holds new work when either is reached.
+- `haam.py capacity` and new config `max_open_prs` (default 5) and `max_in_uat` (3): `/next` holds new work when either is reached. Bots' PRs (Dependabot) don't count.
 
 ### Changed
-- `"deploy": "manual"` in `haam.config.json` (`config --deploy manual`): `ship` merges, then waits for the owner to deploy and say `live` (`ship --live`) before closing the issue.
+- `"deploy": "manual"` in `haam.config.json` (`config --deploy manual`): `ship` merges, then exits 3 (waiting for the human) until the owner deploys and says `live` (`ship --live`), which closes the issue.
 - Batch an epic's bugs: `/next` offers them as one item, `/work epic <ID>` takes them; one branch, one PR titled `#12 #13 #14: …`, and `ship` closes them all.
 - `doctor` and `github` accept `CLAUDE_CODE_OAUTH_TOKEN` for the AI review (`review.yml` passes it); the security review still needs `ANTHROPIC_API_KEY`.
 - On plans that don't allow required reviewers on private repos, `github` creates the production environment without them and explains why, instead of failing with HTTP 422.
@@ -38,7 +39,8 @@ Fixes from running HAAM on a real project with several agent chats in parallel.
 
 ### Updater
 - `install` and `update` only make the kit's own scripts executable, never the project's.
-- Kit files hidden by the project's `.gitignore` (e.g. `**/build/` hiding `.agents/skills/build/`) are re-included with `.gitignore` negations, restored if missing, and reported; `doctor` checks for them.
+- Kit files hidden by the project's `.gitignore` (e.g. `**/build/` hiding `.agents/skills/build/`) are re-included by a small block kept at the very end of `.gitignore` (so it wins over later rules), restored if missing, and reported; `doctor` checks for them.
+- `github` leaves an existing ruleset alone if it can't read it (instead of replacing it).
 
 ### Migration
 - `haam.py update`. Then run `haam.py github` (plan): it shows what it would add, and warns if your ruleset lets admins bypass "always" or requires up-to-date branches. Change those in the ruleset (or `github --apply --reset`).

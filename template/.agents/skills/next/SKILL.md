@@ -11,7 +11,7 @@ argument-hint: "[bugs|features|ideas]  (optional: restrict to one stream)"
 Filter: $ARGUMENTS (empty = all streams)
 
 ## 0. Room for new work?
-Run `python3 tools/haam/haam.py capacity`. If it says **hold** (too many open PRs, or too many changes waiting for the owner to test; limits in `haam.config.json`), only take rework (label `uat-failed`) or finish a PR that's already open. Otherwise report the hold and stop: more PRs now would only cost CI minutes and wait.
+Run `python3 tools/haam/haam.py capacity`. If it says **hold** (too many open PRs, or too many changes waiting for the owner to test; limits in `haam.config.json`), only take rework (label `uat-failed`) or finish a PR that's already open. If there's none of that, report the hold and stop: more PRs now would only cost CI minutes and wait.
 
 ## 0b. Your own workspace
 If the item you pick will change files (build, spec, assessment), you need your own worktree when other agent chats may be open on this machine (`AGENTS.md` §7). Run `python3 tools/haam/haam.py worktree status`. In the main folder: Claude Code, move into a new worktree first (as in `/work` step 1); other tools, ask the human whether other chats are running and, if so, follow `/work` step 1.

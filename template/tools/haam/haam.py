@@ -413,35 +413,54 @@ def kit_files(src):
 
 
 def sync_gitignore(src, target, dry_run):
-    """Add or refresh the HAAM block in .gitignore. Returns True if it changed."""
+    """Add or refresh the HAAM block in .gitignore, plus re-include lines for kit files the project's own
+    rules would hide. Those go in a separate block kept at the very end of the file: in .gitignore the
+    last matching rule wins, so they must come after every project rule. Returns True if it changed."""
     add_path = src / ".gitignore.additions"
     if not add_path.exists():
         return False
     gi = target / ".gitignore"
     current = gi.read_text() if gi.exists() else ""
-    # Kit files the project's own rules would hide (never committed, so other machines wouldn't get them).
-    keep_neg = []
-    if GITIGNORE_MARK in current:
-        old_block = current[current.index(GITIGNORE_MARK):]
-        keep_neg = [l.strip() for l in old_block.splitlines() if l.strip().startswith("!/")]
-    neg = keep_neg + [l for l in unignore_lines(target, [r for _, r in kit_files(src)]) if l not in keep_neg]
-    extra = ("\n" + UNIGNORE_NOTE + "\n" + "\n".join(neg)) if neg else ""
-    block = f"{GITIGNORE_MARK}\n{add_path.read_text().rstrip()}{extra}\n{GITIGNORE_END}\n"
-    if GITIGNORE_MARK in current:
-        start = current.index(GITIGNORE_MARK)
-        end = current.find(GITIGNORE_END, start)
-        end = len(current) if end == -1 else end + len(GITIGNORE_END)
-        new = current[:start] + block.rstrip("\n") + current[end:]
-        if not new.endswith("\n"):
-            new += "\n"
+
+    def cut(text, start_mark, end_mark):
+        """(text without the marked block, the block's non-empty lines)."""
+        if start_mark not in text:
+            return text, []
+        i = text.index(start_mark)
+        j = text.find(end_mark, i)
+        inner, after = (text[i + len(start_mark):], "") if j == -1 else (text[i + len(start_mark):j], text[j + len(end_mark):])
+        return text[:i] + after.lstrip("\n"), [l.strip() for l in inner.splitlines() if l.strip()]
+
+    body, old_unhide = cut(current, UNHIDE_MARK, UNHIDE_END)
+    keep_neg = [l for l in old_unhide if l.startswith("!/")]
+    block = f"{GITIGNORE_MARK}\n{add_path.read_text().rstrip()}\n{GITIGNORE_END}\n"
+    if GITIGNORE_MARK in body:
+        start = body.index(GITIGNORE_MARK)
+        end = body.find(GITIGNORE_END, start)
+        end = len(body) if end == -1 else end + len(GITIGNORE_END)
+        new = body[:start] + block.rstrip("\n") + body[end:]
     else:
-        new = current + ("\n" if current and not current.endswith("\n") else "") + ("\n" if current else "") + block
+        new = body + ("\n" if body and not body.endswith("\n") else "") + ("\n" if body.strip() else "") + block
+    new = new.rstrip("\n") + "\n"
+    # Which kit files would the project's rules hide? Check against the file without our re-include lines.
+    neg = list(keep_neg)
+    if not dry_run or gi.exists():
+        saved = current
+        gi.write_text(new)
+        try:
+            for line in unignore_lines(target, [r for _, r in kit_files(src)]):
+                if line not in neg:
+                    neg.append(line)
+        finally:
+            if dry_run:
+                gi.write_text(saved)
+    if neg:
+        new += "\n" + UNHIDE_MARK + "\n" + "\n".join(neg) + "\n" + UNHIDE_END + "\n"
     if new == current:
         return False
     if not dry_run:
         gi.write_text(new)
     return True
-
 
 def make_executable(target, src=None):
     """Make the kit's own executable files executable in the project. Never touches the project's files."""
@@ -480,7 +499,8 @@ def unignore_lines(target, rels):
 
 
 INSTALL_SKIP = {".gitignore.additions", "START-HERE.md"}
-UNIGNORE_NOTE = "# HAAM kit files your own rules above would hide (kept so every machine gets them)"
+UNHIDE_MARK = "# >>> HAAM: kit files your own rules would hide (kept last so they win; every machine needs them)"
+UNHIDE_END = "# <<< HAAM re-include"
 
 
 def cmd_install(args):
@@ -1085,7 +1105,10 @@ def cmd_github(args):
         if current:
             c0, full, _ = gh_api("GET", f"repos/{repo}/rulesets/{current['id']}")
             full = full if c0 == 0 and isinstance(full, dict) else None
-        if current and full and not args.reset:
+        if current and not full and not args.reset:
+            rep.add("fail", "Couldn't read the existing ruleset, so it's left unchanged",
+                    "re-run later, or use --reset to replace it with HAAM's defaults")
+        elif current and full and not args.reset:
             merged, changes, notes = merge_ruleset(full, body)
             for n in notes:
                 rep.add("warn", n)
@@ -1143,10 +1166,14 @@ def cmd_github(args):
                                    {"name": cfg.get("default_branch", "main"), "type": "branch"})
                 rep.add("ok" if c4 == 0 or "already" in (e4 or "").lower() else "warn",
                         f"Deploys only from {cfg.get('default_branch', 'main')}", "" if c4 == 0 else (e4 or "")[:120])
-            elif reviewers and ("422" in (e2 or "") or "reviewers" in (e2 or "").lower() or private):
+            elif reviewers and private and "422" in (e2 or "") and any(
+                    k in (e2 or "").lower() for k in ("protection rule", "reviewer", "plan", "upgrade", "not available")):
                 # Required reviewers on private repos need GitHub Team or Enterprise: create the environment without them.
                 env_body["reviewers"] = []
                 c6, _, e6 = gh_api("PUT", f"repos/{repo}/environments/production", env_body)
+                if c6 == 0:
+                    gh_api("POST", f"repos/{repo}/environments/production/deployment-branch-policies",
+                           {"name": cfg.get("default_branch", "main"), "type": "branch"})
                 rep.add("warn" if c6 == 0 else "fail", "Environment 'production' created without a required approver"
                         if c6 == 0 else "Environment not configured",
                         "your GitHub plan doesn't allow required reviewers on private repos (GitHub Team or Enterprise "
@@ -1916,16 +1943,15 @@ def issue_action(args, cfg, board):
         canon = next((n for n, _, _ in GH_STATUSES if n.lower() == new.lower()), None)
         if not canon:
             raise RuntimeError(f"Unknown status '{new}'. Valid: {', '.join(n for n, _, _ in GH_STATUSES)}")
-        me = gh_login()
-        others = [x for x in iss["assignees"] if me and x != me]
         branch = git_out(Path.cwd(), "branch", "--show-current")
         mine = bool(re.match(rf"^{number}-", branch or ""))
-        if (iss["status"] == "In Progress" or others) and not mine and branch and not args.force:
+        guarded = iss["status"] == "In Progress" and not (args.force or args.human)
+        if guarded and not mine and branch:
             # A batch PR's branch is named after its first issue; the claim comment names the branch.
             code, out, _ = run(["gh", "issue", "view", str(number), "-R", repo, "--json", "comments"])
             bodies = [c.get("body", "") for c in (json.loads(out).get("comments") or [])] if code == 0 and out else []
             mine = any("Claimed by" in b_ and f"`{branch}`" in b_ for b_ in bodies)
-        if (iss["status"] == "In Progress" or others) and not mine and not args.force:
+        if guarded and not mine:
             raise RuntimeError(f"#{number} is claimed (status {iss['status']}, assigned to {', '.join(iss['assignees']) or '-'}) "
                                "and this chat isn't on its branch. Leave it to the chat working on it, or add --force "
                                "only when the human asked (e.g. /triage releasing a stuck claim).")
@@ -2172,6 +2198,7 @@ def cmd_checkout_pr(args):
 
 
 SHIP_NOT_FINISHED = 2   # exit code: nothing went wrong, it just isn't finished; run the same command again
+SHIP_WAITING_HUMAN = 3  # exit code: waiting for the human (manual deploy): don't re-run until they say it's live
 
 
 def pr_checks(repo, num):
@@ -2189,7 +2216,7 @@ def pr_checks(repo, num):
 def cmd_ship(args):
     """After the human passed UAT and said 'ship': merge, approve the production deploy, wait, close the issue.
     Safe to run again: it carries on from wherever the last run stopped.
-    Exit codes: 0 live, 2 not finished yet (run again), 1 stopped (needs a human)."""
+    Exit codes: 0 live, 2 not finished yet (run again), 3 waiting for the human to deploy by hand, 1 stopped."""
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     if not args.human:
@@ -2301,8 +2328,9 @@ def cmd_ship(args):
     if args.no_deploy or args.live:
         say(f"{INFO} The human confirmed it's live")
     elif manual:
-        later("deploy by hand", "This project deploys by hand (\"deploy\": \"manual\"): ask the human to deploy it and "
-              "tell you when it's live, then run again with --live.")
+        say(f"{INFO} Merged. This project deploys by hand")
+        finish("deploy by hand", SHIP_WAITING_HUMAN, "Waiting for the human: deploy it your usual way, then say it's live "
+               "(the agent runs this again with --live to close the issue).")
     elif docs_only:
         say(f"{INFO} Docs-only change: nothing to deploy")
     else:
@@ -2392,10 +2420,12 @@ def cmd_capacity(args):
     cfg = load_config(root)
     max_prs, max_uat = int(cfg.get("max_open_prs") or 5), int(cfg.get("max_in_uat") or 3)
     code, out, err = run(["gh", "pr", "list", "-R", cfg.get("github_repo") or "", "--state", "open", "--limit", "200",
-                          "--json", "number,isDraft"])
+                          "--json", "number,isDraft,author"])
     if code != 0:
         sys.exit(f"Couldn't count open pull requests: {(err or out)[:200]}")
-    open_prs = len(json.loads(out or "[]"))
+    # Bots' PRs (Dependabot…) cost CI too, but they shouldn't stop the agents' own work.
+    open_prs = len([p for p in json.loads(out or "[]")
+                    if not ((p.get("author") or {}).get("login", "").endswith("[bot]") or (p.get("author") or {}).get("is_bot"))])
     in_uat = None
     if cfg.get("tracker") == "github":
         try:

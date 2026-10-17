@@ -267,7 +267,7 @@ As on GitHub, agents follow the priority field, not the manual order of a list.
 **Weekly**
 - [ ] Loose issues grouped into epics; top epic shaped
 - [ ] Decision queue decided
-- [ ] Spec PRs approved or commented
+- [ ] Specs approved or commented
 - [ ] Ready and Backlog re-ranked
 - [ ] Stale work chased (`/triage stale`)
 - [ ] Parked items revisited

@@ -148,9 +148,15 @@ class TestInstall(ToolTestCase):
         self.assertEqual(p.returncode, 1)                       # no longer ignored
         self.assertFalse(os.access(self.proj / "scripts/lab-x.sh", os.X_OK))   # the project's own file untouched
         self.assertTrue(os.access(self.proj / "scripts/scan-secrets.sh", os.X_OK))
-        # A second install keeps the negation
+        # A second install keeps the negation, even when the project adds rules after the HAAM block
+        with open(self.proj / ".gitignore", "a") as f:
+            f.write("\n**/build/\n")
         self.install()
-        self.assertIn("!/.agents/skills/build/", (self.proj / ".gitignore").read_text())
+        gi = (self.proj / ".gitignore").read_text()
+        self.assertTrue(gi.rstrip().endswith("# <<< HAAM re-include"))
+        self.assertEqual(gi.count("!/.agents/skills/build/"), 1)
+        p = subprocess.run(["git", "check-ignore", "-q", ".agents/skills/build/SKILL.md"], cwd=self.proj)
+        self.assertEqual(p.returncode, 1)
 
     def test_reinstall_is_idempotent(self):
         self.install()
@@ -371,11 +377,13 @@ class TestGitHub(ToolTestCase):
         self.assertEqual(put["bypass_actors"][0]["bypass_mode"], "pull_request")
 
     def test_environment_without_reviewers_when_the_plan_refuses(self):
-        self.env = {**self.env, "FAKE_GH_ENV_422": "1"}
+        self.env = {**self.env, "FAKE_GH_ENV_422": "1", "FAKE_GH_PRIVATE": "1"}
         out = self.run_tool("github", "--apply", tool=self.installed_tool()).stdout
         self.assertIn("without a required approver", out)
         envs = [json.loads(r["body"]) for r in self.writes() if any(x.endswith("environments/production") for x in r["args"])]
         self.assertEqual(envs[-1]["reviewers"], [])
+        policies = [r for r in self.writes() if any(x.endswith("deployment-branch-policies") for x in r["args"])]
+        self.assertTrue(policies)                                   # still deploys only from main
 
 
 class TestLinear(ToolTestCase):
@@ -646,7 +654,7 @@ class TestGitHubProjects(ToolTestCase):
         self.state.write_text(json.dumps(st))
         env = {**self.env, "HAAM_POLL_SECONDS": "0"}
         p = self.tool("ship", str(b), "--human", env=env, check=False)       # found through the batch title
-        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)                # waiting for the human, not "run again"
         self.assertIn("deploys by hand", p.stdout)
         self.assertEqual(self.gh_state()["prs"]["5"]["state"], "MERGED")
         self.assertEqual(self.gh_state()["issues"][str(a)]["state"], "OPEN")
@@ -816,6 +824,10 @@ class TestWorktrees(ToolTestCase):
         self.assertEqual(run_hook(wt), 2)
         self.assertEqual(run_hook(self.proj, f"git -C {wt} commit -m x"), 2)
         self.assertEqual(run_hook(self.proj, f"cd {wt} && git commit -m x"), 2)
+        self.assertEqual(run_hook(self.proj, f'cd "{wt}" && echo "done" && git commit -m "x"'), 2)
+        self.assertEqual(run_hook(self.proj, f"git -c user.name=x -C {wt} commit -m x"), 2)
+        self.assertEqual(run_hook(wt, "WT=/nowhere; cd $WT && git commit -m x"), 2)      # unknown dir → session folder
+        self.assertEqual(run_hook(wt, "git status"), 0)                                 # not a commit
         # Unrelated changes in the main folder don't block a clean worktree's commit
         (wt / "leak.py").unlink()
         (self.proj / "other.py").write_text('key = "AKIA4XN7PQ2LMZ8RT6WB"\n')

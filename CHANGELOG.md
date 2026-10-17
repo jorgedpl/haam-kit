@@ -15,7 +15,7 @@ Each release lists **Migration** steps when a project needs to do more than run 
 - **Epics**: a parent issue labelled `epic` groups the issues of one feature (GitHub sub-issues; Linear sub-issues), with a brief in `docs/epics/` from the new `docs/templates/epic.md`. Epics are decided once at G1 (`/decide` applies to their idea sub-issues), never built themselves, and closed when their last sub-issue is released.
 - **`/triage group`**: clusters loose issues into proposed epics (title, outcome, members, why) for the product owner to confirm.
 - **`/epic <ID>` or `/epic "<theme>"`** (human-invoked): reads an epic's issues and the code, drafts the brief, interviews the product owner (at most five questions per round), then proposes and applies a clean-up: duplicates, gaps, rewrites, splits, order.
-- `haam.py issue create --epic`, `--parent N`, `issue link N --parent E`, `issue children E` (with progress), `issue list --parent E` / `--no-parent`; `claim` refuses epics; new label `epic` on GitHub and Linear; Epics saved view.
+- `haam.py issue create --epic`, `--parent N`, `issue link N --parent E`, `issue unlink N`, `issue edit N --title/--body-file`, `issue children E` (with progress, including sub-issues not on the board), `issue list --parent E` / `--no-parent`; `claim` refuses epics; new label `epic` on GitHub and Linear; Epics saved view.
 
 ### Changed
 - On GitHub Projects, moving an issue to Canceled also closes it as not planned.

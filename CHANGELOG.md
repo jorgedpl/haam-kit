@@ -6,6 +6,46 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-17
+
+Fixes from running HAAM on a real project with several agent chats in parallel.
+
+### Safety
+- The Claude Code secret hook scans the folder the commit happens in (the agent's worktree, or the folder named by `git -C` / `cd … &&`), not always the main folder. It used to block commits over unrelated files and miss what a worktree was committing.
+- New rulesets let admins bypass only when merging a pull request, never by pushing straight to `main` (agents work under a human's login, often an admin's). `github` warns if an existing ruleset still allows "always".
+- `github --apply` no longer overwrites an existing ruleset: it adds only what HAAM needs (missing rules and required checks), keeps the project's own settings and shows what it will change. `--reset` restores HAAM's defaults.
+- `issue status` refuses to move an issue another chat has claimed, unless this chat is on the issue's branch or the human asked (`--force`).
+- `ship` refuses to run inside an agent's worktree: only the owner's own chat ships. `AGENTS.md` and `/work` say so.
+- `/test` and `checkout-pr` no longer suggest `git stash` (all worktrees share one stash list).
+
+### CI cost
+- `ci.yml`: docs-only PRs pass in seconds; `make check` gets the changed files in `$CI_CHANGED_FILES` so a project can run only the parts a PR touches; no run after every merge to `main`, a nightly full run instead.
+- `security.yml`: the dependency audit skips docs-only PRs and runs nightly on `main`.
+- `review.yml` no longer starts a runner for every label added; `gates.yml` only for code pushes, the two gate labels and override comments.
+- `tracker-sync.yml` no longer runs for every new issue: the board's free "Auto-add to project" workflow does that (setup step), and `issue create` adds its own.
+- New rulesets don't require branches to be up to date before merging (which re-ran CI on every open PR after each merge).
+- Assessments and specs are committed on the issue's own branch, without a PR, and ship with the code in one PR. Epic briefs and split specs still get a (now cheap) docs PR.
+- Dependabot: monthly, grouped, at most 2 open PRs per ecosystem.
+- `haam.py capacity` and new config `max_open_prs` (default 5) and `max_in_uat` (3): `/next` holds new work when either is reached.
+
+### Changed
+- `"deploy": "manual"` in `haam.config.json` (`config --deploy manual`): `ship` merges, then waits for the owner to deploy and say `live` (`ship --live`) before closing the issue.
+- Batch an epic's bugs: `/next` offers them as one item, `/work epic <ID>` takes them; one branch, one PR titled `#12 #13 #14: …`, and `ship` closes them all.
+- `doctor` and `github` accept `CLAUDE_CODE_OAUTH_TOKEN` for the AI review (`review.yml` passes it); the security review still needs `ANTHROPIC_API_KEY`.
+- On plans that don't allow required reviewers on private repos, `github` creates the production environment without them and explains why, instead of failing with HTTP 422.
+- Workflows run on `ubuntu-24.04` (not `ubuntu-latest`), and every job has a time limit.
+- `/build` runs `worktree prep` first in a worktree (local files like `.env`), and `worktree prep` reports whether the git secret hook is on.
+
+### Updater
+- `install` and `update` only make the kit's own scripts executable, never the project's.
+- Kit files hidden by the project's `.gitignore` (e.g. `**/build/` hiding `.agents/skills/build/`) are re-included with `.gitignore` negations, restored if missing, and reported; `doctor` checks for them.
+
+### Migration
+- `haam.py update`. Then run `haam.py github` (plan): it shows what it would add, and warns if your ruleset lets admins bypass "always" or requires up-to-date branches. Change those in the ruleset (or `github --apply --reset`).
+- GitHub Projects: turn on the board's **Auto-add to project** workflow (board → Workflows).
+- If you deploy by hand: `haam.py config --deploy manual`.
+- If `make check` can run parts of the project separately, have it read `$CI_CHANGED_FILES`.
+
 ## [1.4.0] - 2026-10-17
 
 ### Added
@@ -99,7 +139,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/jorgedpl/haam-kit/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/jorgedpl/haam-kit/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/jorgedpl/haam-kit/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jorgedpl/haam-kit/compare/v1.1.0...v1.2.0

@@ -17,10 +17,11 @@ jobs:
   tool:
     name: setup tool (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-15]
         python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +41,8 @@ jobs:
 
   lint:
     name: lint workflows and scripts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: actionlint (kit and repo workflows)

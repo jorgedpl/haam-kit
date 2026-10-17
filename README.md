@@ -28,7 +28,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.4.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.5.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -63,6 +63,7 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `github-project [--apply]` | admin | GitHub Projects board: 12 statuses, Priority field, labels, repo link |
 | `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 9 labels |
 | `issue list\|create\|claim\|status\|…` | agents | Work the GitHub Projects board from any agent tool |
+| `capacity` | agents | Hold new work when too many PRs are open or waiting for your test (limits in `haam.config.json`) |
 | `checkout-pr ISSUE`, `ship ISSUE --human` | `/test` | Put a change on this machine to test; after `pass` + `ship`: merge, approve the deploy, wait, close |
 | `worktree status\|new\|prep\|list\|clean` | agents, anyone | One worktree per agent chat; copies local files from `.worktreeinclude`; tidies finished ones |
 | `invite --github USER [--linear-email EMAIL] [--apply]` | admin | Invite a developer (GitHub write, not admin; board access or Linear team) |

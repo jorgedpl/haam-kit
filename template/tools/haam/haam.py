@@ -60,7 +60,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -87,6 +87,9 @@ DEFAULT_CONFIG = {
     "backup_approvers_github": [],
     "production_url": "",
     "agents": ["claude", "cursor", "codex", "grok"],
+    "deploy": "github",          # github: deploy.yml runs on merge; manual: the owner deploys by hand
+    "max_open_prs": 5,           # agents hold new work when this many PRs are open (CI minutes and your review time)
+    "max_in_uat": 3,             # ...or when this many changes are waiting for the owner to test
     "_applied": {"team_key": PLACEHOLDER_KEY, "product_name": ""},
 }
 
@@ -414,9 +417,16 @@ def sync_gitignore(src, target, dry_run):
     add_path = src / ".gitignore.additions"
     if not add_path.exists():
         return False
-    block = f"{GITIGNORE_MARK}\n{add_path.read_text().rstrip()}\n{GITIGNORE_END}\n"
     gi = target / ".gitignore"
     current = gi.read_text() if gi.exists() else ""
+    # Kit files the project's own rules would hide (never committed, so other machines wouldn't get them).
+    keep_neg = []
+    if GITIGNORE_MARK in current:
+        old_block = current[current.index(GITIGNORE_MARK):]
+        keep_neg = [l.strip() for l in old_block.splitlines() if l.strip().startswith("!/")]
+    neg = keep_neg + [l for l in unignore_lines(target, [r for _, r in kit_files(src)]) if l not in keep_neg]
+    extra = ("\n" + UNIGNORE_NOTE + "\n" + "\n".join(neg)) if neg else ""
+    block = f"{GITIGNORE_MARK}\n{add_path.read_text().rstrip()}{extra}\n{GITIGNORE_END}\n"
     if GITIGNORE_MARK in current:
         start = current.index(GITIGNORE_MARK)
         end = current.find(GITIGNORE_END, start)
@@ -433,14 +443,44 @@ def sync_gitignore(src, target, dry_run):
     return True
 
 
-def make_executable(target):
-    for sh in list((target / "scripts").glob("*.sh")) + list((target / ".githooks").glob("*")) + \
-            list((target / ".claude" / "hooks").glob("*.sh")) + [target / "tools/haam/haam.py"]:
-        if sh.exists() and sh.is_file():
-            sh.chmod(sh.stat().st_mode | 0o111)
+def make_executable(target, src=None):
+    """Make the kit's own executable files executable in the project. Never touches the project's files."""
+    src = src or kit_root()
+    for p, rel_s in kit_files(src):
+        dst = target / rel_s
+        if p.stat().st_mode & 0o111 and dst.exists() and dst.is_file():
+            dst.chmod(dst.stat().st_mode | 0o111)
+
+
+def ignored_paths(target, rels):
+    """Which of these paths the project's .gitignore hides (so they would never be committed)."""
+    if not rels or run(["git", "rev-parse", "--git-dir"], cwd=target)[0] != 0:
+        return set()
+    code, out, _ = run(["git", "check-ignore", "--stdin"], cwd=target, input_text="\n".join(rels) + "\n")
+    return {l.strip() for l in out.splitlines() if l.strip()} if code in (0, 1) else set()
+
+
+def unignore_lines(target, rels):
+    """.gitignore negations that re-include kit files hidden by the project's own rules (e.g. '**/build/'
+    hides .agents/skills/build/). A negation must name the highest ignored folder, so walk up each path."""
+    hidden = ignored_paths(target, rels)
+    lines = []
+    for rel in sorted(hidden):
+        parts = rel.split("/")
+        top = rel
+        for k in range(1, len(parts)):
+            d = "/".join(parts[:k]) + "/"
+            if ignored_paths(target, [d]):
+                top = d
+                break
+        line = f"!/{top}"
+        if line not in lines:
+            lines.append(line)
+    return lines
 
 
 INSTALL_SKIP = {".gitignore.additions", "START-HERE.md"}
+UNIGNORE_NOTE = "# HAAM kit files your own rules above would hide (kept so every machine gets them)"
 
 
 def cmd_install(args):
@@ -547,6 +587,8 @@ def cmd_update(args):
     render = make_renderer(target)
     incoming = target / ".haam" / "incoming"
     added, updated, kept, conflicts, merged, same, skipped = [], [], [], [], [], [], []
+    hidden = ignored_paths(target, [r for _, r in kit_files(src)])
+    unhidden = []
     seen = set()
     new_lock = dict(lock.get("files", {}))
 
@@ -561,9 +603,11 @@ def cmd_update(args):
             new_lock[rel_s] = sha(new)
             continue
         if not dst.exists():
-            if base is not None:
+            if base is not None and rel_s not in hidden:
                 skipped.append(rel_s)  # project deliberately removed it
                 continue
+            if rel_s in hidden:
+                unhidden.append(rel_s)
             added.append(rel_s)
             if args.apply:
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -609,6 +653,11 @@ def cmd_update(args):
         rep.add("info", f"{len(kept)} of your customised files kept (no kit change)", ", ".join(kept[:8]))
     for r in skipped:
         rep.add("info", f"Skipped {r}", "you removed it; not re-added")
+    if hidden:
+        rep.add("warn", f"{len(hidden)} kit file(s) were hidden by your .gitignore", ", ".join(sorted(hidden)[:6])
+                + (" …" if len(hidden) > 6 else "") + " · the HAAM block in .gitignore now re-includes them; commit them")
+    for r in unhidden:
+        rep.add("ok", f"Restored {r}", "it was missing because .gitignore hid it, not because you removed it")
     for r in conflicts:
         rep.add("warn", f"Needs a merge: {r}", f"you and the kit both changed it; new kit version → .haam/incoming/{r}")
     for r in removed:
@@ -748,6 +797,13 @@ def cmd_config(args):
         cfg["backup_approvers_github"] = [x.strip() for x in args.backup_approvers.split(",") if x.strip()]
     if args.agents is not None:
         cfg["agents"] = [x.strip().lower() for x in args.agents.split(",") if x.strip()]
+    if args.deploy is not None:
+        if args.deploy not in ("github", "manual"):
+            sys.exit("--deploy must be github (deploy.yml runs on merge) or manual (you deploy by hand)")
+        cfg["deploy"] = args.deploy
+    for key, val in (("max_open_prs", args.max_open_prs), ("max_in_uat", args.max_in_uat)):
+        if val is not None:
+            cfg[key] = int(val)
 
     cfg["team_key"] = (cfg.get("team_key") or PLACEHOLDER_KEY).upper()
     if not re.fullmatch(r"[A-Z][A-Z0-9]{1,6}", cfg["team_key"]):
@@ -763,7 +819,7 @@ def cmd_config(args):
 
     missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
     for k in ("product_name", "tracker", "team_key", "github_repo", "product_owner_github",
-              "production_url", "agents") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
+              "production_url", "agents", "deploy", "max_open_prs", "max_in_uat") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
         v = cfg.get(k)
         rep.add("ok" if v else "warn", f"{k}: {v if v else '(not set)'}")
     if missing:
@@ -920,7 +976,9 @@ def ruleset_body(cfg):
         "name": "HAAM main protection",
         "target": "branch",
         "enforcement": "active",
-        "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+        # Admins may bypass only when merging a pull request, never by pushing straight to main:
+        # every agent works under a human's login, often an admin's.
+        "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
         "rules": [
             {"type": "deletion"},
@@ -933,11 +991,44 @@ def ruleset_body(cfg):
                 "required_review_thread_resolution": False,
             }},
             {"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": True,
+                # Off: "must be up to date before merging" re-runs CI on every open PR after each merge.
+                "strict_required_status_checks_policy": False,
                 "required_status_checks": [{"context": c_} for c_ in REQUIRED_CHECKS],
             }},
         ],
     }
+
+
+def merge_ruleset(current, wanted):
+    """Add what HAAM needs to an existing ruleset, keeping everything the project set itself.
+    Returns (body to PUT, list of changes, list of warnings)."""
+    keep = {k: current.get(k) for k in ("name", "target", "enforcement", "conditions", "bypass_actors")}
+    rules = [dict(r) for r in current.get("rules") or []]
+    changes, notes = [], []
+    types = {r["type"]: r for r in rules}
+    for r in wanted["rules"]:
+        if r["type"] not in types:
+            rules.append(r)
+            changes.append(f"Add the '{r['type']}' rule")
+    checks_rule = next(r for r in rules if r["type"] == "required_status_checks")
+    params = checks_rule.setdefault("parameters", {})
+    have = {c.get("context") for c in params.get("required_status_checks") or []}
+    missing = [c["context"] for c in wanted["rules"][-1]["parameters"]["required_status_checks"] if c["context"] not in have]
+    if missing:
+        params["required_status_checks"] = list(params.get("required_status_checks") or []) + [{"context": c} for c in missing]
+        params.setdefault("strict_required_status_checks_policy", False)
+        changes.append("Require the check(s) " + ", ".join(missing))
+    if params.get("strict_required_status_checks_policy"):
+        notes.append("'Branches must be up to date before merging' is on: every merge re-runs CI on all open PRs "
+                     "(costs CI minutes). Turn it off in the ruleset, or run github --apply --reset")
+    if any(a.get("bypass_mode") == "always" for a in keep.get("bypass_actors") or []):
+        notes.append("Admins can bypass the rules 'always': agents working under an admin login could push straight "
+                     "to main. Set bypass to 'pull request only' in the ruleset, or run github --apply --reset")
+    if keep.get("enforcement") != "active":
+        notes.append(f"The ruleset's enforcement is '{keep.get('enforcement')}', not 'active': the gates aren't enforced")
+    body = {k: v for k, v in keep.items() if v is not None}
+    body["rules"] = [{k: v for k, v in r.items() if k in ("type", "parameters")} for r in rules]
+    return body, changes, notes
 
 
 def cmd_github(args):
@@ -989,21 +1080,41 @@ def cmd_github(args):
         rep.add("fail", "Can't read rulesets", (err or "")[:160])
         rep.action(WHO_BROWSER, "Rulesets on private repos need a paid GitHub plan (Pro/Team). Upgrade, "
                    "or set equivalent classic branch protection manually (docs/setup/GITHUB-SETUP.md §2)")
-    elif apply:
-        if current:
-            c2, _, e2 = gh_api("PUT", f"repos/{repo}/rulesets/{current['id']}", body)
-        else:
-            c2, _, e2 = gh_api("POST", f"repos/{repo}/rulesets", body)
-        rep.add("ok" if c2 == 0 else "fail", "Ruleset 'HAAM main protection' " + ("updated" if current else "created")
-                if c2 == 0 else "Ruleset not applied", (e2 or "")[:200])
-        if c2 != 0 and private:
-            rep.action(WHO_BROWSER, "Rulesets on private repos need GitHub Pro/Team. Upgrade or protect the "
-                       "branch manually (docs/setup/GITHUB-SETUP.md §2)")
     else:
-        rep.add("ok" if current else "warn", "Ruleset 'HAAM main protection'",
-                "exists (will refresh)" if current else "will create")
+        full = None
+        if current:
+            c0, full, _ = gh_api("GET", f"repos/{repo}/rulesets/{current['id']}")
+            full = full if c0 == 0 and isinstance(full, dict) else None
+        if current and full and not args.reset:
+            merged, changes, notes = merge_ruleset(full, body)
+            for n in notes:
+                rep.add("warn", n)
+            if not changes:
+                rep.add("ok", "Ruleset 'HAAM main protection' has everything HAAM needs", "your own settings are kept")
+            elif apply:
+                c2, _, e2 = gh_api("PUT", f"repos/{repo}/rulesets/{current['id']}", merged)
+                for ch in changes:
+                    rep.add("ok" if c2 == 0 else "fail", ch)
+                if c2 != 0:
+                    rep.add("fail", "Ruleset not updated", (e2 or "")[:200])
+            else:
+                for ch in changes:
+                    rep.add("warn", f"Will {ch[0].lower() + ch[1:]}", "everything else in your ruleset is kept")
+        elif apply:
+            if current:
+                c2, _, e2 = gh_api("PUT", f"repos/{repo}/rulesets/{current['id']}", body)
+            else:
+                c2, _, e2 = gh_api("POST", f"repos/{repo}/rulesets", body)
+            rep.add("ok" if c2 == 0 else "fail", "Ruleset 'HAAM main protection' " + ("reset to HAAM defaults" if current else "created")
+                    if c2 == 0 else "Ruleset not applied", (e2 or "")[:200])
+            if c2 != 0 and private:
+                rep.action(WHO_BROWSER, "Rulesets on private repos need GitHub Pro/Team. Upgrade or protect the "
+                           "branch manually (docs/setup/GITHUB-SETUP.md §2)")
+        else:
+            rep.add("ok" if current else "warn", "Ruleset 'HAAM main protection'",
+                    "exists: --reset replaces it with HAAM defaults" if current else "will create")
     rep.add("info", "Required checks: " + ", ".join(REQUIRED_CHECKS))
-    rep.add("info", "Admins can bypass (Level 2 emergency override)")
+    rep.add("info", "Admins can bypass only when merging a pull request (Level 2 emergency override), never by pushing to main")
 
     # Production environment
     rep.section("Production environment (Gate G5)")
@@ -1032,11 +1143,16 @@ def cmd_github(args):
                                    {"name": cfg.get("default_branch", "main"), "type": "branch"})
                 rep.add("ok" if c4 == 0 or "already" in (e4 or "").lower() else "warn",
                         f"Deploys only from {cfg.get('default_branch', 'main')}", "" if c4 == 0 else (e4 or "")[:120])
+            elif reviewers and ("422" in (e2 or "") or "reviewers" in (e2 or "").lower() or private):
+                # Required reviewers on private repos need GitHub Team or Enterprise: create the environment without them.
+                env_body["reviewers"] = []
+                c6, _, e6 = gh_api("PUT", f"repos/{repo}/environments/production", env_body)
+                rep.add("warn" if c6 == 0 else "fail", "Environment 'production' created without a required approver"
+                        if c6 == 0 else "Environment not configured",
+                        "your GitHub plan doesn't allow required reviewers on private repos (GitHub Team or Enterprise "
+                        "does). Deploys start as soon as a PR merges, so G5 is your 'ship' in /test." if c6 == 0 else (e6 or "")[:200])
             else:
                 rep.add("fail", "Environment not configured", (e2 or "")[:200])
-                if private:
-                    rep.action(WHO_BROWSER, "Required deploy approvals on private repos may need a paid GitHub "
-                               "plan. Check Settings → Environments, or upgrade")
             if cfg.get("production_url"):
                 c5, _, _ = run(["gh", "variable", "set", "PRODUCTION_URL", "--env", "production",
                                 "--body", cfg["production_url"], "-R", repo])
@@ -1072,8 +1188,12 @@ def cmd_github(args):
     names = {s["name"] for s in json.loads(out)} if code == 0 and out else set()
     if "ANTHROPIC_API_KEY" in names:
         rep.add("ok", "ANTHROPIC_API_KEY (for the reviewer agents)")
+    elif "CLAUDE_CODE_OAUTH_TOKEN" in names:
+        rep.add("ok", "CLAUDE_CODE_OAUTH_TOKEN (the AI review runs on your Claude subscription)")
+        rep.add("warn", "The security review still needs ANTHROPIC_API_KEY", "without it, security-review stays red "
+                "until a human overrules it; add the key when you can")
     else:
-        rep.add("fail", "ANTHROPIC_API_KEY missing", "AI reviews can't run without it")
+        rep.add("fail", "No key for the reviewer agents", "set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN for the AI review)")
         rep.action(WHO_TERMINAL, "Create a dedicated API key with a spend limit at console.anthropic.com, then "
                    "paste it when this command asks (it is not shown or stored anywhere else)",
                    f"gh secret set ANTHROPIC_API_KEY -R {repo}")
@@ -1608,6 +1728,7 @@ def cmd_github_project(args):
               "Triage: filter  status:Triage  (the product owner's daily inbox)",
               "Epics: filter  label:epic  (table layout; show the Sub-issues progress field)",
               "In table views, show the Parent issue field so each card shows its epic",
+              "Workflows: turn on 'Auto-add to project' for this repository (issues made on GitHub's website join the board, no Actions minutes)",
               "Agent queue: filter  status:Ready no:assignee  (features also need label:agent-ready)",
               "Waiting on me: filter  status:Decision,UAT",
               "Ideas inbox: filter  status:Triage,Discovery label:stream:idea",
@@ -1795,6 +1916,19 @@ def issue_action(args, cfg, board):
         canon = next((n for n, _, _ in GH_STATUSES if n.lower() == new.lower()), None)
         if not canon:
             raise RuntimeError(f"Unknown status '{new}'. Valid: {', '.join(n for n, _, _ in GH_STATUSES)}")
+        me = gh_login()
+        others = [x for x in iss["assignees"] if me and x != me]
+        branch = git_out(Path.cwd(), "branch", "--show-current")
+        mine = bool(re.match(rf"^{number}-", branch or ""))
+        if (iss["status"] == "In Progress" or others) and not mine and branch and not args.force:
+            # A batch PR's branch is named after its first issue; the claim comment names the branch.
+            code, out, _ = run(["gh", "issue", "view", str(number), "-R", repo, "--json", "comments"])
+            bodies = [c.get("body", "") for c in (json.loads(out).get("comments") or [])] if code == 0 and out else []
+            mine = any("Claimed by" in b_ and f"`{branch}`" in b_ for b_ in bodies)
+        if (iss["status"] == "In Progress" or others) and not mine and not args.force:
+            raise RuntimeError(f"#{number} is claimed (status {iss['status']}, assigned to {', '.join(iss['assignees']) or '-'}) "
+                               "and this chat isn't on its branch. Leave it to the chat working on it, or add --force "
+                               "only when the human asked (e.g. /triage releasing a stuck claim).")
         human_move = canon in HUMAN_STATUSES or (iss["status"] == "Decision" and canon == "Backlog")
         if human_move and not args.human:
             raise RuntimeError(f"Moving to {canon} is a human decision. Only do it while running the human-only skill "
@@ -1944,11 +2078,21 @@ def file_id(ref):
 def pr_matches(pr, ref):
     """Strict: the PR's branch or title names this issue (never a mere mention in the description)."""
     head = (pr.get("headRefName") or "").lower()
-    title = (pr.get("title") or "").lower().strip()
     if isinstance(ref, int):
-        return bool(re.match(rf"^{ref}-", head) or re.match(rf"^#{ref}\s*:", title))
+        return bool(re.match(rf"^{ref}-", head)) or ref in pr_title_issues(pr)
     key = ref.lower()
-    return bool(re.search(rf"(^|/){re.escape(key)}-", head) or title.startswith(key + ":"))
+    return bool(re.search(rf"(^|/){re.escape(key)}-", head)) or ref in pr_title_issues(pr)
+
+
+def pr_title_issues(pr):
+    """Issues a PR's title names before the colon: '#12: …', or a batch '#12 #13 #14: …' ('APP-12 APP-13: …')."""
+    m = re.match(r"\s*((?:(?:#\d+|[A-Za-z]{2,5}-\d+)[\s,]*)+):", pr.get("title") or "")
+    if not m:
+        return []
+    out = []
+    for tok in re.findall(r"#\d+|[A-Za-z]{2,5}-\d+", m.group(1)):
+        out.append(int(tok[1:]) if tok.startswith("#") else tok.upper())
+    return out
 
 
 def find_pr(cfg, ref, states=("open", "merged")):
@@ -2002,7 +2146,8 @@ def cmd_checkout_pr(args):
         sys.exit("Give the issue, e.g. checkout-pr 12")
     ref = issue_ref(cfg, args.issue)
     if git_out(root, "status", "--porcelain", "--untracked-files=no"):
-        sys.exit("You have unsaved changes in this folder. Commit or stash them first (git stash), then try again.")
+        sys.exit("You have unsaved changes in this folder. Commit them, or copy them somewhere safe and undo them, "
+                 "then try again. (Avoid git stash: all worktrees share one stash list, so agents' work gets mixed in.)")
     try:
         pr = find_pr(cfg, ref, ("open",))
     except RuntimeError as e:
@@ -2050,6 +2195,8 @@ def cmd_ship(args):
     if not args.human:
         sys.exit("Shipping is the human's decision. Run it only inside /test (after the human said 'pass' and "
                  "'ship') or /release (with --merged-only), and add --human.")
+    if git_paths(root)[2]:
+        sys.exit("ship runs only from the owner's own chat in the main project folder, never from an agent's worktree.")
     ref = issue_ref(cfg, args.issue)
     repo = cfg["github_repo"]
     deadline = time.time() + args.wait * 60
@@ -2150,8 +2297,12 @@ def cmd_ship(args):
 
     # 2. Deploy: approve the production environment and wait
     run_info = None
-    if args.no_deploy:
-        say(f"{INFO} Not waiting for a deploy (--no-deploy: the human confirmed it's live)")
+    manual = cfg.get("deploy") == "manual"
+    if args.no_deploy or args.live:
+        say(f"{INFO} The human confirmed it's live")
+    elif manual:
+        later("deploy by hand", "This project deploys by hand (\"deploy\": \"manual\"): ask the human to deploy it and "
+              "tell you when it's live, then run again with --live.")
     elif docs_only:
         say(f"{INFO} Docs-only change: nothing to deploy")
     else:
@@ -2199,8 +2350,19 @@ def cmd_ship(args):
                      "deploys; only if they confirm it's live, run again with --no-deploy.")
             time.sleep(poll_seconds())
 
-    # 3. Close the issue (once)
+    # 3. Close the issue(s) (once). A batch PR ('#12 #13: …') closes every issue it names.
     where = f" · deploy run {run_info['url']}" if run_info else ""
+    others = [r for r in pr_title_issues(pr) if isinstance(r, type(ref)) and r != ref]
+    for extra in others:
+        if board:
+            e = board.issue(extra)
+            if e["state"] == "OPEN":
+                board.set_option(e, "Status", "Done")
+                run(["gh", "issue", "comment", str(extra), "-R", repo, "--body", f"🚀 Released to production with #{ref}{where}"])
+                run(["gh", "issue", "close", str(extra), "-R", repo, "--reason", "completed"])
+                say(f"{OK} #{extra} is live and Done (same PR)")
+        else:
+            say(f"{INFO} Also set {show_ref(extra)} to Done in Linear (same PR)")
     if board:
         iss = board.issue(ref)
         if iss["status"] != "Done" or iss["state"] == "OPEN":
@@ -2222,6 +2384,40 @@ def cmd_ship(args):
         data.pop(show_ref(ref), None)
         tf.write_text(json.dumps(data, indent=2) + "\n")
     finish("live", 0, f"{show_ref(ref)} is live.", run=run_info["url"] if run_info else None)
+
+
+def cmd_capacity(args):
+    """Whether agents should start new work: open PRs and changes waiting in UAT against the limits in haam.config.json."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    max_prs, max_uat = int(cfg.get("max_open_prs") or 5), int(cfg.get("max_in_uat") or 3)
+    code, out, err = run(["gh", "pr", "list", "-R", cfg.get("github_repo") or "", "--state", "open", "--limit", "200",
+                          "--json", "number,isDraft"])
+    if code != 0:
+        sys.exit(f"Couldn't count open pull requests: {(err or out)[:200]}")
+    open_prs = len(json.loads(out or "[]"))
+    in_uat = None
+    if cfg.get("tracker") == "github":
+        try:
+            board = GHProject(cfg)
+            board.load()
+            in_uat = len([i for i in board.items() if i["status"] == "UAT" and i["state"] == "OPEN"])
+        except RuntimeError:
+            in_uat = None
+    reasons = []
+    if open_prs >= max_prs:
+        reasons.append(f"{open_prs} open PRs (limit {max_prs})")
+    if in_uat is not None and in_uat >= max_uat:
+        reasons.append(f"{in_uat} changes waiting for the owner to test (limit {max_uat})")
+    res = {"hold": bool(reasons), "open_prs": open_prs, "max_open_prs": max_prs, "in_uat": in_uat,
+           "max_in_uat": max_uat, "reasons": reasons}
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    if reasons:
+        print(f"{WARN} Hold new work: " + "; ".join(reasons) + ". Rework (uat-failed) and finishing open PRs are still fine.")
+    else:
+        print(f"{OK} Room for new work: {open_prs}/{max_prs} open PRs" + (f", {in_uat}/{max_uat} in UAT" if in_uat is not None else ""))
 
 
 # ----------------------------------------------------------------------------- worktrees (parallel chats)
@@ -2409,9 +2605,13 @@ def cmd_worktree(args):
 
     if act == "prep":
         copied, skipped = copy_includes(main, top)
+        hooks_on = git_out(top, "config", "core.hooksPath") == ".githooks"
         if args.json:
-            print(json.dumps({"in_worktree": linked, "copied": copied, "skipped": skipped}, indent=2))
+            print(json.dumps({"in_worktree": linked, "copied": copied, "skipped": skipped,
+                              "secret_hook_on": hooks_on}, indent=2))
             return
+        if not hooks_on:
+            print(f"{WARN} The git secret hook is off for this repository: run `make hooks` (once per clone).")
         if not linked:
             print(f"{INFO} This is the main folder; nothing to copy.")
         elif not include_patterns(main):
@@ -2697,6 +2897,13 @@ def cmd_doctor(args):
     for rel in SKILL_LINKS:
         rep.add("ok" if (root / rel).exists() else "warn", rel)
 
+    hidden = ignored_paths(root, sorted((load_lock(root).get("files") or {}).keys()))
+    rep.add("ok" if not hidden else "fail", "Kit files committed (not hidden by .gitignore)",
+            "" if not hidden else "hidden: " + ", ".join(sorted(hidden)[:6]))
+    if hidden:
+        rep.action(WHO_AGENT, "Re-include the hidden kit files: re-run the kit's update (it adds .gitignore negations), "
+                   "then commit them", "python3 <kit>/tools/haam/haam.py update --target . --apply")
+
     rep.section("Parallel chats")
     _, main_dir, linked = git_paths(root)
     rep.add("info", "This chat has its own worktree" if linked else "This is the main folder",
@@ -2724,8 +2931,8 @@ def cmd_doctor(args):
         code, _, _ = gh_api("GET", f"repos/{repo}/environments/production")
         rep.add("ok" if code == 0 else "warn", "Production environment")
         code, out, _ = run(["gh", "secret", "list", "-R", repo, "--json", "name"])
-        has_key = code == 0 and "ANTHROPIC_API_KEY" in out
-        rep.add("ok" if has_key else "warn", "ANTHROPIC_API_KEY secret")
+        has_key = code == 0 and ("ANTHROPIC_API_KEY" in out or "CLAUDE_CODE_OAUTH_TOKEN" in out)
+        rep.add("ok" if has_key else "warn", "Reviewer key (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN)")
         if miss or not ok_rs or not has_key:
             rep.action(WHO_AGENT, "Show the GitHub plan, get the human's OK, then apply",
                        "python3 tools/haam/haam.py github  →  python3 tools/haam/haam.py github --apply")
@@ -2801,6 +3008,9 @@ def main():
     p.add_argument("--tracker", help="github (GitHub Projects) or linear")
     p.add_argument("--project-number", help="existing GitHub Projects board number to use")
     p.add_argument("--project-owner", help="GitHub user/org that owns the board (default: repo owner)")
+    p.add_argument("--deploy", help="github (deploy.yml on merge, default) or manual (you deploy by hand)")
+    p.add_argument("--max-open-prs", type=int, help="agents hold new work at this many open PRs (default 5)")
+    p.add_argument("--max-in-uat", type=int, help="...or at this many changes waiting for you to test (default 3)")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_config)
 
@@ -2809,6 +3019,9 @@ def main():
                         ("linear", cmd_linear, "configure Linear")):
         p = common(sub.add_parser(name, help=h))
         p.add_argument("--apply", action="store_true")
+        if name == "github":
+            p.add_argument("--reset", action="store_true", help="replace the HAAM ruleset with HAAM's defaults "
+                           "instead of adding only what's missing")
         p.set_defaults(func=fn)
 
     p = common(sub.add_parser("github-project", help="set up the GitHub Projects board (tracker: github)"))
@@ -2839,7 +3052,8 @@ def main():
     p.add_argument("--tool", help="claim: agent tool, e.g. 'Claude Code'")
     p.add_argument("--machine", help="claim: which computer, e.g. 'desktop'")
     p.add_argument("--branch", help="claim: branch name")
-    p.add_argument("--force", action="store_true", help="claim: allow claiming a non-Ready issue (bugs)")
+    p.add_argument("--force", action="store_true", help="claim: allow a non-Ready issue (bugs); status: move an issue "
+                   "another chat has claimed (only when the human asked)")
     p.add_argument("--human", action="store_true", help="a human ran the human-only skill for this change")
     p.set_defaults(func=cmd_issue)
 
@@ -2859,8 +3073,12 @@ def main():
     p.add_argument("--wait", type=float, default=1.5, help="minutes to wait before handing back (exit 2: run again)")
     p.add_argument("--merged-only", action="store_true", help="/release: never merge, only finish an already-merged PR")
     p.add_argument("--workflow", default="deploy.yml", help="the deploy workflow file")
-    p.add_argument("--no-deploy", action="store_true", help="the human confirmed it's live another way")
+    p.add_argument("--live", action="store_true", help="the human confirmed it's live (manual deploys)")
+    p.add_argument("--no-deploy", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_ship)
+
+    p = common(sub.add_parser("capacity", help="should agents start new work? open PRs and UAT queue vs limits"))
+    p.set_defaults(func=cmd_capacity)
 
     p = common(sub.add_parser("worktree", help="one worktree per agent chat (parallel work on one machine)"))
     p.add_argument("action", choices=["status", "new", "prep", "list", "clean"])

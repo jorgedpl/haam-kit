@@ -9,8 +9,9 @@
 # a passing review, or a human adding the PR label `ai-review-overruled`.
 # (Statuses are used instead of job results because a skipped job counts as passing.)
 #
-# Needs repository secret ANTHROPIC_API_KEY (billed per review, separate from
-# Claude subscriptions). Docs-only PRs pass without calling Claude.
+# Needs repository secret ANTHROPIC_API_KEY (billed per review, separate from Claude
+# subscriptions); the ai-review can use CLAUDE_CODE_OAUTH_TOKEN instead. Docs-only PRs pass
+# without calling Claude.
 name: Review
 
 on:
@@ -37,7 +38,10 @@ env:
 jobs:
   scope:
     name: review scope
-    runs-on: ubuntu-latest
+    # Label events only matter for the overrule label: skip the rest without starting a runner.
+    if: github.event.action != 'labeled' || github.event.label.name == 'ai-review-overruled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
@@ -87,7 +91,7 @@ jobs:
     name: ai review runner
     needs: scope
     if: needs.scope.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -97,7 +101,10 @@ jobs:
       - name: Independent review
         uses: anthropics/claude-code-action@v1
         with:
+          # Either secret works: an API key (billed per review) or CLAUDE_CODE_OAUTH_TOKEN (your Claude plan;
+          # create it with `claude setup-token`). The security review below needs the API key.
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           prompt: |
             REPO: ${{ github.repository }}
@@ -124,7 +131,7 @@ jobs:
     name: security review runner
     needs: scope
     if: needs.scope.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4

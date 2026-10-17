@@ -20,10 +20,10 @@ Settings → **Rules → Rulesets** → New branch ruleset (or classic Branch pr
 - ✅ Require a pull request before merging
   - Required approvals: **1** once you have a second human; **0** while you're solo (UAT label is your approval)
   - ✅ Dismiss stale approvals when new commits are pushed
-- ✅ Require status checks to pass, and require branches to be up to date
+- ✅ Require status checks to pass (leave "require branches to be up to date" off: it re-runs CI on every open PR after each merge)
   - Required checks: **`ci`**, **`secrets`**, **`dependencies`**, **`ai-review`**, **`security-review`** and **`release-gate`** (they appear in the list after the workflows have run once on a PR)
 - ✅ Require linear history (optional, keeps history clean)
-- **Bypass list:** repository admins only. This is the Level 2 emergency bypass in `docs/process/GATES.md`.
+- **Bypass list:** repository admins only, **for pull requests only** (never "always": agents work under a human's login, often an admin's, and could otherwise push straight to `main`). This is the Level 2 emergency bypass in `docs/process/GATES.md`.
 
 ## 3. Code review and security
 

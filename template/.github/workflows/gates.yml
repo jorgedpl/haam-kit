@@ -7,7 +7,7 @@ name: Gates
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review, edited]
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review]
   issue_comment:
     types: [created, edited]
 
@@ -24,8 +24,16 @@ jobs:
     # correct for comment events too (which don't run against the PR commit).
     name: evaluate release gate
     # For comments, only run when the comment is on a PR.
-    if: github.event_name == 'pull_request' || github.event.issue.pull_request
-    runs-on: ubuntu-latest
+    # Only events that can change the result start a runner: code pushes, the two gate labels,
+    # and override comments (contains() ignores case).
+    if: >-
+      (github.event_name == 'pull_request' &&
+        ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+         github.event.label.name == 'uat-passed' || github.event.label.name == 'gate-override')) ||
+      (github.event.issue.pull_request &&
+        (contains(github.event.comment.body, 'OVERRIDE:') || contains(github.event.comment.body, 'EMERGENCY BYPASS:')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - name: Check UAT / override
         uses: actions/github-script@v7

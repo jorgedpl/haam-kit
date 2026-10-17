@@ -36,7 +36,7 @@ Skills live in `.agents/skills/<name>/SKILL.md` (the shared Agent Skills format)
 | Shape an epic with the product owner | `/epic <ID>` or `/epic "<theme>"` | **human only** |
 | Record a decision (G1) | `/decide <ID> approve\|park\|reject` | **human only** |
 | Write the spec | `/spec <ID>` | agent |
-| Start an agent in a new chat window | `/work [bugs\|features\|ideas]` | anyone |
+| Start an agent in a new chat window | `/work [bugs\|features\|ideas\|epic <ID>]` | anyone |
 | Pick the next work item | `/next` | agent |
 | Build a ready issue | `/build <ID>` | agent |
 | Prepare UAT | `/uat <ID>` | agent |
@@ -54,7 +54,7 @@ The setup skills drive `tools/haam/haam.py`; run `python3 tools/haam/haam.py doc
 
 ## 3. Hard rules: never break these
 
-1. **Never push to `main`, never merge a PR, never deploy, never run production commands.** Humans do that. The one exception: inside `/test`, typed by a human, after the human said `pass` and `ship` in this session, `haam.py ship <ID> --human` merges the commit they tested, approves the deploy and closes the issue for them. (`/release` uses `ship --merged-only`, which never merges.)
+1. **Never push to `main`, never merge a PR, never deploy, never run production commands.** Humans do that. The one exception: inside `/test`, typed by a human, after the human said `pass` and `ship` in this session, `haam.py ship <ID> --human` merges the commit they tested, approves the deploy and closes the issue for them. (`/release` uses `ship --merged-only`, which never merges.) **Only the owner's chat ships:** agent chats in worktrees never run `ship`, and the tool refuses there.
 2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/epic`, `/decide`, `/test`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
 3. **Only build issues that are in `Ready` and have the `agent-ready` label** (bugs: `Ready` is enough). If something isn't ready, help make it ready (`/spec`) instead of building it. **Never build an epic** (label `epic`) as one piece: build its sub-issues, and read the epic's brief in `docs/epics/` for context.
 4. **Claim before you build** (see §6). Never work on an issue someone else has claimed.
@@ -103,6 +103,8 @@ You act as the human who is running this session. If you can't reach the tracker
 3. Comment: `🤖 Claimed by <user> via <agent tool> [on <machine>] · branch <branch-name>`.
 On GitHub Projects, `haam.py issue claim <number> --tool "<tool>" --machine "<machine>"` does all three and refuses if someone got there first.
 
+**Never move an issue another chat has claimed.** On GitHub Projects, `issue status` refuses for a claimed issue unless this chat is on its branch; `--force` is only for when the human asks (e.g. `/triage stale` releasing a stuck claim).
+
 **While working:** keep the issue updated with short comments at meaningful points (plan posted, PR opened, blocked, handover). Not a running commentary.
 
 **If you stop before finishing:** push the branch, open/update a **draft** PR, and post a handover comment: *Done / Not done / Next step / Gotchas*.
@@ -118,7 +120,9 @@ On GitHub Projects, `haam.py issue claim <number> --tool "<tool>" --machine "<ma
   | PR title | `#123: <summary>` | `APP-123: <summary>` |
   | PR description | must include `Refs #123` | (title links it) |
 
+- The assessment and spec are committed on the issue's own branch, without a PR, and ship with the code in one PR (epics and split specs are the exception: they get a docs PR). Fewer PRs means fewer CI runs.
 - Spikes use `spike/<branch-name>` and are never merged.
+- **Keep CI cost down:** before starting new work, `/next` checks `haam.py capacity` (open PRs and the UAT queue against the limits in `haam.config.json`).
 - Fill in `.github/pull_request_template.md` completely, including **Built with** (your agent tool and model).
 - Rebase on `main` before opening or updating a PR. Keep PRs small (target < 400 changed lines).
 - **One chat, one folder.** Chats that share a folder overwrite each other's files and branches. When more than one agent chat may be open on a machine, each agent chat that changes files works in its own git worktree under `.claude/worktrees/`; `/work` sets one up (`python3 tools/haam/haam.py worktree status|new|prep|clean`). The main folder belongs to the human's chat. When unsure, use a worktree.

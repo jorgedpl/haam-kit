@@ -50,6 +50,8 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Reject or duplicate** (in `/triage`, `/epic` or `/decide`) | `haam.py issue status 123 Canceled --human` (also closes the issue as not planned); comment the reason or the original's ID | Status Canceled, comment |
 | **Test a change** (human, in `/test`) | `haam.py checkout-pr 123`, then `haam.py checkout-pr --back` | Same (the code is in GitHub either way) |
 | **Ship after a pass** (human said `ship`) | `haam.py ship 123 --human`: merge, approve deploy, wait, close | `haam.py ship APP-123 --human`, then set Done in Linear |
+| **Room for new work?** (`/next` checks first) | `haam.py capacity` (open PRs and UAT queue vs `max_open_prs`, `max_in_uat`) | Same command (counts PRs; the UAT count needs GitHub Projects) |
+| **Batch PR** (an epic's bugs) | Title `#12 #13 #14: …`, a `Refs #n` line per issue; `ship` closes them all | Title `APP-12 APP-13: …` |
 | **Close after release** | `haam.py issue close 123 --human` (sets Done and closes; `/release` only) | Status Done |
 
 ## Rules that apply to both
@@ -65,7 +67,7 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 2. `python3 tools/haam/haam.py config --tracker github`
 3. `python3 tools/haam/haam.py github-project` (plan), then `--apply`: creates the board named after the product, links the repo, sets the 12 statuses and the Priority field, creates the labels.
 4. **Automation token** (for `tracker-sync.yml`): create a classic token at github.com/settings/tokens with the `project` scope (plus `repo` if the repository is private), then `gh secret set HAAM_PROJECT_TOKEN -R owner/repo`. Without it everything works, but cards don't move by themselves when PRs open or merge.
-5. **In the browser**, on the board: create the saved views the setup lists (Board grouped by Status, Agent queue, Waiting on me, Ideas inbox, Bugs).
+5. **In the browser**, on the board: create the saved views the setup lists (Board grouped by Status, Triage, Agent queue, Waiting on me, Ideas inbox, Bugs, Epics), and turn on the board's built-in **Auto-add to project** workflow for this repository (board → Workflows). It puts issues created on GitHub's website on the board for free; `haam.py issue create` adds its own.
 6. Each developer runs `gh auth refresh -s project` once; `/haam-onboard` checks it.
 
 ## Switching tracker later

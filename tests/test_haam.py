@@ -137,6 +137,21 @@ class TestInstall(ToolTestCase):
         self.assertIn("Bash(gh pr merge:*)", settings["permissions"]["deny"])
         self.assertIn("PreToolUse", settings["hooks"])
 
+    def test_kit_files_hidden_by_project_gitignore_are_reincluded(self):
+        (self.proj / ".gitignore").write_text("**/build/\n")
+        (self.proj / "scripts").mkdir()
+        (self.proj / "scripts/lab-x.sh").write_text("echo lab\n")
+        self.install()
+        gi = (self.proj / ".gitignore").read_text()
+        self.assertIn("!/.agents/skills/build/", gi)
+        p = subprocess.run(["git", "check-ignore", "-q", ".agents/skills/build/SKILL.md"], cwd=self.proj)
+        self.assertEqual(p.returncode, 1)                       # no longer ignored
+        self.assertFalse(os.access(self.proj / "scripts/lab-x.sh", os.X_OK))   # the project's own file untouched
+        self.assertTrue(os.access(self.proj / "scripts/scan-secrets.sh", os.X_OK))
+        # A second install keeps the negation
+        self.install()
+        self.assertIn("!/.agents/skills/build/", (self.proj / ".gitignore").read_text())
+
     def test_reinstall_is_idempotent(self):
         self.install()
         self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
@@ -315,12 +330,52 @@ class TestGitHub(ToolTestCase):
         self.assertEqual(types, ["deletion", "non_fast_forward", "pull_request", "required_status_checks"])
         checks = [c["context"] for c in ruleset["rules"][3]["parameters"]["required_status_checks"]]
         self.assertEqual(checks, ["ci", "secrets", "dependencies", "ai-review", "security-review", "release-gate"])
+        # Agents work under the owner's (admin) login: admins bypass only via a PR, and no "up to date" re-runs
+        self.assertEqual(ruleset["bypass_actors"][0]["bypass_mode"], "pull_request")
+        self.assertFalse(ruleset["rules"][3]["parameters"]["strict_required_status_checks_policy"])
         env = next(json.loads(r["body"]) for r in writes if any(x.endswith("environments/production") for x in r["args"]))
         self.assertEqual(env["reviewers"], [{"type": "User", "id": 583231}])
         created = [r["args"][2] for r in writes if r["args"][:2] == ["label", "create"]]
         self.assertEqual(sorted(created), ["ai-review-overruled", "gate-override", "human-review"])
         # Secrets are never set by the tool
         self.assertFalse([r for r in self.requests() if r["args"][:2] == ["secret", "set"]])
+
+    def test_existing_ruleset_is_merged_not_overwritten(self):
+        rs = self.tmp / "ruleset.json"
+        rs.write_text(json.dumps({"id": 1, "name": "HAAM main protection", "target": "branch", "enforcement": "active",
+                                  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+                                  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+                                  "rules": [{"type": "deletion"},
+                                            {"type": "pull_request", "parameters": {"required_approving_review_count": 2}},
+                                            {"type": "required_status_checks", "parameters": {
+                                                "strict_required_status_checks_policy": True,
+                                                "required_status_checks": [{"context": "ci"}, {"context": "my-check"}]}}]}))
+        self.env = {**self.env, "FAKE_GH_RULESET": str(rs)}
+        out = self.run_tool("github", tool=self.installed_tool()).stdout
+        self.assertIn("push straight to main", out)
+        self.assertIn("up to date before merging", out)
+        self.assertFalse([w for w in self.writes() if "rulesets" in " ".join(w["args"])])
+        self.run_tool("github", "--apply", tool=self.installed_tool())
+        put = next(json.loads(r["body"]) for r in self.writes() if "rulesets/1" in " ".join(r["args"]))
+        rules = {r["type"]: r for r in put["rules"]}
+        self.assertIn("non_fast_forward", rules)                                            # added
+        self.assertEqual(rules["pull_request"]["parameters"]["required_approving_review_count"], 2)  # kept
+        checks = [c["context"] for c in rules["required_status_checks"]["parameters"]["required_status_checks"]]
+        self.assertIn("my-check", checks)
+        self.assertIn("release-gate", checks)
+        self.assertEqual(put["bypass_actors"][0]["bypass_mode"], "always")                 # the project's choice
+        # --reset replaces it with the defaults
+        self.log.unlink()
+        self.run_tool("github", "--apply", "--reset", tool=self.installed_tool())
+        put = next(json.loads(r["body"]) for r in self.writes() if "rulesets/1" in " ".join(r["args"]))
+        self.assertEqual(put["bypass_actors"][0]["bypass_mode"], "pull_request")
+
+    def test_environment_without_reviewers_when_the_plan_refuses(self):
+        self.env = {**self.env, "FAKE_GH_ENV_422": "1"}
+        out = self.run_tool("github", "--apply", tool=self.installed_tool()).stdout
+        self.assertIn("without a required approver", out)
+        envs = [json.loads(r["body"]) for r in self.writes() if any(x.endswith("environments/production") for x in r["args"])]
+        self.assertEqual(envs[-1]["reviewers"], [])
 
 
 class TestLinear(ToolTestCase):
@@ -546,6 +601,60 @@ class TestGitHubProjects(ToolTestCase):
         self.assertEqual(json.loads(self.tool("ship", str(n), "--human", "--json", env=env).stdout)["state"], "live")
         self.assertEqual(sum("Released to production" in c["body"] for c in self.gh_state()["comments"]), 1)
 
+    def test_status_refuses_to_move_another_chats_claim(self):
+        self.setup_board()
+        n = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "Crash", "--status", "Ready",
+                                 "--json").stdout)["number"]
+        self.tool("issue", "claim", str(n))
+        p = self.tool("issue", "status", str(n), "Ready", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("claimed", p.stderr)
+        git(self.proj, "switch", "-q", "-c", f"{n}-crash")      # the chat working on it is on its branch
+        self.tool("issue", "status", str(n), "In Review")
+        git(self.proj, "switch", "-q", "main")
+        self.tool("issue", "status", str(n), "Ready", "--force")
+        # A batch: the second bug is claimed with the first one's branch
+        m = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "Crash 2", "--status", "Ready",
+                                 "--json").stdout)["number"]
+        self.tool("issue", "claim", str(m), "--branch", f"{n}-crash")
+        git(self.proj, "switch", "-q", f"{n}-crash")
+        self.tool("issue", "status", str(m), "In Review")
+        git(self.proj, "switch", "-q", "main")
+
+    def test_capacity_holds_new_work(self):
+        self.setup_board()
+        st = self.gh_state()
+        st["prs"] = {str(k): {"title": f"PR {k}", "headRefName": f"b{k}", "state": "OPEN", "labels": [], "url": "u",
+                              "isDraft": False} for k in range(1, 6)}
+        self.state.write_text(json.dumps(st))
+        res = json.loads(self.tool("capacity", "--json").stdout)
+        self.assertTrue(res["hold"])
+        self.assertEqual(res["open_prs"], 5)
+        self.tool("config", "--max-open-prs", "10")
+        self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
+
+    def test_manual_deploy_and_batch_pr(self):
+        self.setup_board()
+        self.tool("config", "--deploy", "manual")
+        mk = lambda t: json.loads(self.tool("issue", "create", "--stream", "bug", "--title", t, "--status", "UAT",
+                                            "--json").stdout)["number"]
+        a, b = mk("Export crash"), mk("Export button")
+        st = self.gh_state()
+        st["prs"] = {"5": {"title": f"#{a} #{b}: Fix export bugs (epic #9)", "body": "", "headRefName": f"{a}-export-bugs",
+                           "isDraft": False, "state": "OPEN", "labels": [{"name": "uat-passed"}], "url": "https://pr/5",
+                           "headRefOid": "t1"}}
+        self.state.write_text(json.dumps(st))
+        env = {**self.env, "HAAM_POLL_SECONDS": "0"}
+        p = self.tool("ship", str(b), "--human", env=env, check=False)       # found through the batch title
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("deploys by hand", p.stdout)
+        self.assertEqual(self.gh_state()["prs"]["5"]["state"], "MERGED")
+        self.assertEqual(self.gh_state()["issues"][str(a)]["state"], "OPEN")
+        self.tool("ship", str(b), "--human", "--live", env=env)
+        st = self.gh_state()
+        self.assertEqual((st["issues"][str(a)]["state"], st["issues"][str(b)]["state"]), ("CLOSED", "CLOSED"))
+        self.assertNotIn("approved", st)                                     # nothing to approve on manual deploys
+
     def test_triage_reject_closes_as_not_planned_and_needs_human(self):
         self.setup_board()
         n = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Dark mode", "--json").stdout)["number"]
@@ -694,6 +803,30 @@ class TestWorktrees(ToolTestCase):
         p = self.run_tool("checkout-pr", "12", tool=self.installed_tool(), env=env, check=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("unsaved changes", p.stderr)
+
+    def test_secret_hook_scans_the_worktree_being_committed(self):
+        wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])
+        hook = str(self.proj / ".claude/hooks/block-secrets.sh")
+        env = {**self.env, "CLAUDE_PROJECT_DIR": str(self.proj)}
+        def run_hook(cwd_field, command="git commit -m x"):
+            return subprocess.run(["bash", hook], cwd=self.proj, text=True, capture_output=True, env=env,
+                                  input=json.dumps({"cwd": str(cwd_field), "tool_input": {"command": command}})).returncode
+        # A secret in the worktree is caught, even though the main folder is clean
+        (wt / "leak.py").write_text('key = "AKIA4XN7PQ2LMZ8RT6WB"\n')
+        self.assertEqual(run_hook(wt), 2)
+        self.assertEqual(run_hook(self.proj, f"git -C {wt} commit -m x"), 2)
+        self.assertEqual(run_hook(self.proj, f"cd {wt} && git commit -m x"), 2)
+        # Unrelated changes in the main folder don't block a clean worktree's commit
+        (wt / "leak.py").unlink()
+        (self.proj / "other.py").write_text('key = "AKIA4XN7PQ2LMZ8RT6WB"\n')
+        self.assertEqual(run_hook(wt), 0)
+        self.assertEqual(run_hook(self.proj), 2)
+
+    def test_ship_refuses_in_an_agents_worktree(self):
+        wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])
+        p = self.run_tool("ship", "12", "--human", tool=self.installed_tool(), cwd=wt, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("never from an agent's worktree", p.stderr)
 
     def test_doctor_reports_parallel_chat_setup(self):
         out = json.loads(self.run_tool("doctor", "--json", tool=self.installed_tool()).stdout)

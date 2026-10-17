@@ -41,11 +41,13 @@ You are guiding the **project admin** through adopting HAAM. The tool `tools/haa
    - Product owner's GitHub username (approves production deploys) and any backup approvers
    - Production URL (or none yet)
    - Which agent tools the team uses (Claude Code, Cursor, Codex, Grok, Gemini, Copilot)
-2. `python3 tools/haam/haam.py config --product "…" --tracker github|linear --team-key … [--linear-team "…"] --github-repo … --owner … [--backup-approvers a,b] [--production-url …] --agents claude,cursor,…`
+   - How production is deployed: by `deploy.yml` when a PR merges (`github`), or by hand / another platform (`manual`)
+   - Limits for parallel work (defaults are fine to start): at most 5 open PRs and 3 changes waiting for their test
+2. `python3 tools/haam/haam.py config --product "…" --tracker github|linear --team-key … [--linear-team "…"] --github-repo … --owner … [--backup-approvers a,b] [--production-url …] --agents claude,cursor,… --deploy github|manual [--max-open-prs 5] [--max-in-uat 3]`
 3. `python3 tools/haam/haam.py agents --apply` and report per tool.
 
 ## Phase 3: Teach HAAM about the project (your judgement work)
-1. **Command contract:** inspect the project (package.json, pyproject.toml, composer.json, go.mod, existing CI, README) and fill every `TODO(setup)` in `Makefile` (`setup`, `dev`, `test`, `lint`, `typecheck`, `build`, `audit`, `deploy` if they deploy from CI), and the runtime setup steps in `.github/workflows/ci.yml`, `security.yml`, `deploy.yml`. Run `make check`. If it fails on the current code, show the human why and agree whether to fix first or mark known failures.
+1. **Command contract:** inspect the project (package.json, pyproject.toml, composer.json, go.mod, existing CI, README) and fill every `TODO(setup)` in `Makefile` (`setup`, `dev`, `test`, `lint`, `typecheck`, `build`, `audit`, `deploy` if they deploy from CI), and the runtime setup steps in `.github/workflows/ci.yml`, `security.yml`, `deploy.yml`. CI passes `make check` the list of changed files in `$CI_CHANGED_FILES`; if the project has clearly separate parts (e.g. a backend and a mobile app), offer to make `make check` run only the parts a PR touches, which saves a lot of CI minutes (the nightly run still checks everything). Run `make check`. If it fails on the current code, show the human why and agree whether to fix first or mark known failures.
 2. **Architecture map:** fill `docs/product/ARCHITECTURE.md` from the codebase (under 150 lines).
 3. **Protected areas:** propose real paths for `AGENTS.md` §4; confirm with the human.
 4. **Product context:** draft `docs/product/PRODUCT.md` from the README and code, then ask the human to correct it, especially *Current priorities* and *Non-negotiables*. Don't invent business facts.
@@ -70,7 +72,7 @@ Commit (`Adopt the Human-Agent Agile Methodology (HAAM)`), ask before pushing, p
 1. `[YOU, in your terminal]` `gh auth refresh -s project` (lets the human's GitHub login use Projects).
 2. `python3 tools/haam/haam.py github-project` → show the plan → on the human's yes: `… github-project --apply`. It creates the board, links the repo, sets the 12 statuses and Priority, creates the labels, and saves the board number in `haam.config.json`.
 3. `[YOU, in your terminal]` the automation token, exactly as the tool prints it (`gh secret set HAAM_PROJECT_TOKEN …`).
-4. `[YOU, in the browser]` create the saved views the tool lists on the board.
+4. `[YOU, in the browser]` create the saved views the tool lists on the board, and turn on the board's **Auto-add to project** workflow for this repository (board → Workflows), so issues created on GitHub's website land on the board without using Actions minutes.
 5. Verify: `python3 tools/haam/haam.py issue list`.
 
 **If Linear** (`"tracker": "linear"`):
@@ -84,7 +86,7 @@ Commit (`Adopt the Human-Agent Agile Methodology (HAAM)`), ask before pushing, p
 
 ## Phase 8: Prepare for parallel chats
 So the human can open several agent chats (on one or more computers) and type `/work` in each:
-1. **Local files:** check which git-ignored files the app needs to run locally (`.env`, `.env.local`, local certificates, a local config file) and make sure `.worktreeinclude` lists them. List paths only; never open or read them.
+1. **Local files:** check which git-ignored files the app needs to run or test locally (`.env`, `.env.local`, local certificates, a local config file, `local.properties` with the Android SDK path) and make sure `.worktreeinclude` lists them. List paths only; never open or read them.
 2. **Test discovery:** worktrees live inside the project, under `.claude/worktrees/`. If the project's test runner, linter, type checker, file watcher or bundler scans the whole folder, exclude `.claude/worktrees/` in its config so the main folder doesn't pick up the worktrees' copies.
 3. **Dry run:** `python3 tools/haam/haam.py worktree new setup-check`, then in that folder `make setup && make check`. Fix anything that only worked because of files in the main folder. Then remove it: `git worktree remove .claude/worktrees/setup-check`.
 4. Tell the human how to start an agent from now on: open a new chat window in their tool (Claude Code in VS Code: Cmd/Ctrl+Shift+Esc) and type `/work bugs` (or `features`, `ideas`, or nothing); Codex: `$work`. Their own chat in the main folder is for ideas, decisions, UAT and releases.

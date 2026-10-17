@@ -10,14 +10,17 @@ argument-hint: "[bugs|features|ideas]  (optional: restrict to one stream)"
 
 Filter: $ARGUMENTS (empty = all streams)
 
-## 0. Your own workspace
+## 0. Room for new work?
+Run `python3 tools/haam/haam.py capacity`. If it says **hold** (too many open PRs, or too many changes waiting for the owner to test; limits in `haam.config.json`), only take rework (label `uat-failed`) or finish a PR that's already open. Otherwise report the hold and stop: more PRs now would only cost CI minutes and wait.
+
+## 0b. Your own workspace
 If the item you pick will change files (build, spec, assessment), you need your own worktree when other agent chats may be open on this machine (`AGENTS.md` §7). Run `python3 tools/haam/haam.py worktree status`. In the main folder: Claude Code, move into a new worktree first (as in `/work` step 1); other tools, ask the human whether other chats are running and, if so, follow `/work` step 1.
 
 ## 1. Build the queue (unassigned or assigned to the current user, not In Progress)
 
 GitHub Projects: `python3 tools/haam/haam.py issue list --status Ready --unassigned --open-only` (and `--status Backlog`, `--status Triage` for steps 4–5). Linear: list the team's issues.
 
-Take the first match, in this order:
+Take the first match, in this order. **Batch an epic's bugs:** when two or more Ready bugs at the same priority belong to the same epic, offer them as one item (one branch, one PR; see `/build`). It saves CI runs and you test them together.
 
 0. **Rework**: status `Ready` with label `uat-failed` (the human tested it and found problems): always first.
 1. **Bugs**: label `stream:bug`, status `Ready`, priority Urgent or High.
@@ -36,4 +39,4 @@ Take the first match, in this order:
 Run the matching skill: `/build` for Ready items, `/spec` for Backlog features, `/assess` for ideas, following that skill's steps exactly (including the claim protocol).
 
 ## 4. Nothing to do?
-Report: count of items waiting on a human (status `Decision`, `UAT`, spec PRs open), and stop. Never invent work, and never start items that aren't through their gate.
+Report: count of items waiting on a human (status `Decision`, `UAT`, specs waiting for approval), and stop. Never invent work, and never start items that aren't through their gate.

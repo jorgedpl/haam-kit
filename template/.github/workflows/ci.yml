@@ -1,11 +1,19 @@
 # Gate G3 (automated part): every PR must pass `make check`.
 # Branch protection on `main` requires the status check named "ci".
+#
+# Keeping CI minutes down:
+#   - Docs-only PRs (docs/**, *.md) pass in seconds without running the checks.
+#   - `make check` gets the list of changed files in $CI_CHANGED_FILES, so a project can run only the
+#     parts a PR touches (e.g. skip the mobile app's tests when only the backend changed).
+#   - main is not re-checked after every merge; a full run happens nightly (and on demand) instead.
+#   - A newer push to the same PR cancels the older run.
 name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"   # nightly full run on main
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -17,10 +25,31 @@ permissions:
 jobs:
   ci:
     name: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: What changed?
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          : > "$RUNNER_TEMP/changed-files"
+          if [ "$EVENT" = "pull_request" ]; then
+            git diff --name-only "$BASE"...HEAD > "$RUNNER_TEMP/changed-files"
+          fi
+          echo "CI_CHANGED_FILES=$RUNNER_TEMP/changed-files" >> "$GITHUB_ENV"
+          if [ -s "$RUNNER_TEMP/changed-files" ] && ! grep -qvE '^docs/|\.md$' "$RUNNER_TEMP/changed-files"; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "Docs-only change: checks not needed."
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "Changed files: $(wc -l < "$RUNNER_TEMP/changed-files") (empty list = full run)"
+          fi
 
       # TODO(setup): set up your language runtime. Uncomment the block that matches the stack.
       # --- Node / TypeScript ---
@@ -39,9 +68,11 @@ jobs:
       #     php-version: "8.3"
 
       - name: Install dependencies
+        if: steps.changes.outputs.docs_only != 'true'
         run: make setup
 
       - name: Lint, typecheck, unit tests, build
+        if: steps.changes.outputs.docs_only != 'true'
         run: make check
         env:
           CI: "true"

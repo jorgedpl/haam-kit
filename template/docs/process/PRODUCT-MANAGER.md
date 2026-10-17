@@ -17,7 +17,7 @@ Examples use GitHub Projects IDs (`#12`); on Linear the same item is `APP-12`. C
 | Group related issues into epics and answer the agent's questions about each | Weekly | `/triage group`, then `/epic #9` | Epic issue (label `epic`) with sub-issues |
 | Set and change priorities | Daily and weekly | `/triage`, `/triage backlog` | Priority field |
 | Decide on assessed ideas (G1) | Weekly | `/decide #12 approve high` | Status, labels, comment (§7–8) |
-| Approve specs (G2) | As they arrive | Merge the spec PR, then "spec for #12 approved, mark it ready" | Merge the spec PR, Status Ready, label `agent-ready` |
+| Approve specs (G2) | As they arrive | Read the spec (linked on the issue), then "spec for #12 approved" | Comment "spec approved"; Status Ready, label `agent-ready` |
 | Test changes (G4) and ship them (G5) | Daily | `/test`, then reply `pass` → `ship`, or say what's wrong | GitHub: label `uat-passed`, merge, approve the deploy |
 | Close override follow-ups | Weekly | "Show the open override follow-ups" | View: label `override-followup` |
 
@@ -37,13 +37,14 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
 1. Type **`/test`** (or `/test #12`). The agent puts the change on your computer, starts the app, and gives you the link and a short checklist: *do this → you should see that*.
 2. Try it. Then reply with one word or one sentence:
    - **`pass`** → the agent asks *"Ship it?"* Reply **`ship`**: it merges, approves the production deploy for you, waits, and closes the issue. You get *"#12 is live."* Reply `later` to hold it.
+   - If your project **deploys by hand** (`"deploy": "manual"`), the agent merges and then asks you to deploy; reply **`live`** when it's out and it closes the issue.
    - **What went wrong** (*"step 3: the export button is still missing on mobile"*) → the agent records it on the issue, labels it `uat-failed` and sends it back to the agents, who fix it first. When it's fixed it comes back to `/test`.
 3. That's all. You don't need to touch branches, labels or the board.
 
 ### Weekly (30–45 minutes)
 1. **Group** loose issues into epics (`/triage group`) and shape the top epic with the agent (`/epic #9`).
 2. **Decide** everything in **Decision** (G1).
-3. **Review spec PRs** and approve or comment (G2).
+3. **Review specs** (linked on each issue) and approve or comment (G2).
 4. **Re-rank** Ready and Backlog against the current priorities (`/triage backlog`).
 5. **Find stuck work:** `/triage stale` (claimed but quiet, UAT waiting too long, decisions overdue).
 6. **Revisit Parked** items whose "revisit when" has come true.
@@ -150,6 +151,7 @@ Agents take **bugs before features, older before newer, smaller before larger**.
 | **Decision** | 5 or fewer | Book 20 minutes and decide |
 | **UAT** | 3 or fewer | Stop starting agents and test. Agents produce faster than you can test |
 | **Agents running** | No more than you can test tomorrow | Fewer agents, smaller items |
+| **Open PRs** | `max_open_prs` in `haam.config.json` (default 5) | Agents hold new work automatically (`haam.py capacity`): every open PR costs CI minutes on each push. Test and ship what's open |
 
 ### 5.6 Changing priorities
 Change them whenever the facts change, but say why in a comment. Agents and colleagues read the history. Never quietly demote an Urgent item: comment, and tell whoever reported it.
@@ -170,7 +172,7 @@ Use **your own chat in the project's main folder**, not one of the agent chats r
 | Capture an idea or bug from anywhere | `/idea …`, `/bug …` |
 | Get an idea assessed | `/assess #12` (or let `/work ideas` pick it) |
 | Decide (G1) | `/decide #12 approve high "start with the admin side"` · `park` · `reject` |
-| Approve a spec (G2) | Review and merge the spec PR, then: "spec for #12 approved, mark it ready" |
+| Approve a spec (G2) | Read it (linked on the issue), then: "spec for #12 approved" |
 | Test a change, then ship it or send it back (G4, G5) | `/test` (or `/test #12`), then `pass` → `ship`, or say what's wrong |
 | Close something that was merged another way | `/release #12` |
 | Emergency | `/override #12 "<reason>"` |
@@ -209,7 +211,7 @@ Everything above can be done by hand on the board. The saved views (set up with 
 | Park | Status **Parked**, and a comment: "revisit when…" |
 | Reject or mark a duplicate | Status **Canceled**, then close the issue as *not planned* or *duplicate* |
 | Approve an idea (G1) | Status **Backlog**; replace label `stream:idea` with `stream:feature`; set Priority; comment "Approved" |
-| Approve a spec (G2) | Merge the spec PR; then Status **Ready** and label `agent-ready` |
+| Approve a spec (G2) | Comment "spec approved" on the issue; then Status **Ready** and label `agent-ready` |
 | Group issues into an epic | Create an issue with label `epic`; add the others as its sub-issues |
 | Re-rank many items | Table layout, grouped or sorted by Priority; edit the cells (you can copy a value and paste it into several selected cells) |
 
@@ -225,7 +227,7 @@ Leave these to the skills: claiming (**In Progress**) is the agents' job. Testin
 | Park or reject | Status **Parked** or **Canceled**, with a comment |
 | Group issues into an epic | Create an issue with label `epic`; set it as the parent of the related issues |
 | Approve an idea (G1) | Status **Backlog**, replace label `stream:idea` with `stream:feature`, set priority, comment |
-| Approve a spec (G2) | Merge the spec PR; then status **Ready** and label `agent-ready` |
+| Approve a spec (G2) | Comment "spec approved" on the issue; then status **Ready** and label `agent-ready` |
 | Re-rank | The views from `docs/setup/LINEAR-SETUP.md` §7, sorted by priority; the command menu (Cmd/Ctrl+K) changes priority or status quickly |
 
 As on GitHub, agents follow the priority field, not the manual order of a list.

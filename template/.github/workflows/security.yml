@@ -6,8 +6,9 @@ name: Security
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "37 3 * * *"   # nightly dependency audit on main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,7 +19,7 @@ env:
 jobs:
   secrets:
     name: secrets
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -36,9 +37,8 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANGE="origin/${{ github.base_ref }}..HEAD"
           else
-            RANGE="${{ github.event.before }}..${{ github.sha }}"
-            # First push to a new branch has no "before"; scan the last commit.
-            echo "$RANGE" | grep -q '^0000000' && RANGE="HEAD~1..HEAD"
+            RANGE="HEAD~20..HEAD"   # nightly / manual run: the recent history on main
+            git rev-parse -q --verify HEAD~20 >/dev/null || RANGE="HEAD"
           fi
           echo "Scanning $RANGE"
           CONFIG=""
@@ -57,10 +57,26 @@ jobs:
 
   dependencies:
     name: dependencies
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Did dependencies change?
+        id: deps
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Audit on PRs that touch code or dependency files; always on the nightly run.
+          if [ "$EVENT" = "pull_request" ] && ! git diff --name-only "$BASE"...HEAD | grep -qvE '^docs/|\.md$'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Docs-only change: audit not needed."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       # TODO(setup): same runtime setup as ci.yml
-      - run: make setup
-      - run: make audit
+      - if: steps.deps.outputs.skip != 'true'
+        run: make setup
+      - if: steps.deps.outputs.skip != 'true'
+        run: make audit

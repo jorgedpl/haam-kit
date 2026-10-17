@@ -46,7 +46,7 @@ Then apply exactly what was confirmed: create each new epic (GitHub: `issue crea
   - inbox: `Ready` (bug with usable repro) · `needs info: <question>` · `assess` (idea → Discovery; for an idea inside an undecided epic, propose `decided with epic <ID>` and leave it in Triage) · `park until <trigger>` · `reject: <reason>` · `duplicate of <ID>`
   - backlog: `keep` · `priority → X` · `split` · `needs spec` · `park until <trigger>`
   - stale: `nudge` (comment asking for status) · `release the claim` · `remind the human to test/decide` · `revisit now`
-- Never propose approving an idea (G1) or approving a spec (G2); those are `/decide` and the spec PR. If an idea looks obviously right, propose `assess` and say "quick assessment".
+- Never propose approving an idea (G1) or approving a spec (G2); those are `/decide` and the owner's "spec approved". If an idea looks obviously right, propose `assess` and say "quick assessment".
 
 Then ask: *"Reply `ok` to apply all of this, or tell me what to change (e.g. `#14 Low, #9 park until Q3`)."* Wait for the answer.
 
@@ -55,7 +55,7 @@ For each item, in the tracker:
 - Set the priority and fix the stream label.
 - Status: `Ready` (bugs), `Discovery` (ideas to assess), `Parked` or `Canceled` (on GitHub these two need `--human`, allowed here because the human confirmed them; close Canceled issues as not planned or duplicate). Leave "needs info" items in `Triage`.
 - Comment: `🗂️ Triaged by <user>: <priority> · <next step> · <why>`. For "needs info", comment the question and mention the reporter. For duplicates, link the original. For stale nudges, mention the assignee.
-- "Release the claim": unassign, status back to `Ready`, comment why.
+- "Release the claim": unassign, status back to `Ready` (GitHub: `issue status <n> Ready --force`, allowed here because the human confirmed it), comment why.
 Anything the human didn't confirm stays exactly as it was.
 
 ## 5. Report

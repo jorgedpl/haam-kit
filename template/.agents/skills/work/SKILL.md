@@ -1,7 +1,7 @@
 ---
 name: work
 description: Start an agent in a new chat window — give it its own worktree so parallel chats don't collide, prepare it, then pick the next work item and do it. Use when a human opens a chat to have an agent pick up work, e.g. "/work bugs".
-argument-hint: "[bugs|features|ideas]  (optional: restrict to one stream)"
+argument-hint: "[bugs|features|ideas|epic <ID>]  (optional: one stream, or the Ready bugs of one epic)"
 ---
 
 # /work: one chat, one workspace, one issue
@@ -22,14 +22,17 @@ Run `python3 tools/haam/haam.py worktree status --json`.
 
 ## 2. Prepare it
 1. `python3 tools/haam/haam.py worktree prep`: copies the local-only files listed in `.worktreeinclude` (such as `.env`) from the main folder. Never open, read or print those files.
-2. If dependencies aren't installed in this worktree yet, run `make setup`.
+2. If it says the git secret hook is off, run `make hooks`.
+3. If dependencies aren't installed in this worktree yet, run `make setup`.
 
 ## 3. Pick and do the work
-Follow `/next` with the stream filter above, in **just-pick mode**: take the top candidate without waiting for a choice, and say in your first line which one and why. Then follow the skill it leads to (`/build`, `/spec` or `/assess`) to the end, including the claim protocol. If the human told you this computer's name, pass it when claiming (`--machine`).
+With `epic <ID>`: take that epic's Ready bugs as one batch (`/build` explains the batch: one branch, one PR). Otherwise follow `/next` with the stream filter above, in **just-pick mode**: take the top candidate without waiting for a choice, and say in your first line which one and why. Then follow the skill it leads to (`/build`, `/spec` or `/assess`) to the end, including the claim protocol. If the human told you this computer's name, pass it when claiming (`--machine`).
 
 ## 4. Hand over
-1. When the item reaches its hand-over point (UAT plan ready, spec PR open, or assessment waiting for a decision), reply with: the ID and title, the PR link, and exactly what the human does next.
+1. When the item reaches its hand-over point (UAT plan ready, spec or assessment waiting for the human), reply with: the ID and title, the PR link, and exactly what the human does next.
 2. **One issue per chat.** Don't start another item unless the human asked for more (e.g. "and keep going"). If they did, start again at step 3 in this same worktree.
 3. Nothing to pick? Report what's waiting on the human, as `/next` does, and stop.
+
+**Never run `ship` from here.** Only the owner's own chat, in the main folder, merges and deploys (`/test`).
 
 Finished worktrees are tidied later with `python3 tools/haam/haam.py worktree clean` (plan), then `--apply`. It only removes worktrees whose work is merged or abandoned and that have nothing unsaved.

@@ -25,8 +25,13 @@ FAKE_GH = textwrap.dedent('''\
         method = a[a.index("-X") + 1] if "-X" in a else "GET"
         path = next(x for x in a[1:] if x.startswith(("repos/", "users/")))
         if path.startswith("users/"): print("583231"); sys.exit(0)
-        if path.endswith("/rulesets") and method == "GET": out([])
+        rs = os.environ.get("FAKE_GH_RULESET")
+        if path.endswith("/rulesets") and method == "GET": out([{"id": 1, "name": "HAAM main protection"}] if rs else [])
+        if path.endswith("/rulesets/1") and method == "GET": out(json.load(open(rs)))
         if path.endswith("environments/production") and method == "GET": sys.exit(1)
+        if (path.endswith("environments/production") and method == "PUT" and os.environ.get("FAKE_GH_ENV_422")
+                and json.loads(body).get("reviewers")):
+            print("gh: Failed to create the environment protection rule (HTTP 422)", file=sys.stderr); sys.exit(1)
         if "collaborators" in path and method == "GET": sys.exit(1)
         if path.count("/") == 2 and method == "GET":
             out({"permissions": {"admin": True}, "private": False, "security_and_analysis": {}})
@@ -210,6 +215,8 @@ if a[:2] == ["issue", "edit"]:
     for x in opts(a, "--remove-label"):
         i["labels"] = [l for l in i["labels"] if l != x]
     save(); sys.exit(0)
+if a[:2] == ["issue", "view"]:
+    out({"comments": [{"body": c["body"]} for c in st["comments"] if c["issue"] == int(a[2])]})
 if a[:2] == ["issue", "comment"]:
     st["comments"].append({"issue": int(a[2]), "body": opt(a, "--body")}); save(); sys.exit(0)
 if a[:2] == ["issue", "close"]:

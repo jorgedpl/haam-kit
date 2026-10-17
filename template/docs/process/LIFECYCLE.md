@@ -102,7 +102,7 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
 - **Skill:** `/spec APP-123`.
 - The agent writes `docs/specs/APP-123-<slug>.md` from `docs/templates/feature-spec.md`: user stories, acceptance criteria in Given/When/Then, scope and out-of-scope, files likely touched, data/migration impact, test plan (unit + UAT), rollout and rollback.
 - If the work is bigger than ~1 day of agent work or ~400 changed lines, the agent **splits it** into sub-issues, each with its own spec section.
-- Spec is opened as a **docs PR** for review. When the human approves (merges the docs PR or comments "spec approved"), the agent or human adds label `agent-ready` and moves the issue to **Ready**.
+- The spec is committed on the issue's own branch (no PR) and linked on the issue. When the human approves ("spec approved" in chat or as an issue comment), the agent or human adds label `agent-ready` and moves the issue to **Ready**. The spec then ships with the code in one PR. (A spec split into an epic's sub-issues gets a docs PR, so every slice can read it from `main`.)
 - **Definition of Ready** is in `docs/process/GATES.md`.
 
 ### Stage 5: Build (In Progress)
@@ -183,7 +183,7 @@ How to triage and choose priorities (levels, bug impact × reach, value/confiden
 | Product context | `docs/product/PRODUCT.md` | Humans |
 | Architecture map | `docs/product/ARCHITECTURE.md` | Agents keep it current |
 
-Docs-only changes (assessments, specs, UAT plans) go through a small PR like any other change; CI is fast for docs and the gate check ignores docs-only PRs.
+Assessments and specs live on the issue's branch and ship with the code, so most issues need one PR, not three. Docs-only PRs (epic briefs, split specs) are cheap: CI and the AI reviews skip them, and the UAT gate doesn't apply.
 
 ---
 

@@ -3,7 +3,8 @@
 # where Linear's own GitHub integration moves issues).
 #   PR opened / ready for review → linked issues move to "In Review"
 #   PR merged                    → linked issues move to "Deploying"
-#   Issue opened                 → added to the board in "Triage"
+# New issues are put on the board by the board's own "Auto-add to project" workflow (free, no
+# Actions minutes) and by `haam.py issue create`, not by this workflow.
 # A PR links an issue with "Refs #123" in its description (or a branch named 123-...).
 # Needs the repository secret HAAM_PROJECT_TOKEN: a classic token with the
 # 'project' scope (and 'repo' if the repository is private). The built-in token
@@ -13,19 +14,17 @@ name: Tracker sync
 on:
   pull_request:
     types: [opened, reopened, ready_for_review, closed]
-  issues:
-    types: [opened]
 
 permissions:
   contents: read
 
 concurrency:
-  group: tracker-sync-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: tracker-sync-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +37,7 @@ jobs:
           echo "Tracker: ${t:-not configured}"
 
       - name: Move issues linked to this pull request
-        if: steps.tracker.outputs.name == 'github' && github.event_name == 'pull_request'
+        if: steps.tracker.outputs.name == 'github'
         env:
           GH_TOKEN: ${{ secrets.HAAM_PROJECT_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
@@ -56,15 +55,3 @@ jobs:
             event=opened
           fi
           python3 tools/haam/haam.py sync-pr --pr "$PR" --event "$event"
-
-      - name: Put new issues on the board
-        if: steps.tracker.outputs.name == 'github' && github.event_name == 'issues'
-        env:
-          GH_TOKEN: ${{ secrets.HAAM_PROJECT_TOKEN }}
-          ISSUE: ${{ github.event.issue.number }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::HAAM_PROJECT_TOKEN isn't set; add the issue to the board by hand."
-            exit 0
-          fi
-          python3 tools/haam/haam.py issue add "$ISSUE"

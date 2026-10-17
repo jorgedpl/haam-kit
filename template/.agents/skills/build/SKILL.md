@@ -23,11 +23,15 @@ If the issue belongs to an epic that is still in `Backlog`, also move the epic t
 On GitHub Projects one command does it all and refuses if someone got there first: `python3 tools/haam/haam.py issue claim <number> --tool "<your tool>" --machine "<this computer>"` (bugs not yet in Ready: only with the human's OK, add `--force`).
 
 ## 2. Workspace and branch
-If other agent chats may be open on this machine, work in your own worktree (`AGENTS.md` §7; `/work` sets one up). Then branch from the latest `main` (this works in the main folder and in a worktree):
+If other agent chats may be open on this machine, work in your own worktree (`AGENTS.md` §7; `/work` sets one up). In a worktree, first run `python3 tools/haam/haam.py worktree prep` (copies local files like `.env` that `make check` may need; a worktree made with plain `git worktree add` has none) and, if it says the secret hook is off, `make hooks`.
+
+If the issue's branch already exists on `origin` (the assessment and spec were committed there), continue on it; otherwise branch from the latest `main`:
 ```bash
 git fetch origin
-git switch -c <branch name for this issue: 123-short-title (GitHub) or Linear's branch name> origin/main
+git switch <branch>                      # existing branch: tracks origin/<branch>
+git switch -c <branch> origin/main       # new: 123-short-title (GitHub) or Linear's branch name
 ```
+**Batch of an epic's bugs** (from `/next` or `/work epic <ID>`): claim each bug (GitHub: `issue claim <n> --branch <branch>`), use one branch named after the first (`12-<epic-slug>-bugs`), and one PR titled `#12 #13 #14: <summary> (epic #9)` whose description has a `Refs #n` line for each. Each bug still gets its own failing test first.
 Reworking an issue that already has a branch (review feedback, or label `uat-failed`): read the `❌ UAT failed` comment and fix every item on it; `git switch <branch> && git pull`. If git says the branch is checked out in another worktree under `.claude/worktrees/`, continue in that worktree (Claude Code: enter it); otherwise ask the human. When the fixes are pushed and the checks are green, run `/uat` again so it comes back to the human.
 
 ## 3. Plan

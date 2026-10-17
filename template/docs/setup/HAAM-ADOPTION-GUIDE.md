@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.4.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.5.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 
@@ -233,8 +233,8 @@ This makes the checks exist in GitHub so they can be required. The first AI revi
    python3 tools/haam/haam.py github           # shows the plan
    python3 tools/haam/haam.py github --apply   # after you agree
    ```
-   It creates the labels, a ruleset on the default branch (PR required, the six required checks, no force pushes, admins can bypass for emergencies), the `production` environment with your approvers, the `PRODUCTION_URL` variable, and turns on secret scanning, push protection and Dependabot where your plan allows.
-2. **Reviewer key** `[YOU, in your terminal]`: `gh secret set ANTHROPIC_API_KEY -R owner/repo` (it asks for the key without showing it).
+   It creates the labels, a ruleset on the default branch (PR required, the six required checks, no force pushes; admins can bypass only when merging a PR, for emergencies, never by pushing to main; "up to date before merging" off, to save CI runs). If the ruleset already exists, it only adds what's missing and keeps your settings (`--reset` replaces it), the `production` environment with your approvers, the `PRODUCTION_URL` variable, and turns on secret scanning, push protection and Dependabot where your plan allows.
+2. **Reviewer key** `[YOU, in your terminal]`: `gh secret set ANTHROPIC_API_KEY -R owner/repo` (it asks for the key without showing it). The AI review can use `CLAUDE_CODE_OAUTH_TOKEN` instead (from `claude setup-token`, billed to your Claude plan); the security review needs the API key.
 3. **Fork PRs** `[YOU, in the browser]`: Settings → Actions → General → require approval for outside collaborators.
 4. **Deploys:**
    - *Already deploying from GitHub Actions?* Add `environment: production` to your deploy job: that alone gives you Gate G5. Delete the kit's `deploy.yml` or keep it as reference.
@@ -285,10 +285,10 @@ Pick something small and real. Walk it through every stage once:
 | Step | You type | What should happen |
 |---|---|---|
 | 1 | `/idea Add a "last updated" date to the dashboard` | New issue in Triage, label `stream:idea` (on GitHub: `#1`; on Linear: `ACM-1`) |
-| 2 | `/assess #1` | Assessment doc in a docs PR; issue moves to Decision |
+| 2 | `/assess #1` | Assessment committed on the issue's branch (no PR); issue moves to Decision |
 | 3 | `/decide #1 approve medium` | Issue moves to Backlog, label becomes `stream:feature` |
-| 4 | `/spec #1` | Spec doc in a docs PR with acceptance criteria |
-| 5 | Review the spec, merge the docs PR, tell the agent "spec approved" | Issue gets `agent-ready`, moves to Ready |
+| 4 | `/spec #1` | Spec with acceptance criteria, on the same branch |
+| 5 | Read the spec (link on the issue), tell the agent "spec approved" | Issue gets `agent-ready`, moves to Ready |
 | 6 | `/build #1` | Claims it, branches, codes, writes tests, self-reviews, opens PR; the tracker shows In Review |
 | 6b | (automatic) | `ci`, `secrets`, `dependencies` run; the reviewer agent comments; the building agent fixes Blocking findings |
 | 7 | (when all green) `/uat #1` | UAT plan committed; issue moves to UAT; you're notified |

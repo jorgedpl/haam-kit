@@ -812,6 +812,7 @@ class TestWorktrees(ToolTestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("unsaved changes", p.stderr)
 
+    @unittest.skipUnless(shutil.which("gitleaks"), "needs gitleaks")
     def test_secret_hook_scans_the_worktree_being_committed(self):
         wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])
         hook = str(self.proj / ".claude/hooks/block-secrets.sh")

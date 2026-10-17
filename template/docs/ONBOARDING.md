@@ -67,7 +67,7 @@ Commands are written `/name` below; in Codex use `$name`.
 | See what's waiting | Tracker view **Agent queue** (to build) or **Waiting on me** |
 | Start an agent in a new chat window | `/work` (or `/work bugs`) |
 | Start work in this chat | `/next`, or `/build APP-123` |
-| Triage and prioritise (product owner) | `/triage`, and `docs/process/PRODUCT-MANAGER.md` |
+| Triage and prioritise (product owner) | `/triage`, `/triage group`, `/epic`, and `docs/process/PRODUCT-MANAGER.md` |
 | Log an idea | `/idea …` |
 | Report a bug | `/bug …` |
 | Turn an approved idea into a spec | `/spec APP-123` |

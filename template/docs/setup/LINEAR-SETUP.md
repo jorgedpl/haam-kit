@@ -80,11 +80,12 @@ Create these team views so humans see what needs them:
 
 | View | Filter |
 |---|---|
-| **Triage** | Linear's built-in Triage inbox (the product owner's daily inbox; see `docs/process/PRODUCT-MANAGER.md` §7) |
+| **Triage** | Linear's built-in Triage inbox (the product owner's daily inbox; see `docs/process/PRODUCT-MANAGER.md` §8) |
 | **Waiting on me** | Status in (Decision, UAT), plus Backlog issues with a `📝 Spec ready for review` comment |
 | **Agent queue** | Status = Ready, label `agent-ready` or `stream:bug`, unassigned |
 | **Ideas inbox** | Status in (Triage, Discovery), label `stream:idea` |
 | **Bugs** | Label `stream:bug`, not Done/Canceled, sorted by priority |
+| **Epics** | Label `epic`, not Done/Canceled (show sub-issue progress) |
 | **Overrides to close** | Label `override-followup`, not Done |
 
 ## 8. Notifications

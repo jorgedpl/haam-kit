@@ -12,6 +12,10 @@ Each release lists **Migration** steps when a project needs to do more than run 
 - **Product manager guide** (`docs/process/PRODUCT-MANAGER.md`), for humans: what only the product owner does, a daily, weekly and monthly rhythm, how to triage (four questions and the possible outcomes), priority levels with tests, a bug impact × reach matrix, value/confidence/size for ideas, healthy queue sizes, and how to do each step with an agent, directly in GitHub Projects or directly in Linear. With checklists.
 - **`/triage [inbox|backlog|stale]` skill** (human-invoked): the agent reads the inbox, the backlog or stuck work, proposes stream, priority and next step for each item in one table, and applies only what the product owner confirms, with a comment on each item.
 - GitHub Projects setup lists a **Triage** saved view; Linear setup points to Linear's Triage inbox.
+- **Epics**: a parent issue labelled `epic` groups the issues of one feature (GitHub sub-issues; Linear sub-issues), with a brief in `docs/epics/` from the new `docs/templates/epic.md`. Epics are decided once at G1 (`/decide` applies to their idea sub-issues), never built themselves, and closed when their last sub-issue is released.
+- **`/triage group`**: clusters loose issues into proposed epics (title, outcome, members, why) for the product owner to confirm.
+- **`/epic <ID>` or `/epic "<theme>"`** (human-invoked): reads an epic's issues and the code, drafts the brief, interviews the product owner (at most five questions per round), then proposes and applies a clean-up: duplicates, gaps, rewrites, splits, order.
+- `haam.py issue create --epic`, `--parent N`, `issue link N --parent E`, `issue children E` (with progress), `issue list --parent E` / `--no-parent`; `claim` refuses epics; new label `epic` on GitHub and Linear; Epics saved view.
 
 ### Changed
 - On GitHub Projects, moving an issue to Canceled also closes it as not planned.
@@ -20,7 +24,7 @@ Each release lists **Migration** steps when a project needs to do more than run 
 - Lifecycle, onboarding and adoption docs point to the guide and `/triage`.
 
 ### Migration
-- `haam.py update`. On GitHub Projects, add the **Triage** view to the board (filter `status:Triage`).
+- `haam.py update`, then re-run the tracker setup to add the `epic` label: GitHub Projects `haam.py github-project --apply`; Linear `haam.py linear --apply` (in your terminal). On GitHub Projects, add the **Triage** (`status:Triage`) and **Epics** (`label:epic`) views to the board.
 
 ## [1.2.0] - 2026-10-16
 

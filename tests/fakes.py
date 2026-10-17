@@ -175,7 +175,8 @@ def issue_view(n):
     i = st["issues"][str(n)]
     items = [it for it in st["items"] if it["issue"] == n]
     return {"id": i["id"], "number": n, "title": i["title"], "state": i["state"], "url": i["url"], "body": i["body"],
-            "createdAt": i["created"], "assignees": {"nodes": [{"login": x} for x in i["assignees"]]},
+            "createdAt": i["created"], "parent": {"number": i["parent"]} if i.get("parent") else None,
+            "assignees": {"nodes": [{"login": x} for x in i["assignees"]]},
             "labels": {"nodes": [{"name": x} for x in i["labels"]]},
             "projectItems": {"nodes": [{"id": it["id"], "project": {"id": it["project"], "number": next(
                 p["number"] for p in st["projects"] if p["id"] == it["project"])},
@@ -238,6 +239,11 @@ if a[:2] == ["api", "graphql"]:
     if "projectV2(number:" in q:
         p = next((p for p in st["projects"] if p["number"] == v["n"]), None)
         out({"data": {"repositoryOwner": {"projectV2": proj_view(p) if p else None}}})
+    if "addSubIssue" in q:
+        pn = next(int(k) for k, i in st["issues"].items() if i["id"] == v["p"])
+        cn = next(int(k) for k, i in st["issues"].items() if i["id"] == v["c"])
+        st["issues"][str(cn)]["parent"] = pn
+        out({"data": {"addSubIssue": {"issue": {"number": pn}, "subIssue": {"number": cn}}}})
     if "issue(number:" in q:
         out({"data": {"repository": {"issue": issue_view(v["n"]) if str(v["n"]) in st["issues"] else None}}})
     if "repository(owner:$o,name:$r){ id }" in q:
@@ -258,7 +264,7 @@ if a[:2] == ["api", "graphql"]:
                 continue
             iv = issue_view(it["issue"])
             nodes.append({"id": it["id"], "content": {"__typename": "Issue", "number": it["issue"], "title": iv["title"],
-                          "state": iv["state"], "url": iv["url"], "createdAt": iv["createdAt"],
+                          "state": iv["state"], "url": iv["url"], "createdAt": iv["createdAt"], "parent": iv["parent"],
                           "repository": {"nameWithOwner": "example-org/example-app"},
                           "assignees": iv["assignees"], "labels": iv["labels"]},
                           "fieldValues": {"nodes": values(it)}})

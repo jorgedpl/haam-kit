@@ -14,8 +14,9 @@ Examples use GitHub Projects IDs (`#12`); on Linear the same item is `APP-12`. C
 |---|---|---|---|
 | Keep `docs/product/PRODUCT.md` current: current priorities, non-negotiables, core journeys | Monthly | "Update PRODUCT.md: our priorities are now…" | Edit the file (via a PR) |
 | Triage new ideas and bugs | Daily | `/triage` | Triage view: priority, status, labels |
+| Group related issues into epics and answer the agent's questions about each | Weekly | `/triage group`, then `/epic #9` | Epic issue (label `epic`) with sub-issues |
 | Set and change priorities | Daily and weekly | `/triage`, `/triage backlog` | Priority field |
-| Decide on assessed ideas (G1) | Weekly | `/decide #12 approve high` | Status, labels, comment (§6) |
+| Decide on assessed ideas (G1) | Weekly | `/decide #12 approve high` | Status, labels, comment (§7–8) |
 | Approve specs (G2) | As they arrive | Merge the spec PR, then "spec for #12 approved, mark it ready" | Merge the spec PR, Status Ready, label `agent-ready` |
 | Test changes locally (G4) | Daily | Follow the UAT plan, then `/uat-result #12 pass` | (needs the skill: it adds the PR label) |
 | Merge and approve deploys (G5) | When UAT passes | Merge, approve the deploy, `/release #12` | GitHub: merge and approve |
@@ -34,13 +35,14 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
 4. Skim the handover and "blocked" comments from agents and answer their questions.
 
 ### Weekly (30–45 minutes)
-1. **Decide** everything in **Decision** (G1).
-2. **Review spec PRs** and approve or comment (G2).
-3. **Re-rank** Ready and Backlog against the current priorities (`/triage backlog`).
-4. **Find stuck work:** `/triage stale` (claimed but quiet, UAT waiting too long, decisions overdue).
-5. **Revisit Parked** items whose "revisit when" has come true.
-6. **Close override follow-ups** (label `override-followup`).
-7. Improve one thing in the process (an `/idea` with label `area:process`).
+1. **Group** loose issues into epics (`/triage group`) and shape the top epic with the agent (`/epic #9`).
+2. **Decide** everything in **Decision** (G1).
+3. **Review spec PRs** and approve or comment (G2).
+4. **Re-rank** Ready and Backlog against the current priorities (`/triage backlog`).
+5. **Find stuck work:** `/triage stale` (claimed but quiet, UAT waiting too long, decisions overdue).
+6. **Revisit Parked** items whose "revisit when" has come true.
+7. **Close override follow-ups** (label `override-followup`).
+8. Improve one thing in the process (an `/idea` with label `area:process`).
 
 ### Monthly or quarterly (30 minutes)
 1. Rewrite **Current priorities** in `PRODUCT.md`: 3–5 outcomes, in order. Agents use them to suggest priorities and break ties, so this is the single most useful thing you can keep current.
@@ -52,11 +54,13 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
 
 The **Triage** status is your inbox. Ideas and bugs land there from `/idea`, `/bug`, the issue forms, other people and agents. Aim for an empty inbox at the end of each day.
 
+If several items look related, or most of them lack context, **group them first** (§4): triaging one feature at a time is faster and better than triaging fragments.
+
 For each item, answer four questions:
 
 1. **Is it clear and new?** Duplicate → close it and link the original. Not enough information → comment with your question and leave it in Triage.
 2. **What is it?** A **bug** means something doesn't work as intended. An **idea** means new or changed behaviour. "Works as designed, but the user expected something else" is an idea, not a bug. Fix the stream label if it's wrong.
-3. **How important is it?** Set the priority (§4).
+3. **How important is it?** Set the priority (§5).
 4. **What happens next?**
 
 | Item | Your call | Status after | What follows |
@@ -73,9 +77,33 @@ Small ideas still go through assessment. Ask for a quick one ("assess #12, keep 
 
 ---
 
-## 4. Prioritising
+## 4. Epics: grouping issues into features
 
-### 4.1 The four levels
+Single issues often lack context. "Export button missing on mobile", "Export to CSV" and "Scheduled reports" are three fragments of one feature, and triaged one by one each looks small and unclear. An **epic** is a parent issue (label `epic`) that groups the issues for one outcome and carries the context they lack: who it's for, what success looks like, what's in and out of scope, and the order of the slices. That context lives in a short **epic brief** in `docs/epics/`.
+
+**Use an epic for:** three or more issues about the same outcome; an idea too big for one spec (size L or XL); a request that touches several screens or modules.
+**Don't use one for:** a single bug; a "misc" bucket of unrelated things; a theme that never ends ("performance", "UX polish"): those are priorities, not epics. An epic should be finishable, in weeks rather than quarters.
+
+### How an epic flows
+1. **Group.** `/triage group` looks at the loose issues and proposes epics: a title, the outcome in one line, which issues belong and why. You say `ok` or adjust (`merge 2 and 3`, `#40 out`). Or start from a theme: `/epic "reporting"`.
+2. **Shape.** `/epic #9`: the agent reads every issue in the epic, the product context and the relevant code, drafts the brief, then **asks you up to five questions per round**: who it's for, what success looks like, must-haves versus nice-to-haves, constraints, what must not change, how it ranks. Then it proposes a clean-up: duplicates to close, gaps to add as new issues, unclear issues to rewrite, big ones to split, an order. Nothing changes until you confirm.
+3. **Decide once (G1).** `/assess #9` adds effort and feasibility for the whole epic; `/decide #9 approve high` approves it and the ideas inside it in one go.
+4. **Spec and build slice by slice.** Each sub-issue gets its own spec and passes G2 on its own. Agents build sub-issues, never the epic itself.
+5. **Finish.** When the last sub-issue is released, `/release` offers to close the epic.
+
+**Priorities:** give the epic a priority; its issues take the same one unless you say otherwise. A bug inside an epic can still be more urgent than the epic.
+
+**Answering the agent's questions:** short answers are fine. "Don't know yet" is a valid answer: it stays open in the brief. Answer about what users need and why; leave the how to the agents.
+
+### Epics directly in the tracker
+- **GitHub Projects:** create an issue and add the label `epic`; then, in the epic's sub-issues section, add the issues that belong to it (or set the parent from each issue). On the board, use the **Epics** view, and show the *Parent issue* and *Sub-issues progress* fields in table views so every card shows its epic.
+- **Linear:** create an issue with the label `epic` and make the related issues its sub-issues (set their parent). For a very large initiative that spans several epics, a Linear project can hold the epics.
+
+---
+
+## 5. Prioritising
+
+### 5.1 The four levels
 
 | Priority | Test | Expected handling |
 |---|---|---|
@@ -87,7 +115,7 @@ Small ideas still go through assessment. Ask for a quick one ("assess #12, keep 
 
 Keep it honest: if more than about one in five open items is High or Urgent, the levels have stopped meaning anything. Demote something.
 
-### 4.2 Bugs: impact × reach
+### 5.2 Bugs: impact × reach
 
 | | Most users, or a core journey | Some users | A few users, or an edge case |
 |---|---|---|---|
@@ -95,7 +123,7 @@ Keep it honest: if more than about one in five open items is High or Urgent, the
 | **Wrong result, but there's a workaround** | High | Medium | Low |
 | **Annoying or cosmetic** | Medium | Low | Low |
 
-### 4.3 Ideas and features: value, confidence, size
+### 5.3 Ideas and features: value, confidence, size
 
 After an assessment you have three things: **value** (how much it moves a current priority), **confidence** (how good the evidence is) and **size** (XS–XL, from the codebase). Rules of thumb:
 - **High:** clear value for a current priority, good evidence, size S–M.
@@ -105,10 +133,10 @@ After an assessment you have three things: **value** (how much it moves a curren
 
 To compare two ideas quickly: value (1–3) × confidence (0.5 / 0.8 / 1) ÷ size (XS 1, S 2, M 3, L 5, XL 8). The higher score goes first. It's a tie-breaker, not a formula to obey.
 
-### 4.4 Order inside a priority
+### 5.4 Order inside a priority
 Agents take **bugs before features, older before newer, smaller before larger**. They read the priority, not the position of a card on the board. If X must happen before Y, give X a higher priority, or write `Blocked by #X` in Y's description.
 
-### 4.5 Keep the queues healthy
+### 5.5 Keep the queues healthy
 
 | Queue | Healthy size | If not |
 |---|---|---|
@@ -117,17 +145,19 @@ Agents take **bugs before features, older before newer, smaller before larger**.
 | **UAT** | 3 or fewer | Stop starting agents and test. Agents produce faster than you can test |
 | **Agents running** | No more than you can test tomorrow | Fewer agents, smaller items |
 
-### 4.6 Changing priorities
+### 5.6 Changing priorities
 Change them whenever the facts change, but say why in a comment. Agents and colleagues read the history. Never quietly demote an Urgent item: comment, and tell whoever reported it.
 
 ---
 
-## 5. Doing it with AI
+## 6. Doing it with AI
 
 Use **your own chat in the project's main folder**, not one of the agent chats running `/work`.
 
 | You want to… | Type |
 |---|---|
+| Group loose issues into epics | `/triage group` |
+| Shape one epic: brief, questions for you, clean-up | `/epic #9` (or `/epic "reporting"` to start from a theme) |
 | Triage the inbox | `/triage` |
 | Re-rank Ready and Backlog against the priorities | `/triage backlog` |
 | Find stuck or forgotten work | `/triage stale` |
@@ -153,13 +183,14 @@ The agent's suggestions are drafts, and you own the decisions. When `/bug` files
 
 ---
 
-## 6. Doing it directly in GitHub Projects
+## 7. Doing it directly in GitHub Projects
 
 Everything above can be done by hand on the board. The saved views (set up with `haam.py github-project`) are your workspace:
 
 | View | Use it for |
 |---|---|
 | **Triage** (status: Triage) | Your daily inbox |
+| **Epics** (label: epic) | Each feature and how far its sub-issues have got |
 | **Waiting on me** (status: Decision, UAT) | Decisions and tests |
 | **Agent queue** (status: Ready, unassigned) | What agents will pick up next, by priority |
 | **Bugs** | All open bugs by priority |
@@ -173,18 +204,20 @@ Everything above can be done by hand on the board. The saved views (set up with 
 | Reject or mark a duplicate | Status **Canceled**, then close the issue as *not planned* or *duplicate* |
 | Approve an idea (G1) | Status **Backlog**; replace label `stream:idea` with `stream:feature`; set Priority; comment "Approved" |
 | Approve a spec (G2) | Merge the spec PR; then Status **Ready** and label `agent-ready` |
+| Group issues into an epic | Create an issue with label `epic`; add the others as its sub-issues |
 | Re-rank many items | Table layout, grouped or sorted by Priority; edit the cells (you can copy a value and paste it into several selected cells) |
 
 Leave these to the skills: claiming (**In Progress**) is the agents' job; **UAT pass** needs `/uat-result` (it adds the PR label that unlocks merging); **Done** needs `/release` (it closes the issue and updates the changelog after the deploy).
 
 ---
 
-## 7. Doing it directly in Linear
+## 8. Doing it directly in Linear
 
 | Task | In Linear |
 |---|---|
 | Triage | Use the team's **Triage** inbox. You can accept, decline, mark as duplicate or snooze. After accepting, **set the HAAM status yourself** (Ready for a bug, Discovery for an idea to assess), because accepting moves the item to the team's default status. Set the priority |
 | Park or reject | Status **Parked** or **Canceled**, with a comment |
+| Group issues into an epic | Create an issue with label `epic`; set it as the parent of the related issues |
 | Approve an idea (G1) | Status **Backlog**, replace label `stream:idea` with `stream:feature`, set priority, comment |
 | Approve a spec (G2) | Merge the spec PR; then status **Ready** and label `agent-ready` |
 | Re-rank | The views from `docs/setup/LINEAR-SETUP.md` §7, sorted by priority; the command menu (Cmd/Ctrl+K) changes priority or status quickly |
@@ -193,7 +226,7 @@ As on GitHub, agents follow the priority field, not the manual order of a list.
 
 ---
 
-## 8. Working with other people
+## 9. Working with other people
 
 - **One product owner per product** sets priorities and passes the gates. Everyone else proposes: `/idea`, `/bug`, comments.
 - Ask colleagues to suggest a priority when they report something. You confirm it at triage.
@@ -202,18 +235,20 @@ As on GitHub, agents follow the priority field, not the manual order of a list.
 
 ---
 
-## 9. Traps to avoid
+## 10. Traps to avoid
 
 - **Everything is High.** Then nothing is. Demote until roughly one item in five is High or Urgent.
 - **More agents than you can test.** Work piles up in UAT and goes stale. Fewer, smaller items move faster.
 - **"Just build it" in a chat.** Create the issue first (`/bug`, `/idea`): it takes a minute and keeps the history, the priority and the claim.
 - **Approving a spec without reading the acceptance criteria.** That's what the agent builds and what you test against. Read them.
 - **Priorities only in your head.** If they aren't in `PRODUCT.md` and the tracker, agents can't follow them.
+- **Building fragments without the big picture.** If several issues are really one feature, group them into an epic and shape it before anyone specs the pieces.
+- **Epics that never end.** If an epic has been open for months, split off what's done and close it.
 - **Leaving Triage for "later".** The inbox grows, and urgent bugs hide in it.
 
 ---
 
-## 10. Checklists
+## 11. Checklists
 
 **Daily**
 - [ ] UAT items tested, oldest first
@@ -222,6 +257,7 @@ As on GitHub, agents follow the priority field, not the manual order of a list.
 - [ ] Agents' questions answered
 
 **Weekly**
+- [ ] Loose issues grouped into epics; top epic shaped
 - [ ] Decision queue decided
 - [ ] Spec PRs approved or commented
 - [ ] Ready and Backlog re-ranked

@@ -19,6 +19,7 @@ This skill only runs when a human types it. You are recording *their* decision, 
    - **approve** → status `Backlog`; replace label `stream:idea` with `stream:feature`; set priority (ask if not given); comment `✅ Approved at G1 by <user>: <notes>`.
    - **park** → status `Parked`; ask for a "revisit when…" trigger if not in the notes; comment `⏸️ Parked: <notes>`.
    - **reject** → status `Canceled`; comment `❌ Rejected: <notes>` (ask for a one-line reason if none given).
-4. **Merge-readiness of the assessment PR:** tell the user the assessment PR can now be merged so the reasoning is kept in Git (you do not merge it).
-5. **ADR:** if the decision fixes a technical choice that future agents must respect (e.g. "use provider X", "no new database"), draft an ADR in `docs/decisions/` from `docs/templates/adr.md` on the same docs branch and say so.
-6. **Reply** with the new status and, for approvals: "Next: `/spec <ID>`."
+4. **Epics:** if the issue is an epic, show its open sub-issues and ask whether the decision applies to them too (default: yes for sub-issues that are ideas; bugs keep their own path). On yes, apply the same move to each (approve: `Backlog` + `stream:feature`, with the epic's priority unless the human says otherwise) and comment `Decided with epic <ID>`.
+5. **Merge-readiness of the assessment PR:** tell the user the assessment PR can now be merged so the reasoning is kept in Git (you do not merge it).
+6. **ADR:** if the decision fixes a technical choice that future agents must respect (e.g. "use provider X", "no new database"), draft an ADR in `docs/decisions/` from `docs/templates/adr.md` on the same docs branch and say so.
+7. **Reply** with the new status and, for approvals: "Next: `/spec <ID>`."

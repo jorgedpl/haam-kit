@@ -96,7 +96,8 @@ Written `/name` here (Claude Code, Cursor, Grok). In Codex use `$name`. Any othe
 | `/idea <text>` | Capture an idea | Anyone |
 | `/bug <text>` | Report a problem | Anyone |
 | `/assess APP-12` | Evaluate value, effort, risk, feasibility | Agent |
-| `/triage` | Triage the inbox, re-rank (`backlog`), chase stuck work (`stale`) | Human only |
+| `/triage` | Triage the inbox, group issues into epics (`group`), re-rank (`backlog`), chase stuck work (`stale`) | Human only |
+| `/epic APP-9` | Shape an epic: brief, questions for you, clean-up of its issues | Human only |
 | `/decide APP-12 approve` | Gate G1 | Human only |
 | `/spec APP-12` | Write a build-ready spec | Agent |
 | `/work bugs` | Start an agent in a new chat window: own worktree, then `/next` | Anyone |
@@ -264,7 +265,7 @@ Agents use `python3 tools/haam/haam.py issue …` for every board operation (`do
    python3 tools/haam/haam.py linear           # plan; asks for the key securely
    python3 tools/haam/haam.py linear --apply
    ```
-   It creates the team if needed, turns on Triage, creates the 12 statuses (renaming Linear's default "Todo" to "Ready"), and the 7 labels. It never deletes anything; it lists extra statuses for you to archive.
+   It creates the team if needed, turns on Triage, creates the 12 statuses (renaming Linear's default "Todo" to "Ready"), and the 8 labels. It never deletes anything; it lists extra statuses for you to archive.
 2. **Browser-only settings** `[YOU, in the browser]`: connect GitHub, PR automations (PR opened → In Review, merged → Deploying), branch name format `{issue-identifier}-{issue-title}`, saved views. See `docs/setup/LINEAR-SETUP.md`.
 3. **Connect your agent** to Linear (`docs/setup/AGENTS-SETUP.md`) and test: *"List the issues in Linear team ACM."*
 

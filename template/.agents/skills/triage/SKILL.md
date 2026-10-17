@@ -1,7 +1,7 @@
 ---
 name: triage
-description: Go through the tracker with the product owner — the Triage inbox, the backlog's ranking, or stuck work — propose a priority and next step for each item, and apply only what the human confirms.
-argument-hint: "[inbox|backlog|stale]  (default: inbox)"
+description: Go through the tracker with the product owner — group loose issues into epics, the Triage inbox, the backlog's ranking, or stuck work — propose a grouping, priority and next step for each item, and apply only what the human confirms.
+argument-hint: "[group|inbox|backlog|stale]  (default: inbox)"
 disable-model-invocation: true
 ---
 
@@ -11,17 +11,30 @@ disable-model-invocation: true
 
 Mode: $ARGUMENTS (empty = `inbox`)
 
-This skill runs only when a human types it. You do the reading and propose; **the human decides**. Change nothing in the tracker until the human has confirmed the table in step 3. The rules you apply are in `docs/process/PRODUCT-MANAGER.md` §3–4.
+This skill runs only when a human types it. You do the reading and propose; **the human decides**. Change nothing in the tracker until the human has confirmed the table in step 3. The rules you apply are in `docs/process/PRODUCT-MANAGER.md` §3–5. In group mode, "the table" is the epics table in step 2a.
 
 ## 1. Read the context
-`docs/product/PRODUCT.md` (current priorities, non-negotiables, core journeys) and `docs/process/PRODUCT-MANAGER.md` §3–4 (outcomes, priority levels, bug matrix).
+`docs/product/PRODUCT.md` (current priorities, non-negotiables, core journeys) and `docs/process/PRODUCT-MANAGER.md` §3–5 (outcomes, epics, priority levels, bug matrix).
 
 ## 2. Collect the items
+- **group:** open issues that aren't in an epic and aren't epics (GitHub: `issue list --open-only --no-parent --no-label epic --json`), plus the open epics (`--label epic`). Go to step 2a.
 - **inbox:** every open issue in `Triage`, plus any open issue with no priority outside Done, Parked and Canceled. GitHub: `python3 tools/haam/haam.py issue list --status Triage --open-only --json`.
 - **backlog:** every issue in `Ready` and `Backlog`. Look for: priorities that no longer fit the current priorities; too many Highs (more than about one in five); items larger than M that should be split; features in Backlog with no spec; Low items older than two months (suggest Park).
 - **stale:** `In Progress` with no comment or commit for 3+ days; `UAT` waiting 3+ days; `Decision` waiting 7+ days; `Parked` items whose "revisit when" seems to have come true; open `override-followup` items.
 
 Read each item fully (description and comments). For a bug, check whether the steps to reproduce are usable. Look for duplicates among open issues. Take at most 15 items per round; say how many are left.
+
+In **inbox** mode, if there are more than about 8 items, or several lack context or look related, suggest running `/triage group` first: triaging one feature at a time is faster than triaging fragments.
+
+## 2a. Group mode: propose epics
+Cluster the issues that belong to the same outcome: the same journey, screen, module, customer request or problem. Fit issues into an existing epic where one matches. Then show:
+
+| # | Epic (new or existing) | Outcome in one line | Issues | Why they belong together | Confidence |
+|---|---|---|---|---|---|
+
+plus a short list of issues that stay on their own, and of likely duplicates. At most 6 epics per round. Ask: *"Reply `ok`, or tell me what to change (e.g. `merge 2 and 3`, `#40 out of 1`, `rename 4 to …`)."* Wait.
+
+Then apply exactly what was confirmed: create each new epic (GitHub: `issue create --epic --stream idea --title "<outcome-focused title>" --body-file <short summary and member list>`, status Triage), link each member (`issue link <n> --parent <epic>`), and comment on each member `🧩 Grouped into epic <ID>: <title>`. Finish by listing the epics in suggested order and offering `/epic <ID>` for the first: that's where the questions about each feature get asked. Skip steps 3–4 in group mode.
 
 ## 3. Propose, as one table
 | # | ID | Title | Stream | Priority | Next step | Why (≤ 12 words) |

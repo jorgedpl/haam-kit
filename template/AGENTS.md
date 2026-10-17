@@ -18,6 +18,7 @@ We run a product lifecycle with three work streams and five gates.
 - **Tracker:** `haam.config.json` → `"tracker"` is `github` (GitHub Projects board) or `linear`. Every tracker operation (find, create, claim, move, comment) is in `docs/process/TRACKER.md`; check which tracker once per session and use that column.
 - **Statuses:** Triage → Discovery → Decision → Backlog → Ready → In Progress → In Review → UAT → Deploying → Done (plus Parked, Canceled).
 - **Gates:** G1 Decision (human) · G2 Ready (human approves spec) · G3 automated checks + independent AI review (+ human for protected areas) · G4 UAT (human, local) · G5 production approval (human).
+- **Epics:** a parent issue labelled `epic` groups the issues (its sub-issues) that make up one feature; its brief in `docs/epics/` holds the context.
 - **Issue IDs:** `#123` on GitHub Projects, `APP-123` on Linear (`TODO(setup)`: replace with your team key everywhere). Skills write `<ID>` for either.
 
 Every piece of work has an issue in the tracker. If you are asked to do something with no issue, create one first with `/idea` or `/bug` (ask the human which, if unclear).
@@ -31,7 +32,8 @@ Skills live in `.agents/skills/<name>/SKILL.md` (the shared Agent Skills format)
 | Capture an idea | `/idea <text>` | anyone |
 | Report a bug | `/bug <text>` | anyone |
 | Assess an idea + feasibility | `/assess <ID>` | agent |
-| Triage and prioritise with the product owner | `/triage [inbox\|backlog\|stale]` | **human only** |
+| Triage and prioritise with the product owner | `/triage [group\|inbox\|backlog\|stale]` | **human only** |
+| Shape an epic with the product owner | `/epic <ID>` or `/epic "<theme>"` | **human only** |
 | Record a decision (G1) | `/decide <ID> approve\|park\|reject` | **human only** |
 | Write the spec | `/spec <ID>` | agent |
 | Start an agent in a new chat window | `/work [bugs\|features\|ideas]` | anyone |
@@ -52,8 +54,8 @@ The setup skills drive `tools/haam/haam.py`; run `python3 tools/haam/haam.py doc
 ## 3. Hard rules: never break these
 
 1. **Never push to `main`, never merge a PR, never deploy, never run production commands.** Humans do that.
-2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/decide`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
-3. **Only build issues that are in `Ready` and have the `agent-ready` label** (bugs: `Ready` is enough). If something isn't ready, help make it ready (`/spec`) instead of building it.
+2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/epic`, `/decide`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
+3. **Only build issues that are in `Ready` and have the `agent-ready` label** (bugs: `Ready` is enough). If something isn't ready, help make it ready (`/spec`) instead of building it. **Never build an epic** (label `epic`) as one piece: build its sub-issues, and read the epic's brief in `docs/epics/` for context.
 4. **Claim before you build** (see §6). Never work on an issue someone else has claimed.
 5. **Never put secrets or real personal data** (names, emails, dates of birth, addresses, document numbers of real people) in code, tests, fixtures, logs, commits, the tracker or docs. Use the synthetic fixtures in the test folder.
 6. **Never read or print `.env*` files or production credentials.** If you need a config value, ask.
@@ -141,7 +143,7 @@ Project-specific test skills: `TODO(setup): list any extra test skills or script
 
 ## 9. Documentation is part of the work
 
-- Specs: `docs/specs/` · Assessments: `docs/assessments/` · UAT plans: `docs/uat/` · Decisions: `docs/decisions/` · Templates: `docs/templates/`. Files are named `<FILE-ID>-<slug>.md`, where `<FILE-ID>` is `GH-123` (GitHub Projects) or `APP-123` (Linear).
+- Epic briefs: `docs/epics/` · Specs: `docs/specs/` · Assessments: `docs/assessments/` · UAT plans: `docs/uat/` · Decisions: `docs/decisions/` · Templates: `docs/templates/`. Files are named `<FILE-ID>-<slug>.md`, where `<FILE-ID>` is `GH-123` (GitHub Projects) or `APP-123` (Linear).
 - If you learn something about the codebase that the next agent would need (a gotcha, a module's purpose, a convention), add it to `docs/product/ARCHITECTURE.md` in the same PR.
 - Don't rely on chat memory for anything that matters. If it isn't in Git or the tracker, the next session won't know it.
 

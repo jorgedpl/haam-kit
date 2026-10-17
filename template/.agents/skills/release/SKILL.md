@@ -16,4 +16,5 @@ Target: $ARGUMENTS
 3. **Changelog:** on a branch `docs/<issue-id>-release`, add an entry under today's date in `CHANGELOG.md`: `- <ID>: <user-facing summary>`. Open a docs PR.
 4. **Tracker:** status `Done` (GitHub Projects: `haam.py issue close <number> --human`, which also closes the issue); comment `🚀 Released to production <date> · deploy run <link>`.
 5. If the release was an override, remind the user that the `override-followup` issue is still open.
-6. Reply with a one-line summary.
+6. **Epic:** if the issue belongs to an epic and every other sub-issue is now Done or Canceled, tell the user and offer to close the epic too (status `Done`; GitHub: `haam.py issue close <epic> --human`, after they say yes).
+7. Reply with a one-line summary.

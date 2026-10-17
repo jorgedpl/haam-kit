@@ -450,6 +450,34 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("issue", "close", str(n), "--human")
         self.assertEqual(self.gh_state()["issues"][str(n)]["state"], "CLOSED")
 
+    def test_epics_group_issues_and_cant_be_built(self):
+        self.setup_board()
+        mk = lambda *a: json.loads(self.tool("issue", "create", *a, "--json").stdout)
+        a = mk("--stream", "idea", "--title", "Export to CSV")["number"]
+        b = mk("--stream", "bug", "--title", "Export button missing on mobile")["number"]
+        loose = mk("--stream", "idea", "--title", "Dark mode")["number"]
+        # Only epics can be parents
+        self.assertNotEqual(self.tool("issue", "link", str(a), "--parent", str(loose), check=False).returncode, 0)
+        epic = mk("--stream", "idea", "--epic", "--title", "Reporting")["number"]
+        self.assertIn("epic", self.gh_state()["issues"][str(epic)]["labels"])
+        self.tool("issue", "link", str(a), "--parent", str(epic))
+        self.tool("issue", "link", str(b), "--parent", str(epic))
+        c = mk("--stream", "feature", "--title", "Scheduled reports", "--parent", str(epic))
+        self.assertEqual(c["parent"], epic)
+        kids = json.loads(self.tool("issue", "children", str(epic), "--json").stdout)
+        self.assertEqual(sorted(k["number"] for k in kids["children"]), sorted([a, b, c["number"]]))
+        self.assertEqual(kids["done"], 0)
+        loose_items = json.loads(self.tool("issue", "list", "--no-parent", "--no-label", "epic", "--json").stdout)["items"]
+        self.assertEqual([i["number"] for i in loose_items], [loose])
+        self.assertEqual(json.loads(self.tool("issue", "view", str(a), "--json").stdout)["issue"]["parent"], epic)
+        # Epics are never built themselves, and don't nest
+        self.tool("issue", "status", str(epic), "Ready")
+        p = self.tool("issue", "claim", str(epic), check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("is an epic", p.stderr)
+        other = mk("--stream", "idea", "--epic", "--title", "Other")["number"]
+        self.assertNotEqual(self.tool("issue", "link", str(other), "--parent", str(epic), check=False).returncode, 0)
+
     def test_triage_reject_closes_as_not_planned_and_needs_human(self):
         self.setup_board()
         n = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Dark mode", "--json").stdout)["number"]

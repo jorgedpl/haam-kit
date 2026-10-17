@@ -25,7 +25,7 @@ Take the first match, in this order:
 4. **Specs to write**: status `Backlog`, label `stream:feature`, has a priority, no spec yet → run `/spec`.
 5. **Ideas to assess**: label `stream:idea`, status `Discovery` and unassigned (triaged for assessment, by priority), then status `Triage` → run `/assess`.
 
-Skip any issue with label `human-only`, any with no priority (except ideas in step 5), and any whose `blocked by` relations are not Done.
+Skip epics (label `epic`: build their sub-issues instead), any issue with label `human-only`, any with no priority (except ideas in step 5), and any whose `blocked by` relations are not Done.
 
 ## 2. Confirm or go
 - **If a human is present**, show the top 3 candidates (ID, title, priority, stream, size if known) and recommend one. Wait for a choice.

@@ -18,7 +18,7 @@ Admin (first-time adoption and upgrades):
     invite    --github USER [--linear-email EMAIL] [--apply]
 
 Agents, when the tracker is GitHub Projects:
-    issue create|view|list|claim|status|priority|label|comment|close ...
+    issue create|view|list|claim|status|priority|label|comment|close|link|children ...
 
 Parallel chats (one worktree per agent chat):
     worktree status|new|prep|list|clean [--apply]
@@ -119,6 +119,7 @@ LINEAR_LABELS = [
     ("human-review", "#F2C94C", "Touches a protected area: human code review required"),
     ("human-only", "#95A2B3", "Agents must not pick this up"),
     ("override-followup", "#FC7840", "Created after a gate override"),
+    ("epic", "#3E4B9E", "Groups the issues that make up one feature (its sub-issues)"),
 ]
 
 # Files the rename step rewrites (team key / product name)
@@ -1251,7 +1252,7 @@ def cmd_linear(args):
     for t in ["Connect GitHub: Settings → Integrations → GitHub",
               "PR automations: PR opened → In Review; PR merged → Deploying",
               "Branch name format: {issue-identifier}-{issue-title} (no username prefix)",
-              "Saved views: Waiting on me, Agent queue, Ideas inbox, Bugs, Overrides to close",
+              "Saved views: Waiting on me, Agent queue, Ideas inbox, Bugs, Epics, Overrides to close",
               "Delete Linear's sample statuses you don't need (e.g. Duplicate)"]:
         rep.add("info", t)
     rep.action(WHO_BROWSER, "Finish the Linear settings listed above", "docs/setup/LINEAR-SETUP.md §6–7")
@@ -1291,7 +1292,9 @@ GH_ISSUE_LABELS = [
     ("agent-ready", "4CB782", "Passed G2: agents may build it"),
     ("human-only", "95A2B3", "Agents must not pick this up"),
     ("override-followup", "FC7840", "Created after a gate override"),
+    ("epic", "3E4B9E", "Groups the issues that make up one feature (its sub-issues)"),
 ]
+EPIC_LABEL = "epic"
 # Moving into these needs a human decision (they're done through human-only skills)
 HUMAN_STATUSES = {"Done", "Parked", "Canceled"}
 PROJECT_TOKEN_SECRET = "HAAM_PROJECT_TOKEN"
@@ -1372,7 +1375,7 @@ class GHProject:
     # --- issues
     def issue(self, number):
         d = gql("""query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){
-                     id number title state url body createdAt
+                     id number title state url body createdAt parent{ number }
                      assignees(first:10){ nodes{ login } } labels(first:30){ nodes{ name } }
                      projectItems(first:20){ nodes{ id project{ id number }
                        fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue {
@@ -1395,6 +1398,7 @@ class GHProject:
             "labels": [l["name"] for l in iss["labels"]["nodes"]],
             "item_id": item["id"] if item else None,
             "status": values.get("Status"), "priority": values.get("Priority"),
+            "parent": (iss.get("parent") or {}).get("number"),
         }
 
     def ensure_item(self, iss):
@@ -1413,13 +1417,18 @@ class GHProject:
                  projectId:$p, itemId:$i, fieldId:$f, value:{ singleSelectOptionId:$o } }){ projectV2Item{ id } } }""",
             {"p": self.data["id"], "i": item, "f": field_id, "o": opt_id})
 
+    def link(self, parent, child):
+        """Make `child` a sub-issue of the epic `parent` (both are dicts from issue())."""
+        gql("""mutation($p:ID!,$c:ID!){ addSubIssue(input:{issueId:$p, subIssueId:$c, replaceParent:true}){
+                 issue{ number } subIssue{ number } } }""", {"p": parent["node_id"], "c": child["node_id"]})
+
     def items(self):
         proj = self.data or self.load()
         out, after = [], None
         while True:
             d = gql("""query($p:ID!,$a:String){ node(id:$p){ ... on ProjectV2 { items(first:100, after:$a){
                          pageInfo{ hasNextPage endCursor }
-                         nodes{ id content{ __typename ... on Issue { number title state url createdAt
+                         nodes{ id content{ __typename ... on Issue { number title state url createdAt parent{ number }
                            repository{ nameWithOwner } assignees(first:10){ nodes{ login } } labels(first:30){ nodes{ name } } } }
                            fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue {
                              name field{ ... on ProjectV2FieldCommon { name } } } } } } } } } }""",
@@ -1434,7 +1443,8 @@ class GHProject:
                             "repo": c["repository"]["nameWithOwner"], "created": c["createdAt"],
                             "assignees": [a["login"] for a in c["assignees"]["nodes"]],
                             "labels": [l["name"] for l in c["labels"]["nodes"]],
-                            "status": vals.get("Status"), "priority": vals.get("Priority")})
+                            "status": vals.get("Status"), "priority": vals.get("Priority"),
+                            "parent": (c.get("parent") or {}).get("number")})
             if not page["pageInfo"]["hasNextPage"]:
                 return out
             after = page["pageInfo"]["endCursor"]
@@ -1571,6 +1581,8 @@ def cmd_github_project(args):
     rep.section("Board views (browser only)")
     for v in ["Board: layout Board, group by Status",
               "Triage: filter  status:Triage  (the product owner's daily inbox)",
+              "Epics: filter  label:epic  (table layout; show the Sub-issues progress field)",
+              "In table views, show the Parent issue field so each card shows its epic",
               "Agent queue: filter  status:Ready no:assignee  (features also need label:agent-ready)",
               "Waiting on me: filter  status:Decision,UAT",
               "Ideas inbox: filter  status:Triage,Discovery label:stream:idea",
@@ -1644,17 +1656,29 @@ def issue_action(args, cfg, board):
             items = [i for i in items if not i["assignees"]]
         if args.open_only:
             items = [i for i in items if i["state"] == "OPEN"]
+        if args.parent:
+            pn = parse_issue_number(args.parent)
+            items = [i for i in items if i.get("parent") == pn]
+        if args.no_parent:
+            items = [i for i in items if not i.get("parent")]
         order = {n: k for k, (n, _, _) in enumerate(GH_PRIORITIES)}
         items.sort(key=lambda i: (order.get(i["priority"], 9), i["created"]))
         lines = [f"#{i['number']:<5} {i['status'] or '-':<12} {i['priority'] or '-':<7} "
-                 f"{','.join(i['assignees']) or '-':<14} {i['title']}  [{', '.join(i['labels'])}]" for i in items]
+                 f"{','.join(i['assignees']) or '-':<14} {i['title']}  [{', '.join(i['labels'])}]"
+                 + (f"  (epic #{i['parent']})" if i.get("parent") else "") for i in items]
         return {"items": items, "message": "\n".join(lines) or "No matching issues."}
 
     if a == "create":
         if not args.title:
             sys.exit("--title is required")
         body = Path(args.body_file).read_text() if args.body_file else (args.body or "")
-        labels = [f"stream:{args.stream}"] + (args.label or [])
+        labels = [f"stream:{args.stream}"] + (args.label or []) + ([EPIC_LABEL] if args.epic else [])
+        parent = None
+        if args.parent:
+            parent = board.issue(parse_issue_number(args.parent))
+            if EPIC_LABEL not in parent["labels"]:
+                raise RuntimeError(f"#{parent['number']} isn't an epic (label '{EPIC_LABEL}'). Make it one first: "
+                                   f"issue label {parent['number']} --add {EPIC_LABEL}")
         cmd = ["gh", "issue", "create", "-R", repo, "--title", args.title, "--body", body]
         for lab in labels:
             cmd += ["--label", lab]
@@ -1667,8 +1691,11 @@ def issue_action(args, cfg, board):
         board.set_option(iss, "Status", status)
         if args.priority:
             board.set_option(iss, "Priority", args.priority)
-        return {"number": number, "url": iss["url"], "status": status,
-                "message": f"Created #{number} ({status}{', ' + args.priority if args.priority else ''}): {iss['url']}"}
+        if parent:
+            board.link(parent, iss)
+        return {"number": number, "url": iss["url"], "status": status, "parent": parent["number"] if parent else None,
+                "message": f"Created {'epic ' if args.epic else ''}#{number} ({status}"
+                           f"{', ' + args.priority if args.priority else ''}{', in epic #' + str(parent['number']) if parent else ''}): {iss['url']}"}
 
     number = parse_issue_number(args.number) if args.number else None
     if number is None:
@@ -1678,8 +1705,30 @@ def issue_action(args, cfg, board):
     if a == "view":
         msg = (f"#{iss['number']} {iss['title']}\n  state: {iss['state']} · status: {iss['status'] or '-'} · "
                f"priority: {iss['priority'] or '-'} · assignees: {', '.join(iss['assignees']) or '-'}\n"
-               f"  labels: {', '.join(iss['labels']) or '-'}\n  {iss['url']}")
+               f"  labels: {', '.join(iss['labels']) or '-'}"
+               + (f" · epic: #{iss['parent']}" if iss.get("parent") else "") + f"\n  {iss['url']}")
         return {"issue": {k: v for k, v in iss.items() if k != "node_id"}, "message": msg}
+
+    if a == "link":
+        if not args.parent:
+            sys.exit("Give the epic: `issue link 14 --parent 9`")
+        epic = board.issue(parse_issue_number(args.parent))
+        if EPIC_LABEL not in epic["labels"]:
+            raise RuntimeError(f"#{epic['number']} isn't an epic (label '{EPIC_LABEL}')")
+        if EPIC_LABEL in iss["labels"]:
+            raise RuntimeError(f"#{number} is itself an epic; epics don't nest in HAAM")
+        board.ensure_item(iss)
+        board.link(epic, iss)
+        return {"number": number, "parent": epic["number"], "message": f"#{number} is now part of epic #{epic['number']}"}
+
+    if a == "children":
+        kids = [i for i in board.items() if i.get("parent") == number]
+        order = {n: k for k, (n, _, _) in enumerate(GH_PRIORITIES)}
+        kids.sort(key=lambda i: (order.get(i["priority"], 9), i["created"]))
+        done = len([k for k in kids if k["status"] in ("Done", "Canceled") or k["state"] == "CLOSED"])
+        lines = [f"Epic #{number} {iss['title']}: {done}/{len(kids)} done"] + [
+            f"  #{k['number']:<5} {k['status'] or '-':<12} {k['priority'] or '-':<7} {k['title']}" for k in kids]
+        return {"epic": number, "children": kids, "done": done, "message": "\n".join(lines)}
 
     if a == "add":
         board.ensure_item(iss)
@@ -1697,7 +1746,7 @@ def issue_action(args, cfg, board):
         human_move = canon in HUMAN_STATUSES or (iss["status"] == "Decision" and canon == "Backlog")
         if human_move and not args.human:
             raise RuntimeError(f"Moving to {canon} is a human decision. Only do it while running the human-only skill "
-                               "the human typed (/triage, /decide, /release …), and add --human.")
+                               "the human typed (/triage, /epic, /decide, /release …), and add --human.")
         board.set_option(iss, "Status", canon)
         msg = f"#{number}: {iss['status'] or '-'} → {canon}"
         if canon == "Canceled" and iss["state"] == "OPEN":
@@ -1748,6 +1797,8 @@ def issue_action(args, cfg, board):
             raise RuntimeError(f"#{number} is in {iss['status']}, not Ready. Only Ready issues are built (AGENTS.md §3).")
         if "human-only" in iss["labels"]:
             raise RuntimeError(f"#{number} is labelled human-only")
+        if EPIC_LABEL in iss["labels"]:
+            raise RuntimeError(f"#{number} is an epic: build its sub-issues instead (issue children {number})")
         code, out, err = run(["gh", "issue", "edit", str(number), "-R", repo, "--add-assignee", "@me"])
         if code != 0:
             raise RuntimeError(err or out)
@@ -2402,7 +2453,7 @@ def main():
 
     p = common(sub.add_parser("issue", help="work with issues on the GitHub Projects board (for agents)"))
     p.add_argument("action", choices=["list", "create", "view", "add", "claim", "status", "priority", "label",
-                                      "comment", "close"])
+                                      "comment", "close", "link", "children"])
     p.add_argument("number", nargs="?", help="issue number (#123 or 123)")
     p.add_argument("value", nargs="?", help="new status or priority")
     p.add_argument("--title")
@@ -2414,6 +2465,9 @@ def main():
     p.add_argument("--label", action="append", help="list: must have label; create: extra label (repeatable)")
     p.add_argument("--no-label", action="append", help="list: must not have label (repeatable)")
     p.add_argument("--unassigned", action="store_true")
+    p.add_argument("--epic", action="store_true", help="create: make the new issue an epic (label 'epic')")
+    p.add_argument("--parent", help="create/link: the epic this issue belongs to; list: only that epic's issues")
+    p.add_argument("--no-parent", action="store_true", help="list: only issues that aren't in an epic")
     p.add_argument("--open-only", action="store_true")
     p.add_argument("--add", action="append", help="label: add (repeatable)")
     p.add_argument("--remove", action="append", help="label: remove (repeatable)")

@@ -20,6 +20,7 @@ Capture is fast and cheap. Do not assess or judge yet.
    - Status: `Triage`
    - Labels: `stream:idea`
    - Priority: none (humans set priority at G1)
-4. **Reply** with the issue ID and link, and one line: "Run `/assess <ID>` when you want it evaluated."
+4. **Epics:** if an open epic clearly covers this idea, say so and offer to add it there (GitHub: `issue link <n> --parent <epic>`). If the idea is big enough to be several features, say it could be an epic and suggest `/epic "<theme>"`.
+5. **Reply** with the issue ID and link, and one line: "Run `/assess <ID>` when you want it evaluated."
 
 No Git changes in this step.

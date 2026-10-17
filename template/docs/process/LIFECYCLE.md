@@ -30,6 +30,9 @@ Agents pull work from three streams. They look the same in the tracker (issues) 
 
 When an idea is approved at Gate G1 its label changes from `stream:idea` to `stream:feature`. It keeps the same issue ID so the whole history stays in one place.
 
+### Epics
+An **epic** is a parent issue (label `epic`) that groups the issues making up one feature, with a brief in `docs/epics/` holding the context: who it's for, the outcome, scope, slices and order. It goes through Triage, Discovery and Decision like an idea, so G1 is decided once for the whole feature (`/decide` applies to its idea sub-issues too). After that, each sub-issue is specced, passes G2 and is built on its own; the epic itself is never built. The epic moves to In Progress when its first sub-issue is claimed and is closed when the last one is released. Grouping and shaping are done with the product owner: `/triage group` and `/epic` (`docs/process/PRODUCT-MANAGER.md` §4).
+
 ---
 
 ## 3. Stages and statuses
@@ -173,6 +176,7 @@ How to triage and choose priorities (levels, bug impact × reach, value/confiden
 | Assessment and feasibility | `docs/assessments/APP-123-*.md` | `/assess` |
 | Spike code | branch `spike/app-123-*` (never merged) | `/assess` |
 | Decision record (technical) | `docs/decisions/NNNN-*.md` (ADR) | `/decide`, `/spec` |
+| Epic brief | `docs/epics/APP-123-*.md` | `/epic` |
 | Feature spec | `docs/specs/APP-123-*.md` | `/spec` |
 | Code + unit tests | `src/`, `tests/` (per stack) | `/build` |
 | UAT plan and results | `docs/uat/APP-123-*.md` | `/uat`, `/uat-result` |

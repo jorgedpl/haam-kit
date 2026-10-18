@@ -910,7 +910,8 @@ class TestWorktrees(ToolTestCase):
         bin_dir = self.tmp / "bin"
         install_fake_gh_projects(bin_dir)
         state = self.tmp / "gh-state.json"
-        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state)}
+        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state),
+               "FAKE_GH_ORIGIN": str(self.origin)}
         tool = lambda *a, **kw: self.run_tool(*a, tool=self.installed_tool(), env=env, **kw)
         tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM")
         tool("github-project", "--apply")
@@ -948,6 +949,12 @@ class TestWorktrees(ToolTestCase):
         # The pass is recorded on exactly that commit, for the gate
         self.assertIn({"state": "success", "context": "uat", "sha": res["commit"]},
                       [{k: x[k] for k in ("state", "context", "sha")} for x in st["statuses"]])
+        # A later failed test of the same commit withdraws the pass: ship can't bring the label back
+        out = json.loads(tool("test-failed", str(n), "--human", "--json").stdout)
+        self.assertTrue(any("removed uat-passed" in d for d in out["done"]))
+        p = tool("ship", str(n), "--human", "--no-deploy", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("hasn't passed UAT", p.stdout + p.stderr)
         # A change pushed after the test is refused (unpushed local commits aren't the hand-over)
         (wt / "fix.txt").write_text("changed again\n")
         git(wt, "commit", "-qam", "more")
@@ -982,10 +989,15 @@ class TestWorktrees(ToolTestCase):
         git(wt, "push", "-q", "-u", "origin", branch)
         git(wt, "commit", "-q", "--allow-empty", "-m", "not pushed yet")      # local differs from GitHub
         git(self.proj, "branch", "-q", f"spike/{a}-try")                       # spikes never count
+        git(self.proj, "branch", "-q", f"{a}-old-attempt")                     # a leftover only on this computer
         res = json.loads(tool("checkout-pr", str(b), "--json").stdout)
         self.assertEqual(res["branch"], branch)
         self.assertTrue(res["pushed"])                                          # GitHub's copy is the hand-over
         self.assertIn("differs from GitHub", res["note"])
+        tool("checkout-pr", "--back")
+        res = json.loads(tool("checkout-pr", str(a), "--json").stdout)          # the lead: GitHub's branch wins
+        self.assertEqual(res["branch"], branch)
+        self.assertIn(f"Ignoring {a}-old-attempt", res["note"])
         tool("checkout-pr", "--back")
         # A bad --also stops before anything is pushed or opened
         p = tool("publish", str(b), "--human", "--also", "x1", check=False)
@@ -996,6 +1008,13 @@ class TestWorktrees(ToolTestCase):
         st = json.loads(state.read_text())
         num, pr = next(iter(st["prs"].items()))
         self.assertEqual(pr["title"], f"#{a} #{b}: Crash A")
+        # A stale release-gate failure right after a label change is the gate re-running, not a failed check
+        st["prs"][num]["checks"] = [{"name": "ci", "bucket": "pass"}, {"name": "release-gate", "bucket": "fail"}]
+        state.write_text(json.dumps(st))
+        p = tool("ship", str(b), "--human", "--no-deploy", "--wait", "0.01", check=False)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        st = json.loads(state.read_text())
+        del st["prs"][num]["checks"]
         # ship on a just-opened PR waits for the checks to start instead of stopping; and if the gate dropped
         # uat-passed in a race, ship puts it back, because the tested head carries the owner's `uat` status
         st["no_checks"] = 1

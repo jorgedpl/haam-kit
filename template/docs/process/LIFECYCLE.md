@@ -160,12 +160,12 @@ How to triage and choose priorities (levels, bug impact × reach, value/confiden
 
 ## 7. Working in parallel (multiple humans, multiple agents)
 
-1. **Claiming is done in the tracker, not in chat.** Before building, an agent re-reads the issue. If it is already *In Progress* or assigned to someone else, it skips it. Otherwise it assigns it to the human running the session, sets *In Progress* and posts a comment: `🤖 Claimed by <name> via <tool> [on <machine>] · branch <branch>`.
+1. **Claiming is done in the tracker, not in chat.** Before building, an agent re-reads the issue. If it is already *In Progress* or assigned to someone else, it skips it. Otherwise it assigns it to the human running the session, sets *In Progress* and posts a comment: ``🤖 Claimed by <name> via <tool> [on <machine>] · branch `<branch>` ``.
 2. **One issue per session, one folder per chat.** A session works on one issue at a time. To run several agents at once on one machine, each chat gets its own git worktree so they don't share a working directory: start each agent chat with `/work` (see `docs/ONBOARDING.md`).
 3. **Branch names come from the issue** (`123-short-title` on GitHub, `app-123-short-title` on Linear), so the link to the issue is automatic.
 4. **Always rebase on fresh `main`** before opening or updating a PR.
 5. **No personal state in shared files.** Personal preferences go in git-ignored files (`CLAUDE.local.md`, `AGENTS.local.md`, `.claude/settings.local.json`…).
-6. **Handover note.** If a session stops before finishing, the agent posts a comment on the issue: done / not done / next step / gotchas, and pushes the branch as a draft PR. Anyone can resume from that.
+6. **Handover note.** If a session stops before finishing, the agent posts a comment on the issue: done / not done / next step / gotchas, and pushes the branch (checks-first: as a draft PR; test-first: no PR). Anyone can resume from that.
 
 ---
 

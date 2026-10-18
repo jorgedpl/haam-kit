@@ -20,6 +20,11 @@ permissions:
   issues: read
   statuses: write
 
+# One evaluation per PR at a time, so two quick pushes don't race each other.
+concurrency:
+  group: gates-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   evaluate:
     # The job itself always succeeds; the result is published as the commit
@@ -60,11 +65,14 @@ jobs:
                 { owner, repo, ref: pr.head.sha });
               const tested = statuses.some(s => s.context === 'uat' && s.state === 'success');
               if (!tested) {
-                await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: 'uat-passed' })
-                  .catch(e => core.warning(`Couldn't remove uat-passed: ${e.message}`));
-                await github.rest.issues.createComment({ owner, repo, issue_number: number,
-                  body: 'New commits after the UAT pass, so `uat-passed` was removed: the owner tests this version again (`/test`).' });
-                labels = labels.filter(l => l !== 'uat-passed');
+                labels = labels.filter(l => l !== 'uat-passed');   // the gate fails either way
+                try {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: 'uat-passed' });
+                  await github.rest.issues.createComment({ owner, repo, issue_number: number,
+                    body: 'New commits after the UAT pass, so `uat-passed` was removed: the owner tests this version again (`/test`).' });
+                } catch (e) {
+                  core.warning(`Couldn't remove uat-passed: ${e.message}`);   // e.g. removed already by a parallel run
+                }
               }
             }
 

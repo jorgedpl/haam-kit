@@ -18,7 +18,7 @@ Target: $ARGUMENTS
 - A spec exists (`docs/specs/`) for features, or a fix plan in the issue for bugs.
 
 ## 1. Claim (AGENTS.md §6)
-Re-fetch the issue → if claimed by someone else, stop → assign to current user → status `In Progress` → comment `🤖 Claimed by <user> via <agent tool> [on <machine>] · branch <branch>`.
+Re-fetch the issue → if claimed by someone else, stop → assign to current user → status `In Progress` → comment ``🤖 Claimed by <user> via <agent tool> [on <machine>] · branch `<branch>` ``.
 If the issue belongs to an epic that is still in `Backlog`, also move the epic to `In Progress`.
 On GitHub Projects one command does it all and refuses if someone got there first: `python3 tools/haam/haam.py issue claim <number> --tool "<your tool>" --machine "<this computer>"` (bugs not yet in Ready: only with the human's OK, add `--force`).
 

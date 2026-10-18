@@ -289,11 +289,10 @@ Pick something small and real. Walk it through every stage once:
 | 3 | `/decide #1 approve medium` | Issue moves to Backlog, label becomes `stream:feature` |
 | 4 | `/spec #1` | Spec with acceptance criteria, on the same branch |
 | 5 | Read the spec (link on the issue), tell the agent "spec approved" | Issue gets `agent-ready`, moves to Ready |
-| 6 | `/build #1` | Claims it, branches, codes, writes tests, self-reviews, opens a draft PR, then marks it ready with the UAT plan included; the tracker shows In Review |
-| 6b | (automatic) | `ci`, `secrets`, `dependencies` run; the reviewer agent comments; the building agent fixes Blocking findings |
-| 7 | (when all green) `/uat #1` | Issue moves to UAT; you're notified |
+| 6 | `/build #1` | Claims it, branches, codes, writes tests, self-reviews, writes the UAT plan and pushes the branch. No PR yet (test-first, the default) |
+| 7 | `/uat #1` (`/build` runs it) | Issue moves to UAT; you're notified |
 | 8 | `/test #1` | The agent puts the change on your machine, starts the app and gives you a short checklist |
-| 9 | Try it, reply `pass` | PR gets `uat-passed`; `release-gate` turns green; the agent asks "Ship it?" |
+| 9 | Try it, reply `pass` | The agent opens the PR labelled `uat-passed`; `ci`, `secrets`, `dependencies` and the reviewer agents run once; `release-gate` turns green; the agent asks "Ship it?" |
 | 10 | Reply `ship` | The agent merges, approves the production deploy for you, waits, and closes the issue: Done |
 | 11 | (try once) `/test` on a change and describe a problem instead | It goes back to the agents with your notes (`uat-failed`) and returns to you when fixed |
 

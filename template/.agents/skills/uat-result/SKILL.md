@@ -25,6 +25,6 @@ You are recording the human's verdict. Never decide it yourself. (Most of the ti
 
 ### On fail
 3. Tracker: add label `uat-failed`, status `Ready`, remove the assignee (agents take `uat-failed` items first); comment `❌ UAT failed` with each failure as a checklist item (step number, expected, actual).
-4. Make sure the PR does **not** have `uat-passed`.
+4. Run `python3 tools/haam/haam.py test-failed <ID> --human`: it withdraws any earlier pass of that commit and removes `uat-passed` from the PR, if there is one.
 5. If any failure is outside the spec's scope, offer to log it as a separate `/bug` instead of blocking this PR.
 6. Reply: "Sent back with your notes. The next agent (`/work bugs`, or `/build <ID>`) fixes it first."

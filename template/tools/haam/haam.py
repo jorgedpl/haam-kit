@@ -2273,11 +2273,15 @@ def find_branch(root, cfg, ref, explicit=None):
     lines = git_out(root, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin").splitlines()
     remote = {b[len("origin/"):] for b in lines if b.startswith("origin/") and b != "origin/HEAD"}
     local = {b for b in lines if not b.startswith("origin/") and b != "origin"}
+    others = []
     if explicit:
         names = {explicit}
     else:
         pat = branch_pattern(ref)
-        names = {b for b in remote | local if pat.search(b.lower())}
+        pushed = {b for b in remote if pat.search(b.lower())}
+        here = {b for b in local if pat.search(b.lower())}
+        names = pushed or here           # GitHub's branches are the hand-over; local-only ones are leftovers then
+        others = sorted(here - pushed) if pushed else []
         if not names:
             named = named_branch(cfg, ref)
             names = {named} if named else set()
@@ -2288,9 +2292,9 @@ def find_branch(root, cfg, ref, explicit=None):
         return None, None, ""
     name = names.pop()
     if name in remote:
-        note = ""
+        note = (f"Ignoring {', '.join(others)}: only on this computer. " if not explicit and others else "")
         if name in local and git_out(root, "rev-parse", name) != git_out(root, "rev-parse", f"origin/{name}"):
-            note = (f"The copy of {name} on this computer differs from GitHub's. Testing GitHub's (the agent's "
+            note += (f"The copy of {name} on this computer differs from GitHub's. Testing GitHub's (the agent's "
                     "hand-over); if the agent has commits it hasn't pushed, ask it to push and test again.")
         return name, f"origin/{name}", note
     if name in local:
@@ -2316,9 +2320,9 @@ def tracker_issues(cfg, ref, branch, also):
 
 def uat_status_ok(repo, sha):
     """Whether the owner's pass is recorded on this exact commit (the `uat` commit status `publish` posts)."""
-    code, data, _ = gh_api("GET", f"repos/{repo}/commits/{sha}/statuses")
-    return code == 0 and isinstance(data, list) and any(
-        s.get("context") == "uat" and s.get("state") == "success" for s in data)
+    code, data, _ = gh_api("GET", f"repos/{repo}/commits/{sha}/status?per_page=100")   # latest per context
+    return code == 0 and isinstance(data, dict) and any(
+        s.get("context") == "uat" and s.get("state") == "success" for s in data.get("statuses") or [])
 
 
 def cmd_publish(args):
@@ -2372,9 +2376,9 @@ def cmd_publish(args):
     title = title or re.sub(r"^(?:[^/]+/)?(?:\d+|[a-z]{2,5}-\d+)-", "", branch.lower()).replace("-", " ")
     if pr:
         num = str(pr["number"])
-        if pr.get("isDraft"):
-            run(["gh", "pr", "ready", num, "-R", repo])
         run(["gh", "pr", "edit", num, "-R", repo] + sum((["--add-label", l] for l in labels), []))
+        if pr.get("isDraft"):     # after the label, so the ready_for_review run of the gate sees it
+            run(["gh", "pr", "ready", num, "-R", repo])
         run(["gh", "pr", "comment", num, "-R", repo, "--body",
              f"✅ Re-tested and passed by @{who} on {when} at `{sha[:8]}`."])
         url = pr["url"]
@@ -2403,6 +2407,7 @@ def cmd_publish(args):
     head = pr_head(repo, num)
     if head and head != sha:
         run(["gh", "pr", "edit", num, "-R", repo, "--remove-label", "uat-passed"])
+        run(["gh", "pr", "ready", num, "--undo", "-R", repo])      # back to draft: no checks on untested code
         sys.exit(f"{branch} changed while the PR was being opened ({sha[:8]} → {head[:8]}), so it isn't what you tested. "
                  f"Removed uat-passed. Test it again: python3 tools/haam/haam.py checkout-pr {args.issue}")
     linear_steps = []
@@ -2424,6 +2429,36 @@ def cmd_publish(args):
     for s in linear_steps:
         print(f"   Linear (do it with the Linear connection): {s}")
     print("   CI and the reviews run now, once. Then: python3 tools/haam/haam.py ship " + str(args.issue) + " --human")
+
+
+def cmd_test_failed(args):
+    """The owner's test failed: withdraw any earlier pass of that commit (the `uat` status, the PR's uat-passed),
+    so neither ship nor the gate can use it. The skills record the failures on the issue."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if not args.human:
+        sys.exit("A test result is the human's. Run it only inside /test or /uat-result after they said it failed, with --human.")
+    ref = issue_ref(cfg, args.issue)
+    repo = cfg["github_repo"]
+    sha = tested_sha(root, ref)
+    done = []
+    if sha:
+        code, _, _ = gh_api("POST", f"repos/{repo}/statuses/{sha}", {
+            "state": "failure", "context": "uat", "description": f"Failed the owner's test on {time.strftime('%Y-%m-%d')}"})
+        if code == 0:      # a commit that never reached GitHub has nothing to withdraw
+            done.append(f"marked {sha[:8]} as failed")
+    try:
+        pr = find_pr(cfg, ref, ("open",))
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if pr and "uat-passed" in [l["name"] for l in pr.get("labels") or []]:
+        run(["gh", "pr", "edit", str(pr["number"]), "-R", repo, "--remove-label", "uat-passed"])
+        done.append(f"removed uat-passed from PR #{pr['number']}")
+    res = {"issue": show_ref(ref), "commit": sha, "pr": pr["number"] if pr else None, "done": done}
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"{OK} {show_ref(ref)}: " + ("; ".join(done) if done else "no earlier pass to withdraw"))
 
 
 SHIP_NOT_FINISHED = 2   # exit code: nothing went wrong, it just isn't finished; run the same command again
@@ -2450,6 +2485,15 @@ def pr_checks(repo, num):
     pending = [c["name"] for c in checks if c["bucket"] == "pending"]
     failed = [c["name"] for c in checks if c["bucket"] in ("fail", "cancel")]
     return passed, pending, failed
+
+
+def pr_quiet_seconds(repo, num):
+    """Seconds since the PR was last updated (opened, marked ready, labelled), or None if unknown."""
+    code, out, _ = run(["gh", "pr", "view", str(num), "-R", repo, "--json", "updatedAt"])
+    try:
+        return time.time() - iso_time(json.loads(out)["updatedAt"]).timestamp() if code == 0 and out else None
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def pr_head(repo, num):
@@ -2514,6 +2558,7 @@ def cmd_ship(args):
             if not (sha and pr_head(repo, num) == sha and uat_status_ok(repo, sha)):
                 stop(f"PR #{num} hasn't passed UAT (no 'uat-passed' label). Record the human's test result first.")
             run(["gh", "pr", "edit", num, "-R", repo, "--add-label", "uat-passed"])
+            labels.append("uat-passed")
             say(f"{INFO} Put back 'uat-passed': the owner's pass is recorded on this exact commit")
         if not sha:
             say(f"{WARN} No record of which commit the human tested (they didn't use checkout-pr); merging the current head")
@@ -2525,11 +2570,18 @@ def cmd_ship(args):
             except RuntimeError as e:
                 stop(str(e))
             passed, pending, failed = checks or ([], [], [])
+            # Checks take a moment to start on a just-opened PR, and the gate a moment to re-run after a label
+            # change. Measured from the PR's last update, so running ship again doesn't restart the clock.
+            age = pr_quiet_seconds(repo, num)
+            settling = (time.time() - started if age is None else age) < checks_grace_seconds()
+            if settling and "release-gate" in failed and "uat-passed" in labels:
+                failed = [c for c in failed if c != "release-gate"]
+                pending = pending + ["release-gate (re-checking)"]
             if failed:
                 stop(f"Checks failing on PR #{num}: {', '.join(failed)}. Send it back to an agent.")
             if "release-gate" not in passed and "release-gate" not in pending:
-                if time.time() - started < checks_grace_seconds():
-                    pending = pending + ["release-gate (starting)"]    # a just-opened PR: checks take a moment
+                if settling:
+                    pending = pending + ["release-gate (starting)"]
                 elif checks is None:
                     stop(f"No checks have started on PR #{num}. Check that GitHub Actions is on for this repository.")
                 else:
@@ -3670,6 +3722,11 @@ def main():
     p.add_argument("--title", help="PR title after the IDs (default: the issue's title)")
     p.add_argument("--label", action="append", help="extra PR label, e.g. human-review (Linear: when the issue has it)")
     p.set_defaults(func=cmd_publish)
+
+    p = common(sub.add_parser("test-failed", help="the owner's test failed: withdraw any earlier pass of that commit"))
+    p.add_argument("issue", help="issue number (#12) or Linear ID (APP-12)")
+    p.add_argument("--human", action="store_true", help="the human said it failed in this session")
+    p.set_defaults(func=cmd_test_failed)
 
     p = common(sub.add_parser("ship", help="after UAT passed and the human said ship: merge, deploy, close"))
     p.add_argument("issue", help="issue number (#12) or Linear ID (APP-12)")

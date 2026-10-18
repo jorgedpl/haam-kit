@@ -279,9 +279,13 @@ if a and a[0] == "api" and len(a) > 1 and a[1].split("?")[0].endswith("/jobs"):
     out({"jobs": st.get("jobs_api", {}).get(rid, [])})
 if a and a[0] == "api" and len(a) > 3 and "/statuses/" in a[3]:
     st.setdefault("statuses", []).append(dict(json.loads(stdin), sha=a[3].rsplit("/", 1)[-1])); save(); out({})
-if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/statuses"):
+if a and a[0] == "api" and len(a) > 3 and "/commits/" in a[3] and a[3].split("?")[0].endswith("/status"):
     sha = a[3].split("/commits/")[1].split("/")[0]
-    out([x for x in st.get("statuses", []) if x.get("sha") == sha])
+    latest = {}
+    for x in st.get("statuses", []):
+        if x.get("sha") == sha:
+            latest[x["context"]] = x
+    out({"statuses": list(latest.values())})
 if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/pending_deployments"):
     if a[2] == "GET":
         out([{"environment": {"id": 1, "name": "production"}}])

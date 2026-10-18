@@ -85,7 +85,7 @@ Two switches, set with `python3 tools/haam/haam.py ci-settings … --apply` (the
 
 | Switch | What changes | Trade-off |
 |---|---|---|
-| `--review local` | The two AI reviews run on your computer in fresh Claude sessions (`haam.py review`), using your Claude plan instead of Actions minutes. PRs labelled `human-review` are still reviewed on GitHub | GitHub no longer guarantees the review result: anything with your login could post it |
+| `--review local` | The two AI reviews run on your computer in fresh Claude sessions (`haam.py review`), using your Claude plan instead of Actions minutes. PRs labelled `human-review` are still reviewed on GitHub | The result is no longer tamper-proof: the building agent starts the review (fresh, read-only sessions, instructions from `main`), and anything using your login could post a passing result. Run `haam.py review` from your own chat for more separation |
 | `--runner self-hosted` | All jobs except the deploy run on your own machine (registered under Settings → Actions → Runners) instead of GitHub's | The machine must be on, with git, make, Python 3, curl, gitleaks and your project's tools; private repositories only. Check GitHub's current pricing for self-hosted runners |
 
 Also worth checking: jobs on macOS runners count 10 minutes for every minute they run (Windows: 2). Run mobile builds only when the mobile code changed (`make check` gets the changed files in `$CI_CHANGED_FILES`), or nightly.

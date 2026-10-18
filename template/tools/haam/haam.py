@@ -2491,7 +2491,7 @@ def cmd_ci_usage(args):
     by_wf, by_job, by_event, by_day = defaultdict(int), defaultdict(int), defaultdict(int), defaultdict(int)
     own_runner_min, total, prs = 0, 0, set()
     for r in runs:
-        code, out, _ = run(["gh", "api", f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100"])
+        code, out, _ = run(["gh", "api", f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100&filter=all"])
         jobs = (json.loads(out or "{}").get("jobs") or []) if code == 0 else []
         for j in jobs:
             if not j.get("started_at") or not j.get("completed_at") or j.get("conclusion") == "skipped":
@@ -2501,7 +2501,8 @@ def cmd_ci_usage(args):
                 continue
             labels = " ".join(j.get("labels") or []).lower()
             mins = math.ceil(secs / 60)                          # GitHub rounds each job up to the minute
-            if "self-hosted" in labels:
+            group = j.get("runner_group_name")
+            if "self-hosted" in labels or (group and group != "GitHub Actions"):
                 own_runner_min += mins
                 continue
             mins *= RUNNER_MULTIPLIER["macos" if "mac" in labels else "windows" if "windows" in labels else "linux"]
@@ -2547,14 +2548,16 @@ def cmd_ci_settings(args):
     code, out, _ = run(["gh", "variable", "list", "-R", repo, "--json", "name,value"])
     current = {v["name"]: v["value"] for v in json.loads(out or "[]")} if code == 0 else {}
     code, info, _ = gh_api("GET", f"repos/{repo}")
-    private = bool(info.get("private")) if isinstance(info, dict) else True
+    private = bool(info.get("private")) if code == 0 and isinstance(info, dict) else False   # unknown: assume public
     rep.add("info", f"Runner: {current.get('HAAM_RUNNER') or 'GitHub-hosted (ubuntu-24.04)'}")
     rep.add("info", f"AI reviews: {current.get('HAAM_REVIEW') or 'github'}")
     changes = []
     if args.runner is not None:
         want = "" if args.runner in ("github", "") else args.runner
         if want and not private:
-            rep.add("fail", "Not on a public repository", "anyone's pull request could run code on your machine")
+            rep.add("fail", "Own runners only on private repositories" if code == 0 else
+                    "Couldn't confirm the repository is private, so the runner wasn't changed",
+                    "on a public repository anyone's pull request could run code on your machine")
             want = None
         if want is not None and want != current.get("HAAM_RUNNER", ""):
             changes.append(("HAAM_RUNNER", want))
@@ -2570,9 +2573,9 @@ def cmd_ci_settings(args):
         cfg["review"] = args.review
         if args.review == "local":
             rep.add("warn", "AI reviews will run on your computer (haam.py review), not on GitHub's runners",
-                    "uses your Claude plan instead of Actions minutes. Trade-off: GitHub no longer guarantees the "
-                    "result, since anything with your login could post it. PRs labelled human-review are still "
-                    "reviewed on GitHub.")
+                    "uses your Claude plan instead of Actions minutes. Trade-off: the result is no longer tamper-proof. "
+                    "The agent that built the change starts the review (in fresh, read-only sessions), and anything "
+                    "using your login could post a passing result. PRs labelled human-review are always reviewed on GitHub.")
     for name, value in changes:
         if not args.apply:
             rep.add("warn", f"Will set {name} = {value or '(default)'}")
@@ -2583,37 +2586,64 @@ def cmd_ci_settings(args):
         rep.add("ok" if c2 == 0 or not value else "fail", f"{name} = {value or '(default)'}", (e2 or "")[:120] if c2 else "")
     if args.apply and args.review is not None:
         save_config(root, cfg)
+        rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged, so every agent knows reviews are {args.review}")
     if changes and not args.apply:
         rep.add("info", "Plan only. Re-run with --apply")
     rep.print(args.json)
 
 
-REVIEW_TOOLS = ("Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),"
-                "Bash(git show:*),Bash(git log:*),Bash(git diff:*)")
+REVIEW_DENY = "Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Agent"
+MAX_DIFF = 200_000
 
 
-def review_prompts(repo, num, sha):
-    code = (f"You are the independent code reviewer for pull request #{num} in {repo}, at commit {sha}. You did not "
-            "write this code. Follow .github/review/REVIEWER.md exactly, with two differences: read files at the PR's "
-            f"commit with `git show {sha}:<path>` (the working folder may be on another branch), and post your review "
-            f"as one PR comment with `gh pr comment {num}`. Don't change any files. Your reply's last line must be "
-            "exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`.")
-    security = (f"You are an independent security reviewer for pull request #{num} in {repo}, at commit {sha}. You did "
-                f"not write this code. Read the diff (`gh pr diff {num}`) and the files it touches (`git show {sha}:<path>`). "
-                "Look for real, exploitable problems: secrets or credentials, injection, missing authorisation, unsafe "
-                "handling of personal data, insecure defaults, dangerous dependencies; also section D of "
-                ".github/review/REVIEWER.md. Report only findings you're confident about. If there are any, post them "
-                f"as one PR comment with `gh pr comment {num}`. Don't change any files. Your reply's last line must be "
-                "exactly `SECURITY_FINDINGS: <number>`.")
+def review_inputs(root, repo, num, sha):
+    """Everything the reviewer needs, gathered by this tool, so the reviewer itself needs no commands.
+    The instructions come from origin/main, not from the PR's branch (which the PR's author controls)."""
+    base = git_out(root, "merge-base", "origin/main", sha) or "origin/main"
+    diff = git_out(root, "diff", f"{base}..{sha}")
+    if len(diff) > MAX_DIFF:
+        diff = diff[:MAX_DIFF] + "\n\n[diff truncated: read the remaining files directly]"
+    rules = git_out(root, "show", "origin/main:.github/review/REVIEWER.md") or "(REVIEWER.md not found on main)"
+    code, out, _ = run(["gh", "pr", "view", str(num), "-R", repo, "--json", "title,body"])
+    meta = json.loads(out) if code == 0 and out else {}
+    spec_note = ""
+    for n in pr_title_issues(meta) or []:
+        if not isinstance(n, int):
+            continue
+        c2, o2, _ = run(["gh", "issue", "view", str(n), "-R", repo, "--json", "comments"])
+        bodies = [c.get("body", "") for c in (json.loads(o2).get("comments") or [])] if c2 == 0 and o2 else []
+        approved = [m.group(1) for b_ in bodies for m in [re.search(r"Spec approved by .*? at ([0-9a-f]{7,40})", b_)] if m]
+        if approved:
+            changed = git_out(root, "diff", "--stat", f"{approved[-1]}..{sha}", "--", "docs/specs/")
+            spec_note += (f"\nIssue #{n}: spec approved at {approved[-1]}. Spec changes since then:\n"
+                          f"{changed or '(none)'}\n")
+    return meta, diff, rules, spec_note or "\n(No 'spec approved' comment found.)\n"
+
+
+def review_prompts(repo, num, sha, meta, diff, rules, spec_note):
+    head = (f"You are an independent reviewer for pull request #{num} in {repo}, at commit {sha}. You did not write "
+            "this code. The folder you're in is a clean checkout of that commit: read any file you need. You can't "
+            "run commands and must not change files; everything else you need is below.\n\n"
+            f"PR title: {meta.get('title', '')}\nPR description:\n{meta.get('body', '')}\n\n"
+            f"Spec approval check:{spec_note}\nThe diff (base...{sha}):\n```diff\n{diff}\n```\n")
+    code = (head + "\nFollow these review instructions (from the main branch), but instead of posting a comment or "
+            "writing a file, reply with the review comment itself in Markdown, then a last line that is exactly "
+            "`VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`.\n\n" + rules)
+    security = (head + "\nReview it for security only: real, exploitable problems such as secrets or credentials, "
+                "injection, missing authorisation, unsafe handling of personal data, insecure defaults, dangerous "
+                "dependencies; and section D of the review instructions below. Report only findings you're confident "
+                "about, each with file, line, risk and fix. Reply in Markdown, then a last line that is exactly "
+                "`SECURITY_FINDINGS: <number>`.\n\n" + rules)
     return code, security
 
 
-def run_reviewer(cfg, prompt, cwd, timeout_min):
-    template = cfg.get("review_command") or ["claude", "-p", "{prompt}", "--allowedTools", REVIEW_TOOLS]
+def run_reviewer(cmd_template, prompt, cwd, timeout_min):
+    template = cmd_template or ["claude", "-p", "{prompt}", "--allowedTools", "Read,Glob,Grep",
+                                "--disallowedTools", REVIEW_DENY]
     cmd = [prompt if part == "{prompt}" else part for part in template]
     if not shutil.which(cmd[0]):
         raise RuntimeError(f"'{cmd[0]}' isn't installed. Install Claude Code, or set \"review_command\" in "
-                           "haam.config.json for your tool (with {prompt} where the instructions go).")
+                           "haam.config.json on main for your tool (with {prompt} where the instructions go).")
     try:
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout_min * 60,
                            stdin=subprocess.DEVNULL)
@@ -2623,8 +2653,9 @@ def run_reviewer(cfg, prompt, cwd, timeout_min):
 
 
 def cmd_review(args):
-    """Run the two independent reviews on this machine, in fresh agent sessions, and post them as the PR's
-    ai-review and security-review statuses. For projects that chose `ci-settings --review local`."""
+    """Run the two independent reviews on this machine, in fresh agent sessions that can only read a clean
+    checkout of the PR's commit, and post them as the PR's comments and ai-review / security-review statuses.
+    For projects that chose `ci-settings --review local`."""
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     repo = cfg["github_repo"]
@@ -2639,21 +2670,30 @@ def cmd_review(args):
         if not pr:
             sys.exit(f"No open pull request for {args.issue}")
         num = pr["number"]
-    code, out, err = run(["gh", "pr", "view", str(num), "-R", repo, "--json", "headRefOid,labels,isDraft,url"])
-    if code != 0:
-        sys.exit(f"Couldn't read PR #{num}: {err}")
-    pr = json.loads(out)
+
+    def head():
+        code, out, err = run(["gh", "pr", "view", str(num), "-R", repo, "--json", "headRefOid,labels,isDraft,url"])
+        if code != 0:
+            sys.exit(f"Couldn't read PR #{num}: {err}")
+        return json.loads(out)
+
+    pr = head()
     labels = [l["name"] for l in pr.get("labels") or []]
     if "human-review" in labels:
         sys.exit(f"PR #{num} touches a protected area (label human-review): its AI reviews run on GitHub, not here.")
     if pr.get("isDraft"):
         sys.exit(f"PR #{num} is still a draft. Mark it ready first (gh pr ready {num}).")
     sha = pr["headRefOid"]
+    run(["git", "fetch", "--quiet", "origin", "main"], cwd=root)
     run(["git", "fetch", "--quiet", "origin", f"+refs/pull/{num}/head:refs/remotes/origin/pr/{num}"], cwd=root)
+    # The reviewer runs with the main branch's settings, not anything the PR's branch could change.
+    main_cfg = {}
+    try:
+        main_cfg = json.loads(git_out(root, "show", f"origin/main:{CONFIG_NAME}") or "{}")
+    except ValueError:
+        pass
     who = gh_login() or "the owner"
     machine = os.uname().nodename if hasattr(os, "uname") else "this computer"
-    code_prompt, sec_prompt = review_prompts(repo, num, sha)
-    results = {}
 
     def post(context, state, desc):
         c2, _, e2 = gh_api("POST", f"repos/{repo}/statuses/{sha}", {"state": state, "context": context,
@@ -2661,35 +2701,63 @@ def cmd_review(args):
         if c2 != 0:
             raise RuntimeError(f"Couldn't post the {context} status: {str(e2)[:160]}")
 
+    _, main_dir, _ = git_paths(root)
+    checkout = main_dir / WORKTREE_DIR / f"review-pr-{num}"
+    results = {}
     try:
+        if checkout.exists():
+            run(["git", "worktree", "remove", "--force", str(checkout)], cwd=main_dir)
+        code, _, err = run(["git", "worktree", "add", "--quiet", "--detach", str(checkout), sha], cwd=main_dir)
+        if code != 0:
+            raise RuntimeError(f"Couldn't check out the PR's commit {sha[:8]}: {err}")
+        meta, diff, rules, spec_note = review_inputs(root, repo, num, sha)
+        code_prompt, sec_prompt = review_prompts(repo, num, sha, meta, diff, rules, spec_note)
         for context, prompt in (("ai-review", code_prompt), ("security-review", sec_prompt)):
             if args.only and args.only != context:
                 continue
             post(context, "pending", f"Local review running ({who} on {machine})")
-            text = run_reviewer(cfg, prompt, root, args.timeout)
-            tail = [l.strip().strip("`") for l in text.strip().splitlines()[-5:]]
+            try:
+                text = run_reviewer(main_cfg.get("review_command"), prompt, checkout, args.timeout)
+            except RuntimeError as e:
+                post(context, "error", f"Local review didn't finish: {e}"[:140])
+                raise
+            lines = text.strip().splitlines()
+            tail = [l.strip().strip("`*") for l in lines[-5:]]
             if context == "ai-review":
                 verdict = next((l.split(":", 1)[1].strip() for l in reversed(tail) if l.startswith("VERDICT:")), "")
                 state = {"APPROVE": "success", "CHANGES_REQUESTED": "failure"}.get(verdict, "error")
                 desc = {"success": "Local AI review approved", "failure": "Changes requested: see PR comment"}.get(
-                    state, "Local review didn't finish: run it again")
+                    state, "Local review gave no verdict: run it again")
+                title = "🤖 Independent review (local)"
             else:
                 m = next((l for l in reversed(tail) if l.startswith("SECURITY_FINDINGS:")), "")
                 n = m.split(":", 1)[1].strip() if m else ""
                 state = "success" if n == "0" else "failure" if n.isdigit() else "error"
                 desc = {"success": "No security findings (local review)",
-                        "failure": f"{n} security finding(s): see PR comments"}.get(state, "Local security review didn't finish")
+                        "failure": f"{n} security finding(s): see PR comment"}.get(state, "Local security review gave no result")
+                title = "🔒 Security review (local)"
+            if head()["headRefOid"] != sha:
+                post(context, "error", "The PR changed during the review: run it again")
+                raise RuntimeError(f"PR #{num} changed while it was being reviewed. Run the review again.")
+            body = "\n".join(l for l in lines if not l.strip().strip("`*").startswith(("VERDICT:", "SECURITY_FINDINGS:")))
+            note = Path(checkout.parent / f"review-pr-{num}-{context}.md")
+            note.write_text(f"### {title}\n_Commit {sha[:8]} · run by {who} on {machine} with `haam.py review`._\n\n{body}\n")
+            run(["gh", "pr", "comment", str(num), "-R", repo, "--body-file", str(note)])
+            note.unlink()
             post(context, state, f"{desc} · {who} on {machine}")
             results[context] = state
     except RuntimeError as e:
         sys.exit(str(e))
+    finally:
+        if checkout.exists():
+            run(["git", "worktree", "remove", "--force", str(checkout)], cwd=main_dir)
     if args.json:
         print(json.dumps({"pr": num, "commit": sha, "results": results}, indent=2))
         return
     for k, v in results.items():
         print(f"{OK if v == 'success' else BAD} {k}: {v}")
     if any(v != "success" for v in results.values()):
-        print("Fix the findings (see the PR comments), push, and run the review again.")
+        print("Fix the findings (see the PR comments), push once, and run the review again.")
 
 # ----------------------------------------------------------------------------- worktrees (parallel chats)
 

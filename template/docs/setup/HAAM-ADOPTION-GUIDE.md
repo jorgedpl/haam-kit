@@ -267,7 +267,7 @@ Agents use `python3 tools/haam/haam.py issue …` for every board operation (`do
    python3 tools/haam/haam.py linear --apply
    ```
    It creates the team if needed, turns on Triage, creates the 12 statuses (renaming Linear's default "Todo" to "Ready"), and the 9 labels. It never deletes anything; it lists extra statuses for you to archive.
-2. **Browser-only settings** `[YOU, in the browser]`: connect GitHub, PR automations (PR opened → In Review, merged → Deploying), branch name format `{issue-identifier}-{issue-title}`, saved views. See `docs/setup/LINEAR-SETUP.md`.
+2. **Browser-only settings** `[YOU, in the browser]`: connect GitHub, PR automations (draft PR → In Progress, PR ready for review → In Review, merged → Deploying), branch name format `{issue-identifier}-{issue-title}`, saved views. See `docs/setup/LINEAR-SETUP.md`.
 3. **Connect your agent** to Linear (`docs/setup/AGENTS-SETUP.md`) and test: *"List the issues in Linear team ACM."*
 
 **Existing backlog?** Ask your agent to bring it into the tracker (GitHub issues can simply be added to the board). Put everything in **Triage**, triage once (`stream:bug`, `stream:idea`, or `stream:feature` + Backlog), and spec only the top five.
@@ -289,9 +289,9 @@ Pick something small and real. Walk it through every stage once:
 | 3 | `/decide #1 approve medium` | Issue moves to Backlog, label becomes `stream:feature` |
 | 4 | `/spec #1` | Spec with acceptance criteria, on the same branch |
 | 5 | Read the spec (link on the issue), tell the agent "spec approved" | Issue gets `agent-ready`, moves to Ready |
-| 6 | `/build #1` | Claims it, branches, codes, writes tests, self-reviews, opens PR; the tracker shows In Review |
+| 6 | `/build #1` | Claims it, branches, codes, writes tests, self-reviews, opens a draft PR, then marks it ready with the UAT plan included; the tracker shows In Review |
 | 6b | (automatic) | `ci`, `secrets`, `dependencies` run; the reviewer agent comments; the building agent fixes Blocking findings |
-| 7 | (when all green) `/uat #1` | UAT plan committed; issue moves to UAT; you're notified |
+| 7 | (when all green) `/uat #1` | Issue moves to UAT; you're notified |
 | 8 | `/test #1` | The agent puts the change on your machine, starts the app and gives you a short checklist |
 | 9 | Try it, reply `pass` | PR gets `uat-passed`; `release-gate` turns green; the agent asks "Ship it?" |
 | 10 | Reply `ship` | The agent merges, approves the production deploy for you, waits, and closes the issue: Done |

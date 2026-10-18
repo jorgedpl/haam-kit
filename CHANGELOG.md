@@ -12,15 +12,16 @@ Spending far fewer GitHub Actions minutes per pull request.
 
 ### Added
 - **Draft first, check once.** Agents open PRs as drafts and push freely; CI, the secret scan, the dependency audit, both AI reviews, the UAT gate and the board sync skip drafts. When the change is complete (code, tests, UAT plan, release note, rebased), the agent marks it ready (`gh pr ready`) and everything runs once. Each round of review fixes goes in one push.
-- **`haam.py ci-usage [--days 7]`**: where the minutes went, by workflow, job, trigger and day (rounded up per job; macOS counted 10x, Windows 2x; own runners shown separately).
+- **`haam.py ci-usage [--days 7]`**: where the minutes went, by workflow, job, trigger and day (every attempt, rounded up per job; macOS counted 10x, Windows 2x; own runners shown separately).
 - **`haam.py ci-settings`**, two switches stored as repository variables the workflows read:
-  - `--review local`: the AI reviews run on the owner's computer instead of in Actions (`haam.py review <ID>`: two fresh agent sessions, `claude -p` by default or `"review_command"` in `haam.config.json`, posting the `ai-review` and `security-review` statuses). PRs labelled `human-review` are always reviewed on GitHub. Trade-off: the result is no longer tamper-proof.
-  - `--runner self-hosted` (private repos only): every job except the deploy runs on your own machine (`runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}`).
+  - `--review local`: the AI reviews run on the owner's computer instead of in Actions. `haam.py review <ID>` checks out the PR's commit cleanly, gathers the diff, the PR description and the spec-approval check itself, and starts two fresh agent sessions that can only read files (`claude -p` with Bash and edits disallowed, or `"review_command"` from `main`'s `haam.config.json`), using the review instructions from `main`, not the PR's branch. The tool posts their comments and the `ai-review` and `security-review` statuses on that exact commit (and refuses if the PR moved meanwhile). On GitHub the review job just shows *Waiting for the local review*; PRs labelled `human-review` are always reviewed on GitHub. Trade-off: the result is no longer tamper-proof, since the building agent starts the review and anything using the owner's login could post a pass.
+  - `--runner self-hosted` (private repos only; refused if the repository can't be confirmed private): every job except the deploy runs on your own machine (`runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}`).
 - Batches cover an epic's small features with approved specs as well as its bugs: one branch, one PR, one CI run, tested together.
 
 ### Changed
 - `/build` writes the UAT plan and release note before marking the PR ready, so `/uat` no longer pushes (which re-ran everything).
 - The secret-scan job reuses gitleaks if the runner already has it.
+- The board and Linear move an issue to In Review when its PR is marked ready, not when the draft opens.
 - Setup (`/haam-setup` Phase 6), `GITHUB-SETUP.md` §8 and the product manager guide §10 explain the cost switches.
 
 ### Migration

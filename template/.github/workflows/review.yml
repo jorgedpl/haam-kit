@@ -38,15 +38,12 @@ env:
 jobs:
   scope:
     name: review scope
-    # No runner is started for: draft PRs (reviewed once, when marked ready), labels other than the
-    # overrule label, and projects that review on the owner's computer (repository variable
-    # HAAM_REVIEW=local, `haam.py review`), except PRs labelled human-review, which are always reviewed here.
+    # No runner is started for draft PRs (reviewed once, when marked ready) or for labels other than the
+    # overrule label (and, when reviews run locally, the human-review label, which brings them back here).
     if: >-
       (github.event.action != 'labeled' || github.event.label.name == 'ai-review-overruled' ||
        (vars.HAAM_REVIEW == 'local' && github.event.label.name == 'human-review')) &&
-      (github.event.action == 'labeled' || !github.event.pull_request.draft) &&
-      (vars.HAAM_REVIEW != 'local' || contains(github.event.pull_request.labels.*.name, 'human-review') ||
-       github.event.label.name == 'ai-review-overruled')
+      (github.event.action == 'labeled' || !github.event.pull_request.draft)
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
@@ -55,6 +52,7 @@ jobs:
       - id: decide
         env:
           EVENT_ACTION: ${{ github.event.action }}
+          REVIEW_MODE: ${{ vars.HAAM_REVIEW }}
           LABEL: ${{ github.event.label.name }}
           DRAFT: ${{ github.event.pull_request.draft }}
         run: |
@@ -89,6 +87,13 @@ jobs:
           done
           if [ "$docs_only" = "true" ]; then
             both success "Docs-only change: no code review needed"
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # Reviews on the owner's computer (repository variable HAAM_REVIEW=local): wait for `haam.py review`,
+          # except for protected areas, which are always reviewed here.
+          if [ "$REVIEW_MODE" = "local" ] && ! echo "$labels" | grep -qx "human-review"; then
+            both pending "Waiting for the local review: python3 tools/haam/haam.py review --pr $PR"
             echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
 

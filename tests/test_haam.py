@@ -698,18 +698,25 @@ class TestGitHubProjects(ToolTestCase):
         self.assertEqual(self.gh_state()["variables"], {"HAAM_REVIEW": "local"})
         # A fake reviewer agent: approves the code, finds nothing in security
         bin_dir = self.tmp / "bin"
-        (bin_dir / "claude").write_text("#!/bin/sh\ncase \"$2\" in *security*) echo 'SECURITY_FINDINGS: 0';; "
+        (bin_dir / "claude").write_text("#!/bin/sh\ncase \"$2\" in *'for security only'*) echo 'SECURITY_FINDINGS: 0';; "
                                         "*) printf 'Looks fine.\\nVERDICT: APPROVE\\n';; esac\n")
         (bin_dir / "claude").chmod(0o755)
-        git(self.proj, "remote", "set-url", "origin", str(self.tmp / "nowhere.git"))
+        origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        git(self.proj, "remote", "set-url", "origin", str(origin))
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "kit")
+        git(self.proj, "push", "-q", "origin", "main")
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj, capture_output=True, text=True).stdout.strip()
         st = self.gh_state()
-        st["prs"] = {"5": {"title": "#12: Fix", "headRefName": "12-fix", "state": "OPEN", "labels": [], "url": "u",
-                           "isDraft": False, "headRefOid": "abc"}}
+        st["prs"] = {"5": {"title": "#12: Fix", "body": "Refs #12", "headRefName": "12-fix", "state": "OPEN", "labels": [],
+                           "url": "u", "isDraft": False, "headRefOid": head}}
         self.state.write_text(json.dumps(st))
         res = json.loads(self.tool("review", "12", "--json").stdout)
         self.assertEqual(res["results"], {"ai-review": "success", "security-review": "success"})
         final = {s["context"]: s["state"] for s in self.gh_state()["statuses"]}
         self.assertEqual(final, {"ai-review": "success", "security-review": "success"})
+        self.assertFalse((self.proj / ".claude/worktrees/review-pr-5").exists())     # the clean checkout is removed
         # Protected areas are reviewed on GitHub
         st = self.gh_state(); st["prs"]["5"]["labels"] = [{"name": "human-review"}]; self.state.write_text(json.dumps(st))
         p = self.tool("review", "12", check=False)

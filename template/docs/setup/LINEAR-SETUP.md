@@ -69,7 +69,7 @@ Then in team settings → **Workflow → Pull request automations** (wording may
 | GitHub event | Move issue to |
 |---|---|
 | Branch created / draft PR opened | In Progress |
-| PR opened | In Review |
+| PR ready for review (agents open drafts and mark them ready when complete) | In Review |
 | PR ready for merge | *(no change, agents move it to UAT)* |
 | PR merged | Deploying |
 

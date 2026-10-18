@@ -64,6 +64,6 @@ Do not invent problems to look thorough. If the PR is good, say so in one line.
 _Humans can overrule this review with the PR label `ai-review-overruled`._
 ```
 
-2. Write the verdict, exactly one word, to the file `review-verdict.txt` in the workspace root: `APPROVE` if there are no Blocking findings, otherwise `CHANGES_REQUESTED`.
+2. Write the verdict, exactly one word, to the file `review-verdict.txt` in the workspace root (when you run locally through `haam.py review`, end your reply with the line `VERDICT: <word>` instead): `APPROVE` if there are no Blocking findings, otherwise `CHANGES_REQUESTED`.
 
 Never push commits, never edit code in the PR, never change labels.

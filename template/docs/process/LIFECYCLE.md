@@ -62,7 +62,7 @@ flowchart LR
 | 4 | **Backlog** | Backlog | Approved, prioritised, needs a spec | Human (`/decide approve`) |
 | 5 | **Ready** | Unstarted | Spec approved, Definition of Ready met (**G2**), label `agent-ready` | Human approves spec |
 | 6 | **In Progress** | Started | An agent or developer has claimed it and is building | Agent (`/build`) |
-| 7 | **In Review** | Started | PR open, CI running, code review (**G3**) | Tracker automation on PR open (Linear integration / `tracker-sync` workflow) |
+| 7 | **In Review** | Started | PR ready for review, CI running, code review (**G3**) | Tracker automation when the PR is marked ready (Linear integration / `tracker-sync` workflow); drafts stay In Progress |
 | 8 | **UAT** | Started | CI green, UAT plan ready, waiting for a human to test locally (**G4**) | Agent, when CI is green |
 | 9 | **Deploying** | Started | Merged to `main`, production deploy waiting for approval (**G5**) | Tracker automation on PR merge |
 | 10 | **Done** | Completed | Live in production and verified | Human (`/release`) |

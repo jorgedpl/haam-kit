@@ -223,6 +223,16 @@ if a[:2] == ["issue", "close"]:
     st["issues"][a[2]]["state"] = "CLOSED"; save(); sys.exit(0)
 if a[:2] == ["pr", "view"]:
     out(st["prs"][a[2]])
+if a[:2] == ["pr", "create"]:
+    n = str(100 + len(st["prs"]))
+    st["prs"][n] = {"title": opt(a, "--title"), "body": open(opt(a, "--body-file")).read(), "headRefName": opt(a, "--head"),
+                    "state": "OPEN", "isDraft": False, "labels": [{"name": l} for l in opts(a, "--label")],
+                    "url": f"https://github.com/example-org/example-app/pull/{n}", "headRefOid": st.get("pushed", {}).get(opt(a, "--head"))}
+    save(); print(st["prs"][n]["url"]); sys.exit(0)
+if a[:2] == ["pr", "edit"]:
+    p = st["prs"][a[2]]
+    p["labels"] += [{"name": l} for l in opts(a, "--add-label")]
+    save(); sys.exit(0)
 if a[:2] == ["pr", "list"]:
     want = {"open": "OPEN", "merged": "MERGED"}.get(opt(a, "--state", "open"))
     out([dict(p, number=int(k)) for k, p in st["prs"].items() if p.get("state", "OPEN") == want])

@@ -10,7 +10,7 @@ argument-hint: "<ID>"
 
 Target: $ARGUMENTS
 
-1. **Check preconditions:** the PR for this issue exists, is not a draft, and `gh pr checks` shows `ci`, `secrets`, `dependencies`, `ai-review` and `security-review` green (or the AI reviews overruled by a human). If not, stop and say what's missing.
+1. **Check preconditions.** Test-first (`"flow"` in `haam.config.json`, the default): the branch is pushed, `make check` passed on it, and there's no PR yet (or, for rework, the PR is back in draft). Checks-first: the PR exists, isn't a draft, and `gh pr checks` shows `ci`, `secrets`, `dependencies`, `ai-review` and `security-review` green (or the AI reviews overruled by a human). If not, stop and say what's missing.
 2. **Write `docs/uat/<FILE-ID>-<slug>.md`** from `docs/templates/uat-plan.md`, on the **same PR branch**:
    - *Setup:* exact commands to run it locally (`git fetch origin && git switch --detach origin/<branch> && make setup && make dev`: detached, so it works even while an agent's worktree has the branch; `git switch main` afterwards), URL to open, any seed/test accounts (synthetic only), feature flags.
    - *Test cases:* one per acceptance criterion, plus key edge cases and one "nothing else broke" regression check of the main journey. Each has numbered steps, expected result, and a `[ ]` checkbox. Write for someone who did not read the code.
@@ -20,5 +20,5 @@ Target: $ARGUMENTS
 4. **Release note:** create `docs/changes/<FILE-ID>.md` with one line a user would understand (`- <ID>: <what changed for them>`). One file per change, so parallel PRs never conflict.
    **Rework after a failed test** (label `uat-failed`): keep the existing plan, update only what changed, and add a regression case for each reported failure; don't add a second release note.
 5. Usually `/build` wrote the plan and the release note before marking the PR ready, so there's nothing to commit here. Only if they're missing: commit `<ID>: UAT plan` and push (this re-runs CI and the reviews, so avoid it).
-6. **Tracker:** status `UAT`; comment with a link to the plan and a 3–5 line "how to test in 5 minutes" summary. Mention the product owner so they get notified.
+6. **Tracker:** status `UAT`; comment with the branch name, a link to the plan and a 3–5 line "how to test in 5 minutes" summary. Mention the product owner so they get notified.
 7. **Reply** to the user: what to test in one line, and "When you're ready: `/test <ID>`. I'll set it up, and you just tell me `pass` or what went wrong."

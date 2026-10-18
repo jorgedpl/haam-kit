@@ -36,8 +36,9 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
 ### 2a. Testing a change: the whole loop
 1. Type **`/test`** (or `/test #12`). The agent puts the change on your computer, starts the app, and gives you the link and a short checklist: *do this → you should see that*.
 2. Try it. Then reply with one word or one sentence:
-   - **`pass`** → the agent asks *"Ship it?"* Reply **`ship`**: it merges, approves the production deploy for you, waits, and closes the issue. You get *"#12 is live."* Reply `later` to hold it.
+   - **`pass`** → the agent opens the pull request (until now there wasn't one: you tested the agent's branch), the checks run once on exactly what you tested, and it asks *"Ship it when the checks pass?"* Reply **`ship`**: it waits for them, merges, approves the production deploy for you, and closes the issue. You get *"#12 is live."* Reply `later` to hold it.
    - If your project **deploys by hand** (`"deploy": "manual"`), the agent merges and then asks you to deploy; reply **`live`** when it's out and it closes the issue.
+   - If the checks or reviews then find a problem, it goes back to the agents like a failed test, and comes back to you once fixed.
    - **What went wrong** (*"step 3: the export button is still missing on mobile"*) → the agent records it on the issue, labels it `uat-failed` and sends it back to the agents, who fix it first. When it's fixed it comes back to `/test`.
 3. That's all. You don't need to touch branches, labels or the board.
 

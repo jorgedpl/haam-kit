@@ -6,6 +6,23 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-18
+
+### Added
+- **Test-first flow** (the new default, `"flow": "test-first"`): the owner tests a change before any pull request exists, so only tested work reaches GitHub's checks.
+  1. The agent builds, runs `make check`, writes the UAT plan and release note, and pushes its branch (free: branch pushes start no workflows). It opens no PR.
+  2. The owner's `/test` checks out the agent's branch (`checkout-pr` now falls back to the branch when there's no PR, local or pushed).
+  3. On `pass`, **`haam.py publish <ID> --human`** pushes exactly the tested commit and opens the PR labelled `uat-passed` (`--also` for a batch); the checks and reviews run once, on that commit. On `ship`, `ship` merges it as before.
+  4. A failed test costs no Actions minutes. A failed check sends the issue back to the agents (`uat-failed`), and changed code is always tested again (`publish` and `ship` refuse anything else).
+- `config --flow test-first|checks-first`. Checks-first keeps v1.6.0's order (draft PR, checks, then the owner's test).
+
+### Changed
+- `/build`, `/uat`, `/test`, `AGENTS.md`, the lifecycle, the gates and the product manager guide describe both orders; in test-first G4 comes before G3.
+- During rework on an open PR, agents turn it back into a draft before pushing, so their fixes don't start the checks until the owner has tested them.
+
+### Migration
+- `haam.py update`. Projects get test-first by default; to keep the previous order, `haam.py config --flow checks-first`.
+
 ## [1.6.0] - 2026-10-18
 
 Spending far fewer GitHub Actions minutes per pull request.
@@ -163,7 +180,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/jorgedpl/haam-kit/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/jorgedpl/haam-kit/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/jorgedpl/haam-kit/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/jorgedpl/haam-kit/compare/v1.3.0...v1.4.0

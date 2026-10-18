@@ -52,17 +52,26 @@ Run `make check` until it passes. Also run any project-specific test skills list
 ## 6. Self-review before the PR
 Do a security self-review of your diff and fix anything you find (Claude Code: `/security-review`; other tools: check `git diff origin/main...` against section D of `.github/review/REVIEWER.md`). Re-read your own diff (`git diff origin/main...`) against each acceptance criterion.
 
-## 7. Pull request: draft while you work, ready once
-CI and the AI reviews don't run on draft PRs. They run once, when you mark the PR ready, and again on each push after that. So push as often as you like while it's a draft, and make the ready version complete.
-- Commits: `<ID>: <imperative summary>`.
-- **Rework** (label `uat-failed` or review feedback): the PR already exists; collect all the fixes for the round, push them in **one** push, and comment on the PR what you changed. Skip the rest of this step.
-- `git push -u origin <branch>`, then `gh pr create --draft` with title `<ID>: <summary>`, the body from `.github/pull_request_template.md` fully filled in (acceptance criteria checklist with test names, screenshots/notes, risks), and `--label human-review` if the issue has it.
-- **Before marking it ready**, put everything the human needs on the branch, so nothing has to be pushed later (each push after ready re-runs CI and both reviews): the UAT plan `docs/uat/<FILE-ID>-<slug>.md` and the release note `docs/changes/<FILE-ID>.md` (both as `/uat` describes), rebased on `origin/main`, `make check` green.
-- Then `gh pr ready <number>`. That starts CI and the reviews, once.
-- On GitHub Projects the PR description must contain `Refs #<number>` (not `Closes`).
-- The tracker moves the issue to `In Review` when the PR is marked ready (Linear's GitHub integration, or the `tracker-sync` workflow). If it hasn't moved after a few minutes, move it yourself. Comment the PR link on the issue.
+## 7. Hand it over
+Check `"flow"` in `haam.config.json` (default `test-first`).
 
-## 8. Wait for checks and reviews
+### Test-first (default): the owner tests before any PR exists
+Pushing a branch costs nothing; pull requests are what start CI and the reviews. So the owner tests your work first, and the PR is only opened once they've passed it.
+- Commits: `<ID>: <imperative summary>`. Rebase on `origin/main`, `make check` green.
+- Put everything the owner needs on the branch: the UAT plan `docs/uat/<FILE-ID>-<slug>.md` and the release note `docs/changes/<FILE-ID>.md` (as `/uat` describes).
+- `git push -u origin <branch>` (free: no workflow runs on branch pushes). **Don't open a PR**: the owner's `/test` opens it after they pass the test (`haam.py publish`), already labelled `uat-passed`, and the checks run once, on exactly what they tested.
+- Run `/uat <ID>`: it moves the issue to `UAT` and tells the owner.
+- **Rework** (label `uat-failed`: the owner's test or the checks found problems): fix every item, push once. If a PR is already open, first turn it back into a draft (`gh pr ready --undo <number>`) so your push doesn't start the checks; the owner's next pass makes it ready again. Then `/uat <ID>` again: changed code is always tested again before it ships.
+- The owner's chat handles everything after the test: the PR, the checks, the reviews and shipping. If the checks or reviews find problems, the issue comes back to you with `uat-failed` and their findings.
+
+### Checks-first: PR and checks, then the owner tests
+- Commits: `<ID>: <imperative summary>`.
+- **Rework** (label `uat-failed` or review feedback): the PR already exists; collect all the fixes for the round, push them in **one** push, and comment on the PR what you changed.
+- `git push -u origin <branch>`, then `gh pr create --draft` with title `<ID>: <summary>`, the body from `.github/pull_request_template.md` fully filled in (acceptance criteria checklist with test names, screenshots/notes, risks), and `--label human-review` if the issue has it. CI and the reviews don't run on drafts.
+- Before marking it ready, put the UAT plan and the release note on the branch (each push after ready re-runs CI and both reviews), rebased on `origin/main`, `make check` green. Then `gh pr ready <number>`: CI and the reviews run once.
+- On GitHub Projects the PR description must contain `Refs #<number>` (not `Closes`). The tracker moves the issue to `In Review` when the PR is marked ready; if it hasn't moved after a few minutes, move it yourself. Comment the PR link on the issue.
+
+## 8. Checks and reviews (checks-first only)
 1. If `haam.config.json` says `"review": "local"`, run the AI reviews on this computer now, in fresh sessions: `python3 tools/haam/haam.py review <ID>` (give it a timeout of at least 20 minutes; skip this for PRs labelled `human-review`, which GitHub reviews). It posts the `ai-review` and `security-review` results on the PR.
    Then `gh pr checks` until `ci`, `secrets`, `dependencies`, `ai-review` and `security-review` have finished.
 2. Failing `ci`/`dependencies`: fix and push.
@@ -72,4 +81,4 @@ CI and the AI reviews don't run on draft PRs. They run once, when you mark the P
 6. When everything is green, run `/uat <ID>`.
 
 ## 9. If you must stop early
-Push, open the PR as **draft**, post the handover comment (Done / Not done / Next step / Gotchas).
+Push the branch (checks-first: as a **draft** PR), and post the handover comment (Done / Not done / Next step / Gotchas).

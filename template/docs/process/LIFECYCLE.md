@@ -69,6 +69,8 @@ flowchart LR
 | – | **Parked** | Canceled | Good idea, not now. Revisited at backlog review | Human |
 | – | **Canceled** | Canceled | Will not do | Human |
 
+**Test-first order (the default, `"flow": "test-first"`):** the owner tests before any PR exists, so after In Progress the issue goes to **UAT** (G4, on the agent's pushed branch), then, when they pass it, **In Review** (the PR opens and G3's checks and reviews run once, on the tested commit), then Deploying and Done. A failed test, or a failed check, sends it back to Ready with `uat-failed`; changed code is always tested again. Projects that prefer the checks first (`"flow": "checks-first"`) use the order in the table.
+
 Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Review → UAT → Deploying → Done**. An agent may move a bug from Triage to Ready only when it has written reproduction steps and a confirmed root cause hypothesis; a human still owns the priority.
 
 ---

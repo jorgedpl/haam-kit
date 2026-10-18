@@ -895,6 +895,52 @@ class TestWorktrees(ToolTestCase):
         self.assertEqual(run_hook(wt), 0)
         self.assertEqual(run_hook(self.proj), 2)
 
+    def test_test_first_local_branch_then_publish(self):
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        state = self.tmp / "gh-state.json"
+        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state)}
+        tool = lambda *a, **kw: self.run_tool(*a, tool=self.installed_tool(), env=env, **kw)
+        tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM")
+        tool("github-project", "--apply")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "config")
+        git(self.proj, "push", "-q", "origin", "main")
+        n = json.loads(tool("issue", "create", "--stream", "bug", "--title", "Export crash", "--status", "UAT",
+                            "--json").stdout)["number"]
+        # The agent built it in its worktree: a local branch, no PR
+        wt = Path(json.loads(tool("worktree", "new", "agent", "--json").stdout)["path"])
+        git(wt, "switch", "-q", "-c", f"{n}-export-crash")
+        (wt / "fix.txt").write_text("fixed\n")
+        git(wt, "add", "fix.txt")
+        git(wt, "commit", "-qm", f"#{n}: fix")
+        res = json.loads(tool("checkout-pr", str(n), "--json").stdout)
+        self.assertIsNone(res["pr"])
+        self.assertEqual(res["branch"], f"{n}-export-crash")
+        self.assertFalse(res["pushed"])
+        self.assertTrue((self.proj / "fix.txt").exists())                       # the owner is testing it locally
+        tool("checkout-pr", "--back")
+        # publish needs the human's pass, the owner's folder, and exactly the tested commit
+        self.assertNotEqual(tool("publish", str(n), check=False).returncode, 0)
+        p = tool("publish", str(n), "--human", cwd=wt, check=False)
+        self.assertIn("never from an agent's worktree", p.stderr)
+        res = json.loads(tool("publish", str(n), "--human", "--json").stdout)
+        st = json.loads(state.read_text())
+        pr = next(p for p in st["prs"].values())
+        self.assertEqual(pr["title"], f"#{n}: Export crash")
+        self.assertIn({"name": "uat-passed"}, pr["labels"])
+        self.assertIn(f"Refs #{n}", pr["body"])
+        remote = subprocess.run(["git", "rev-parse", f"{n}-export-crash"], cwd=self.origin, capture_output=True,
+                                text=True).stdout.strip()
+        self.assertEqual(remote, res["commit"])                                 # the tested commit was pushed
+        self.assertEqual(json.loads(tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "In Review")
+        # A change after the test is refused
+        (wt / "fix.txt").write_text("changed again\n")
+        git(wt, "commit", "-qam", "more")
+        p = tool("publish", str(n), "--human", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("changed since it was tested", p.stderr)
+
     def test_ship_refuses_in_an_agents_worktree(self):
         wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])
         p = self.run_tool("ship", "12", "--human", tool=self.installed_tool(), cwd=wt, check=False)

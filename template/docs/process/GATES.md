@@ -79,6 +79,8 @@ Review is layered so that **no agent ever reviews its own work** and **secrets a
 
 ## G4 Accepted (UAT)
 
+In the default test-first flow, G4 comes before G3: the owner tests the agent's pushed branch before a PR exists, and G3 then checks exactly the commit they passed (`haam.py publish`, then `ship`, which refuses anything else).
+
 - [ ] UAT plan exists in `docs/uat/` with numbered steps and expected results
 - [ ] Human ran it locally on the PR branch
 - [ ] All steps pass, or failures are recorded and accepted as follow-up issues

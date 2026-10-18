@@ -62,16 +62,16 @@ flowchart LR
 | 4 | **Backlog** | Backlog | Approved, prioritised, needs a spec | Human (`/decide approve`) |
 | 5 | **Ready** | Unstarted | Spec approved, Definition of Ready met (**G2**), label `agent-ready` | Human approves spec |
 | 6 | **In Progress** | Started | An agent or developer has claimed it and is building | Agent (`/build`) |
-| 7 | **In Review** | Started | PR ready for review, CI running, code review (**G3**) | Tracker automation when the PR is marked ready (Linear integration / `tracker-sync` workflow); drafts stay In Progress |
-| 8 | **UAT** | Started | CI green, UAT plan ready, waiting for a human to test locally (**G4**) | Agent, when CI is green |
+| 7 | **In Review** | Started | PR ready for review, CI running, code review (**G3**) | Test-first: `publish`, when the owner passes the test. Checks-first: tracker automation when the PR is marked ready (Linear integration / `tracker-sync` workflow); drafts stay In Progress |
+| 8 | **UAT** | Started | UAT plan ready, waiting for a human to test locally (**G4**). Test-first: before the PR exists; checks-first: once CI is green | Agent (`/uat`) |
 | 9 | **Deploying** | Started | Merged to `main`, production deploy waiting for approval (**G5**) | Tracker automation on PR merge |
 | 10 | **Done** | Completed | Live in production and verified | Human (`/release`) |
 | – | **Parked** | Canceled | Good idea, not now. Revisited at backlog review | Human |
 | – | **Canceled** | Canceled | Will not do | Human |
 
-**Test-first order (the default, `"flow": "test-first"`):** the owner tests before any PR exists, so after In Progress the issue goes to **UAT** (G4, on the agent's pushed branch), then, when they pass it, **In Review** (the PR opens and G3's checks and reviews run once, on the tested commit), then Deploying and Done. A failed test, or a failed check, sends it back to Ready with `uat-failed`; changed code is always tested again. Projects that prefer the checks first (`"flow": "checks-first"`) use the order in the table.
+**Test-first order (the default, `"flow": "test-first"`):** the owner tests before any PR exists, so after In Progress the issue goes to **UAT** (G4, on the agent's pushed branch), then, when they pass it, **In Review** (the PR opens and G3's checks and reviews run once, on the tested commit), then Deploying and Done. A failed test, or a failed check, sends it back to Ready with `uat-failed`; changed code is always tested again. Projects that prefer the checks first (`"flow": "checks-first"`) use the order in the table. Either way, a pass belongs to the commit that was tested: a later push removes `uat-passed`.
 
-Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Review → UAT → Deploying → Done**. An agent may move a bug from Triage to Ready only when it has written reproduction steps and a confirmed root cause hypothesis; a human still owns the priority.
+Bugs skip Discovery and Decision: **Triage → Ready → In Progress → UAT → In Review → Deploying → Done** (checks-first: In Review before UAT). An agent may move a bug from Triage to Ready only when it has written reproduction steps and a confirmed root cause hypothesis; a human still owns the priority.
 
 ---
 
@@ -120,9 +120,9 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → In Revi
 
 ### Stage 7: User acceptance testing (UAT, Gate G4, human)
 - **Skill:** `/uat APP-123` (agent prepares), then the human types `/test` (or records a result with `/uat-result APP-123 pass|fail`).
-- When CI is green the agent writes `docs/uat/APP-123-<slug>.md` from `docs/templates/uat-plan.md`: how to run locally (`make dev` on the PR branch), test data, numbered steps with expected results and checkboxes, edge cases, what is out of scope.
+- The agent writes `docs/uat/APP-123-<slug>.md` from `docs/templates/uat-plan.md` (test-first: when `make check` passes on its pushed branch; checks-first: when CI is green on the PR): how to run locally (`make dev` on the branch), test data, numbered steps with expected results and checkboxes, edge cases, what is out of scope.
 - The agent posts a short version on the issue and moves it to **UAT**. The human is notified by the tracker.
-- Human tests on **local** first: `/test` sets the change up and walks them through the plan. Pass → the PR gets the label `uat-passed`. Fail → the failures are recorded as a checklist on the issue, which gets the label `uat-failed` and goes back to **Ready**; agents fix `uat-failed` items before anything else, and the fix comes back to UAT.
+- Human tests on **local** first: `/test` sets the change up and walks them through the plan. Pass → test-first: the PR opens labelled `uat-passed` and the checks run once, on the tested commit; checks-first: the PR gets the label `uat-passed`. A later push removes the label, so changed code is tested again. Fail → the failures are recorded as a checklist on the issue, which gets the label `uat-failed` and goes back to **Ready**; agents fix `uat-failed` items before anything else, and the fix comes back to UAT.
 
 ### Stage 8: Release (Deploying → Done, Gate G5, human)
 - After a pass, `/test` asks the human *"Ship it?"*. On `ship`, the agent (`haam.py ship <ID> --human`) merges the PR (the tracker moves the issue to **Deploying**), approves the waiting `production` deploy on the human's behalf, waits for it, runs the smoke check if defined, and closes the issue as **Done**. The human can also do each step by hand: merge, approve the deploy in GitHub, then `/release APP-123`.

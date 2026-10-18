@@ -15,13 +15,19 @@ Each release lists **Migration** steps when a project needs to do more than run 
   3. On `pass`, **`haam.py publish <ID> --human`** pushes exactly the tested commit and opens the PR labelled `uat-passed` (`--also` for a batch); the checks and reviews run once, on that commit. On `ship`, `ship` merges it as before.
   4. A failed test costs no Actions minutes. A failed check sends the issue back to the agents (`uat-failed`), and changed code is always tested again (`publish` and `ship` refuse anything else).
 - `config --flow test-first|checks-first`. Checks-first keeps v1.6.0's order (draft PR, checks, then the owner's test).
+- **A pass belongs to the tested commit.** `publish` records it on that commit as a `uat` status; `gates.yml` now also watches pushes to drafts that carry `uat-passed`, and removes the label when a push brings code that wasn't tested (in both flows). So a later agent push can't be merged by hand in GitHub on the strength of an old pass. `publish` also checks the PR it opened points at the tested commit, and `ship` puts back a label the gate removed in a race when the head is still the tested commit.
+- `checkout-pr --branch <name>`; `publish --label <name>` (Linear: `human-review`); `capacity --in-uat N` (Linear: the agent counts the UAT items).
 
 ### Changed
 - `/build`, `/uat`, `/test`, `AGENTS.md`, the lifecycle, the gates and the product manager guide describe both orders; in test-first G4 comes before G3.
 - During rework on an open PR, agents turn it back into a draft before pushing, so their fixes don't start the checks until the owner has tested them.
+- Finding the branch to test: GitHub's copy wins over the one on this computer (the push is the hand-over; a difference is reported), deleted remote branches are pruned, spike branches never count, Linear's `user/app-12-…` names are recognised, and a batch's branch is found from any of its issues through the ``branch `…` `` in the claim or UAT comment. `publish` covers the whole batch (the issue the branch is named after comes first), reads `--also` before pushing anything, and on Linear prints the tracker steps to do.
+- `ship` waits for the checks of a just-opened PR to start (up to 5 minutes) instead of stopping.
+- `/uat-result pass` in test-first opens the PR through `publish`; the claim and UAT comments write the branch in backticks.
 
 ### Migration
 - `haam.py update`. Projects get test-first by default; to keep the previous order, `haam.py config --flow checks-first`.
+- Merge the updated `gates.yml` (it needs `pull-requests: write` to remove a stale label).
 
 ## [1.6.0] - 2026-10-18
 

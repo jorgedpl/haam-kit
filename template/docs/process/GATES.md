@@ -82,9 +82,10 @@ Review is layered so that **no agent ever reviews its own work** and **secrets a
 In the default test-first flow, G4 comes before G3: the owner tests the agent's pushed branch before a PR exists, and G3 then checks exactly the commit they passed (`haam.py publish`, then `ship`, which refuses anything else).
 
 - [ ] UAT plan exists in `docs/uat/` with numbered steps and expected results
-- [ ] Human ran it locally on the PR branch
+- [ ] Human ran it locally on the branch (test-first: the agent's pushed branch, before any PR; checks-first: the PR branch)
 - [ ] All steps pass, or failures are recorded and accepted as follow-up issues
-- [ ] The human's pass (`/test` or `/uat-result <ID> pass`) adds the `uat-passed` label to the PR
+- [ ] The human's pass (`/test` or `/uat-result <ID> pass`) adds the `uat-passed` label to the PR (test-first: `publish` also records it on the tested commit as the `uat` status)
+- [ ] The pass covers the code that merges: a push after it removes `uat-passed` (`gates.yml`), unless the new head is the tested commit; `ship` merges only that commit
 
 ## G5 Released
 

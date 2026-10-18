@@ -2155,17 +2155,24 @@ def tested_file(root):
     return main / ".haam" / "tested.json"
 
 
-def remember_tested(root, ref, sha):
+def remember_tested(root, ref, sha, branch=None):
     f = tested_file(root)
     f.parent.mkdir(parents=True, exist_ok=True)
     data = json.loads(f.read_text()) if f.exists() else {}
     data[show_ref(ref)] = sha
+    if branch:
+        data.setdefault("branches", {})[show_ref(ref)] = branch
     f.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def tested_sha(root, ref):
     f = tested_file(root)
     return (json.loads(f.read_text()) if f.exists() else {}).get(show_ref(ref))
+
+
+def tested_branch_of(root, ref):
+    f = tested_file(root)
+    return ((json.loads(f.read_text()) if f.exists() else {}).get("branches") or {}).get(show_ref(ref))
 
 
 def cmd_checkout_pr(args):
@@ -2187,35 +2194,42 @@ def cmd_checkout_pr(args):
         sys.exit("You have unsaved changes in this folder. Commit them, or copy them somewhere safe and undo them, "
                  "then try again. (Avoid git stash: all worktrees share one stash list, so agents' work gets mixed in.)")
     try:
-        pr = find_pr(cfg, ref, ("open",))
+        pr = None if args.branch else find_pr(cfg, ref, ("open",))
     except RuntimeError as e:
         sys.exit(f"Couldn't pick the pull request: {e}")
-    run(["git", "fetch", "--quiet", "origin"], cwd=root)
+    run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+    note = ""
     if pr:
         branch, target = pr["headRefName"], f"origin/{pr['headRefName']}"
     else:
-        # Test-first: no PR yet. Test the agent's branch straight from this repository (worktrees share
-        # branches), or from GitHub if the agent pushed it from another computer.
+        # Test-first: no PR yet. Test the branch the agent pushed (its hand-over), or one that is only on this
+        # computer (worktrees share branches) if it hasn't pushed.
         try:
-            branch, target = find_branch(root, ref)
+            branch, target, note = find_branch(root, cfg, ref, args.branch)
         except RuntimeError as e:
             sys.exit(str(e))
         if not branch:
-            sys.exit(f"No pull request and no branch found for {show_ref(ref)} (looked for {branch_prefix(ref)}…).")
+            sys.exit(f"No pull request and no branch found for {show_ref(ref)} (looked for {branch_prefix(ref)}… and the "
+                     "branch named in its claim or UAT comment). If the agent used another branch, add --branch <name>.")
     code, _, err = run(["git", "switch", "--quiet", "--detach", target], cwd=root)
     if code != 0:
         sys.exit(f"Couldn't check out {branch}: {err}")
     sha = git_out(root, "rev-parse", "HEAD")
-    remember_tested(root, ref, sha)
-    plans = [p.relative_to(root).as_posix() for p in sorted((root / "docs/uat").glob(f"{file_id(ref)}-*.md"))]
+    remember_tested(root, ref, sha, branch)
+    # A batch's plan is named after the issue its branch is named after.
+    plans = []
+    for r in dict.fromkeys(x for x in (ref, branch_issue(branch, ref)) if x is not None):
+        plans += [p.relative_to(root).as_posix() for p in sorted((root / "docs/uat").glob(f"{file_id(r)}-*.md"))]
     res = {"issue": show_ref(ref), "pr": pr["number"] if pr else None, "pr_url": pr["url"] if pr else None,
            "branch": branch, "commit": sha, "uat_plan": plans[0] if plans else None,
-           "pushed": bool(pr) or target.startswith("origin/")}
+           "pushed": target.startswith("origin/"), "note": note}
     if args.json:
         print(json.dumps(res, indent=2))
         return
     where = f"PR #{pr['number']}, {pr['url']}" if pr else ("from GitHub, no PR yet" if res["pushed"] else "local, not pushed")
     print(f"{OK} {show_ref(ref)}: testing {branch} at {sha[:8]} ({where})")
+    if note:
+        print(f"{WARN} {note}")
     print(f"   Test plan: {res['uat_plan'] or 'not found in docs/uat/ (ask the agent to run /uat)'}")
     print("   Next: make setup && make dev, then follow the plan. Afterwards: python3 tools/haam/haam.py checkout-pr --back")
 
@@ -2224,25 +2238,92 @@ def branch_prefix(ref):
     return f"{ref}-" if isinstance(ref, int) else f"{ref.lower()}-"
 
 
-def find_branch(root, ref):
-    """(branch name, ref to check out) for an issue's branch: a local branch first (an agent's worktree on
-    this computer), else one pushed to origin. Refuses to guess between several."""
-    out = git_out(root, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin")
-    pat = re.compile(rf"^{re.escape(str(ref))}-" if isinstance(ref, int) else rf"(^|/){re.escape(ref.lower())}-")
-    local = [b for b in out.splitlines() if not b.startswith("origin/") and pat.search(b.lower())]
-    remote = [b[len("origin/"):] for b in out.splitlines() if b.startswith("origin/") and pat.search(b[len("origin/"):].lower())]
-    names = local or remote
-    if len(set(names)) > 1:
-        raise RuntimeError(f"Several branches match {show_ref(ref)}: {', '.join(sorted(set(names)))}. "
-                           "Delete the extra one or tell me which.")
+def branch_pattern(ref):
+    """An issue's branch: '12-…' (GitHub); 'app-12-…' or Linear's 'user/app-12-…'. Spikes never count."""
+    return re.compile(rf"^{ref}-" if isinstance(ref, int) else rf"^(?!spike/)(?:[^/]+/)?{re.escape(ref.lower())}-")
+
+
+def branch_issue(branch, like):
+    """The issue a branch is named after ('12-…' → 12, 'app-12-…' → 'APP-12'), or None. `like` picks the tracker's form."""
+    b = (branch or "").lower()
+    if isinstance(like, int):
+        m = re.match(r"^(\d+)-", b)
+        return int(m.group(1)) if m else None
+    m = re.match(r"^(?!spike/)(?:[^/]+/)?([a-z]{2,5}-\d+)-", b)
+    return m.group(1).upper() if m else None
+
+
+def named_branch(cfg, ref):
+    """The branch named in the issue's latest claim or UAT comment ("branch `…`"); a batch's branch is named after its
+    first issue, so the other issues are found this way. GitHub Projects only (on Linear, pass --branch)."""
+    if cfg.get("tracker") != "github" or not isinstance(ref, int):
+        return None
+    code, out, _ = run(["gh", "issue", "view", str(ref), "-R", cfg["github_repo"], "--json", "comments"])
+    bodies = [c.get("body", "") for c in (json.loads(out).get("comments") or [])] if code == 0 and out else []
+    for b_ in reversed(bodies):
+        m = re.search(r"branch `([^`\s]+)`", b_)
+        if m and "<" not in m.group(1):
+            return m.group(1)
+    return None
+
+
+def find_branch(root, cfg, ref, explicit=None):
+    """(branch, ref to check out, note) for an issue's branch. The branch on GitHub is the agent's hand-over, so it wins;
+    a branch only on this computer (an agent's worktree that hasn't pushed) is the fallback. Refuses to guess."""
+    lines = git_out(root, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin").splitlines()
+    remote = {b[len("origin/"):] for b in lines if b.startswith("origin/") and b != "origin/HEAD"}
+    local = {b for b in lines if not b.startswith("origin/") and b != "origin"}
+    if explicit:
+        names = {explicit}
+    else:
+        pat = branch_pattern(ref)
+        names = {b for b in remote | local if pat.search(b.lower())}
+        if not names:
+            named = named_branch(cfg, ref)
+            names = {named} if named else set()
+    if len(names) > 1:
+        raise RuntimeError(f"Several branches match {show_ref(ref)}: {', '.join(sorted(names))}. "
+                           "Delete the stale one(s), or say which with --branch <name>.")
     if not names:
-        return None, None
-    return names[0], (names[0] if local else f"origin/{names[0]}")
+        return None, None, ""
+    name = names.pop()
+    if name in remote:
+        note = ""
+        if name in local and git_out(root, "rev-parse", name) != git_out(root, "rev-parse", f"origin/{name}"):
+            note = (f"The copy of {name} on this computer differs from GitHub's. Testing GitHub's (the agent's "
+                    "hand-over); if the agent has commits it hasn't pushed, ask it to push and test again.")
+        return name, f"origin/{name}", note
+    if name in local:
+        return name, name, f"{name} is only on this computer (not pushed yet). Testing it as it is here."
+    if explicit:
+        raise RuntimeError(f"There's no branch {explicit}, here or on GitHub.")
+    return None, None, ""
+
+
+def tracker_issues(cfg, ref, branch, also):
+    """The issues one PR covers: this one, the issue the branch is named after (a batch), and --also."""
+    others = []
+    for x in (also or "").split(","):
+        if x.strip():
+            others.append(issue_ref(cfg, x))
+    lead = branch_issue(branch, ref)
+    issues = []
+    for n in [lead, ref] + others:
+        if n is not None and n not in issues:
+            issues.append(n)
+    return issues
+
+
+def uat_status_ok(repo, sha):
+    """Whether the owner's pass is recorded on this exact commit (the `uat` commit status `publish` posts)."""
+    code, data, _ = gh_api("GET", f"repos/{repo}/commits/{sha}/statuses")
+    return code == 0 and isinstance(data, list) and any(
+        s.get("context") == "uat" and s.get("state") == "success" for s in data)
 
 
 def cmd_publish(args):
     """Test-first flow, after the owner's test passed: push exactly the tested commit and open the PR (already
-    labelled uat-passed), so CI and the reviews run once, on tested code."""
+    labelled uat-passed, with a `uat` status on that commit), so CI and the reviews run once, on tested code."""
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     if not args.human:
@@ -2251,18 +2332,22 @@ def cmd_publish(args):
         sys.exit("publish runs only from the owner's own chat in the main project folder, never from an agent's worktree.")
     ref = issue_ref(cfg, args.issue)
     repo = cfg["github_repo"]
-    sha = tested_sha(root, ref)
+    sha, tested_branch = tested_sha(root, ref), tested_branch_of(root, ref)
     if not sha:
         sys.exit(f"No record of a test for {show_ref(ref)}. Test it first: python3 tools/haam/haam.py checkout-pr {args.issue}")
+    run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
     try:
         pr = find_pr(cfg, ref, ("open",))
-        branch = pr["headRefName"] if pr else find_branch(root, ref)[0]
+        branch = pr["headRefName"] if pr else (tested_branch or find_branch(root, cfg, ref)[0])
     except RuntimeError as e:
         sys.exit(str(e))
     if not branch:
         sys.exit(f"No branch found for {show_ref(ref)}.")
-    tip = git_out(root, "rev-parse", "--verify", "--quiet", branch) or git_out(root, "rev-parse", "--verify", "--quiet",
-                                                                              f"origin/{branch}")
+    if tested_branch and branch != tested_branch:
+        sys.exit(f"The test was of {tested_branch}, but the PR is on {branch}. Test it again first.")
+    issues = tracker_issues(cfg, ref, branch, args.also)     # read before pushing, so a bad ID changes nothing
+    tip = (git_out(root, "rev-parse", "--verify", "--quiet", f"origin/{branch}")
+           or git_out(root, "rev-parse", "--verify", "--quiet", branch))
     if tip and tip != sha:
         sys.exit(f"{branch} has changed since it was tested ({sha[:8]} → {tip[:8]}). Test it again first.")
     code, _, err = run(["git", "push", "--quiet", "origin", f"{sha}:refs/heads/{branch}"], cwd=root)
@@ -2270,31 +2355,33 @@ def cmd_publish(args):
         sys.exit(f"Couldn't push {branch}: {err[:200]} (if GitHub has commits the test didn't include, test again)")
     who = gh_login() or "the owner"
     when = time.strftime("%Y-%m-%d")
-    others = [parse_issue_number(x) if isinstance(ref, int) else x.strip().upper()
-              for x in (args.also or "").split(",") if x.strip()]
-    issues = [ref] + [o for o in others if o and o != ref]
+    # The pass belongs to this commit: the gate drops uat-passed when a later push lacks this status.
+    code, _, err = gh_api("POST", f"repos/{repo}/statuses/{sha}", {
+        "state": "success", "context": "uat", "description": f"Tested and passed by @{who} on {when}"[:140]})
+    if code != 0:
+        sys.exit(f"Couldn't record the pass on the commit: {(err or '')[:200]}")
     board = None
-    labels = ["uat-passed"]
+    labels = ["uat-passed"] + [l for l in (args.label or []) if l != "uat-passed"]
     title = args.title
     if cfg.get("tracker") == "github":
         board = GHProject(cfg)
         board.load()
-        first = board.issue(ref)
-        title = title or first["title"]
-        if any("human-review" in board.issue(n)["labels"] for n in issues):
+        title = title or board.issue(issues[0])["title"]
+        if any("human-review" in board.issue(n)["labels"] for n in issues) and "human-review" not in labels:
             labels.append("human-review")
-    title = title or branch.split("-", 2)[-1].replace("-", " ")
+    title = title or re.sub(r"^(?:[^/]+/)?(?:\d+|[a-z]{2,5}-\d+)-", "", branch.lower()).replace("-", " ")
     if pr:
+        num = str(pr["number"])
         if pr.get("isDraft"):
-            run(["gh", "pr", "ready", str(pr["number"]), "-R", repo])
-        run(["gh", "pr", "edit", str(pr["number"]), "-R", repo, "--add-label", "uat-passed"])
-        run(["gh", "pr", "comment", str(pr["number"]), "-R", repo, "--body",
+            run(["gh", "pr", "ready", num, "-R", repo])
+        run(["gh", "pr", "edit", num, "-R", repo] + sum((["--add-label", l] for l in labels), []))
+        run(["gh", "pr", "comment", num, "-R", repo, "--body",
              f"✅ Re-tested and passed by @{who} on {when} at `{sha[:8]}`."])
         url = pr["url"]
     else:
         ids = " ".join(show_ref(n) for n in issues)
         refs = "\n".join(f"Refs {show_ref(n)}" for n in issues)
-        plan = next(iter(sorted((root / "docs/uat").glob(f"{file_id(ref)}-*.md"))), None)
+        plan = next(iter(sorted((root / "docs/uat").glob(f"{file_id(issues[0])}-*.md"))), None)
         body = (f"{refs}\n\n## Tested first\n✅ Tested and passed by @{who} on {when} at `{sha[:8]}`, before any "
                 "checks ran (HAAM test-first). The checks and reviews below run once, on exactly this commit.\n\n"
                 + (f"Test plan: `{plan.relative_to(root).as_posix()}`\n\n" if plan else "")
@@ -2311,26 +2398,51 @@ def cmd_publish(args):
         if code != 0:
             sys.exit(f"Couldn't open the PR: {(err or out)[:200]}")
         url = out.strip().splitlines()[-1] if out else ""
+        num = url.rstrip("/").rsplit("/", 1)[-1]
+    # An agent may have pushed between our push and the PR: then the PR isn't what was tested.
+    head = pr_head(repo, num)
+    if head and head != sha:
+        run(["gh", "pr", "edit", num, "-R", repo, "--remove-label", "uat-passed"])
+        sys.exit(f"{branch} changed while the PR was being opened ({sha[:8]} → {head[:8]}), so it isn't what you tested. "
+                 f"Removed uat-passed. Test it again: python3 tools/haam/haam.py checkout-pr {args.issue}")
+    linear_steps = []
     for n in issues:
         if board:
             iss = board.issue(n)
             board.set_option(iss, "Status", "In Review")
             run(["gh", "issue", "comment", str(n), "-R", repo, "--body",
                  f"✅ Tested and passed by @{who} at `{sha[:8]}`. PR: {url} (checks running)"])
-    res = {"issue": show_ref(ref), "issues": [show_ref(n) for n in issues], "branch": branch, "commit": sha, "pr_url": url}
+        else:
+            linear_steps.append(f"{show_ref(n)}: status In Review; comment \"✅ Tested and passed by @{who} at "
+                                f"{sha[:8]}. PR: {url} (checks running)\"")
+    res = {"issue": show_ref(ref), "issues": [show_ref(n) for n in issues], "branch": branch, "commit": sha,
+           "pr_url": url, "labels": labels, "tracker_steps": linear_steps}
     if args.json:
         print(json.dumps(res, indent=2))
         return
     print(f"{OK} Pushed {branch} at {sha[:8]} and opened {url}" if not pr else f"{OK} Pushed the tested commit to {url}")
+    for s in linear_steps:
+        print(f"   Linear (do it with the Linear connection): {s}")
     print("   CI and the reviews run now, once. Then: python3 tools/haam/haam.py ship " + str(args.issue) + " --human")
+
 
 SHIP_NOT_FINISHED = 2   # exit code: nothing went wrong, it just isn't finished; run the same command again
 SHIP_WAITING_HUMAN = 3  # exit code: waiting for the human (manual deploy): don't re-run until they say it's live
 
 
+def checks_grace_seconds():
+    """How long a just-opened PR may show no checks before that counts as a problem (they take a moment to start)."""
+    try:
+        return float(os.environ.get("HAAM_CHECKS_GRACE_SECONDS", "300"))
+    except ValueError:
+        return 300.0
+
+
 def pr_checks(repo, num):
-    """(passed, pending, failed) check names for a PR, from GitHub."""
+    """(passed, pending, failed) check names for a PR, from GitHub; None while no check has started yet."""
     code, out, err = run(["gh", "pr", "checks", str(num), "-R", repo, "--json", "name,bucket"])
+    if code != 0 and "no checks reported" in (err or out or "").lower():
+        return None
     if code not in (0, 8) or not out:   # gh exits 8 while checks are pending
         raise RuntimeError(f"Couldn't read the PR's checks: {(err or out)[:200]}")
     checks = json.loads(out)
@@ -2338,6 +2450,11 @@ def pr_checks(repo, num):
     pending = [c["name"] for c in checks if c["bucket"] == "pending"]
     failed = [c["name"] for c in checks if c["bucket"] in ("fail", "cancel")]
     return passed, pending, failed
+
+
+def pr_head(repo, num):
+    code, out, _ = run(["gh", "pr", "view", str(num), "-R", repo, "--json", "headRefOid"])
+    return (json.loads(out).get("headRefOid") if code == 0 and out else "") or ""
 
 
 def cmd_ship(args):
@@ -2389,26 +2506,36 @@ def cmd_ship(args):
     if pr["state"] == "OPEN":
         if args.merged_only:
             stop(f"PR #{num} isn't merged yet. Use /test, so the human tests it and says 'ship'.")
-        if "uat-passed" not in labels and "gate-override" not in labels:
-            stop(f"PR #{num} hasn't passed UAT (no 'uat-passed' label). Record the human's test result first.")
         if pr.get("isDraft"):
             stop(f"PR #{num} is still a draft.")
         sha = tested_sha(root, ref)
+        if "uat-passed" not in labels and "gate-override" not in labels:
+            # The gate drops the label when a push races it; the `uat` status on the tested head is the owner's pass.
+            if not (sha and pr_head(repo, num) == sha and uat_status_ok(repo, sha)):
+                stop(f"PR #{num} hasn't passed UAT (no 'uat-passed' label). Record the human's test result first.")
+            run(["gh", "pr", "edit", num, "-R", repo, "--add-label", "uat-passed"])
+            say(f"{INFO} Put back 'uat-passed': the owner's pass is recorded on this exact commit")
         if not sha:
             say(f"{WARN} No record of which commit the human tested (they didn't use checkout-pr); merging the current head")
         said_waiting = False
+        started = time.time()
         while True:
             try:
-                passed, pending, failed = pr_checks(repo, num)
+                checks = pr_checks(repo, num)
             except RuntimeError as e:
                 stop(str(e))
+            passed, pending, failed = checks or ([], [], [])
             if failed:
                 stop(f"Checks failing on PR #{num}: {', '.join(failed)}. Send it back to an agent.")
             if "release-gate" not in passed and "release-gate" not in pending:
-                stop(f"PR #{num} has no 'release-gate' check. The UAT gate isn't set up (haam.py github --apply).")
+                if time.time() - started < checks_grace_seconds():
+                    pending = pending + ["release-gate (starting)"]    # a just-opened PR: checks take a moment
+                elif checks is None:
+                    stop(f"No checks have started on PR #{num}. Check that GitHub Actions is on for this repository.")
+                else:
+                    stop(f"PR #{num} has no 'release-gate' check. The UAT gate isn't set up (haam.py github --apply).")
             if not pending:
-                code2, out2, _ = run(["gh", "pr", "view", num, "-R", repo, "--json", "headRefOid"])
-                head = (json.loads(out2).get("headRefOid") if code2 == 0 and out2 else "") or ""
+                head = pr_head(repo, num)
                 if sha and head and head != sha:
                     stop(f"PR #{num} changed after the human tested it. Test it again with /test.")
                 cmd = ["gh", "pr", "merge", num, "-R", repo, "--squash"] + (["--match-head-commit", sha] if sha else [])
@@ -2537,6 +2664,7 @@ def cmd_ship(args):
     if tf.exists():
         data = json.loads(tf.read_text())
         data.pop(show_ref(ref), None)
+        (data.get("branches") or {}).pop(show_ref(ref), None)
         tf.write_text(json.dumps(data, indent=2) + "\n")
     finish("live", 0, f"{show_ref(ref)} is live.", run=run_info["url"] if run_info else None)
 
@@ -2553,8 +2681,8 @@ def cmd_capacity(args):
     # Bots' PRs (Dependabot…) cost CI too, but they shouldn't stop the agents' own work.
     open_prs = len([p for p in json.loads(out or "[]")
                     if not ((p.get("author") or {}).get("login", "").endswith("[bot]") or (p.get("author") or {}).get("is_bot"))])
-    in_uat = None
-    if cfg.get("tracker") == "github":
+    in_uat = args.in_uat     # Linear: the agent counts the UAT items with the Linear connection and passes them
+    if in_uat is None and cfg.get("tracker") == "github":
         try:
             board = GHProject(cfg)
             board.load()
@@ -2566,8 +2694,12 @@ def cmd_capacity(args):
         reasons.append(f"{open_prs} open PRs (limit {max_prs})")
     if in_uat is not None and in_uat >= max_uat:
         reasons.append(f"{in_uat} changes waiting for the owner to test (limit {max_uat})")
+    if in_uat is None:
+        reasons_note = "UAT queue not counted (Linear: count the UAT items and pass --in-uat N)"
+    else:
+        reasons_note = ""
     res = {"hold": bool(reasons), "open_prs": open_prs, "max_open_prs": max_prs, "in_uat": in_uat,
-           "max_in_uat": max_uat, "reasons": reasons}
+           "max_in_uat": max_uat, "reasons": reasons, "note": reasons_note}
     if args.json:
         print(json.dumps(res, indent=2))
         return
@@ -2575,6 +2707,8 @@ def cmd_capacity(args):
         print(f"{WARN} Hold new work: " + "; ".join(reasons) + ". Rework (uat-failed) and finishing open PRs are still fine.")
     else:
         print(f"{OK} Room for new work: {open_prs}/{max_prs} open PRs" + (f", {in_uat}/{max_uat} in UAT" if in_uat is not None else ""))
+    if reasons_note:
+        print(f"{INFO} {reasons_note}")
 
 
 # ----------------------------------------------------------------------------- CI cost: usage, settings, local review
@@ -3526,6 +3660,7 @@ def main():
     p = common(sub.add_parser("checkout-pr", help="put an issue's change on this machine to test it (detached)"))
     p.add_argument("issue", nargs="?", help="issue number (#12) or Linear ID (APP-12)")
     p.add_argument("--back", action="store_true", help="return to the main branch after testing")
+    p.add_argument("--branch", help="test this branch (no PR yet, and it isn't named after the issue)")
     p.set_defaults(func=cmd_checkout_pr)
 
     p = common(sub.add_parser("publish", help="test-first: after the owner's pass, push the tested commit and open the PR"))
@@ -3533,6 +3668,7 @@ def main():
     p.add_argument("--human", action="store_true", help="the human said 'pass' in this session")
     p.add_argument("--also", help="batch: the other issues in the same branch, comma-separated")
     p.add_argument("--title", help="PR title after the IDs (default: the issue's title)")
+    p.add_argument("--label", action="append", help="extra PR label, e.g. human-review (Linear: when the issue has it)")
     p.set_defaults(func=cmd_publish)
 
     p = common(sub.add_parser("ship", help="after UAT passed and the human said ship: merge, deploy, close"))
@@ -3546,6 +3682,7 @@ def main():
     p.set_defaults(func=cmd_ship)
 
     p = common(sub.add_parser("capacity", help="should agents start new work? open PRs and UAT queue vs limits"))
+    p.add_argument("--in-uat", type=int, help="Linear: how many issues are in UAT (counted with the Linear connection)")
     p.set_defaults(func=cmd_capacity)
 
     p = common(sub.add_parser("ci-usage", help="where the GitHub Actions minutes went"))

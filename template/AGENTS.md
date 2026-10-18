@@ -16,7 +16,7 @@ We run a product lifecycle with three work streams and five gates.
 
 - **Streams:** `stream:idea` (new ideas), `stream:feature` (approved work), `stream:bug` (issues).
 - **Tracker:** `haam.config.json` → `"tracker"` is `github` (GitHub Projects board) or `linear`. Every tracker operation (find, create, claim, move, comment) is in `docs/process/TRACKER.md`; check which tracker once per session and use that column.
-- **Statuses:** Triage → Discovery → Decision → Backlog → Ready → In Progress → In Review → UAT → Deploying → Done (plus Parked, Canceled).
+- **Statuses:** Triage → Discovery → Decision → Backlog → Ready → In Progress → UAT → In Review → Deploying → Done (plus Parked, Canceled). That's the default test-first order; checks-first projects put In Review before UAT.
 - **Gates:** G1 Decision (human) · G2 Ready (human approves spec) · G3 automated checks + independent AI review (+ human for protected areas) · G4 UAT (human, local) · G5 production approval (human).
 - **Epics:** a parent issue labelled `epic` groups the issues (its sub-issues) that make up one feature; its brief in `docs/epics/` holds the context.
 - **Issue IDs:** `#123` on GitHub Projects, `APP-123` on Linear (`TODO(setup)`: replace with your team key everywhere). Skills write `<ID>` for either.
@@ -55,7 +55,7 @@ The setup skills drive `tools/haam/haam.py`; run `python3 tools/haam/haam.py doc
 ## 3. Hard rules: never break these
 
 1. **Never push to `main`, never merge a PR, never deploy, never run production commands.** Humans do that. The one exception: inside `/test`, typed by a human, after the human said `pass` (`haam.py publish` opens the PR) and `ship` in this session, `haam.py ship <ID> --human` merges the commit they tested, approves the deploy and closes the issue for them. (`/release` uses `ship --merged-only`, which never merges.) **Only the owner's chat ships:** agent chats in worktrees never run `ship`, and the tool refuses there.
-2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/epic`, `/decide`, `/test`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
+2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`, never post the `uat` commit status**, and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/epic`, `/decide`, `/test`, `/uat-result`, `/override` or `/release` in this session; then you carry out exactly what that skill says.
 3. **Only build issues that are in `Ready` and have the `agent-ready` label** (bugs: `Ready` is enough). If something isn't ready, help make it ready (`/spec`) instead of building it. **Never build an epic** (label `epic`) as one piece: build its sub-issues, and read the epic's brief in `docs/epics/` for context.
 4. **Claim before you build** (see §6). Never work on an issue someone else has claimed.
 5. **Never put secrets or real personal data** (names, emails, dates of birth, addresses, document numbers of real people) in code, tests, fixtures, logs, commits, the tracker or docs. Use the synthetic fixtures in the test folder.
@@ -100,14 +100,14 @@ You act as the human who is running this session. If you can't reach the tracker
 **Claim protocol (before any code change):**
 1. Re-fetch the issue. If it's `In Progress` or assigned to someone else, stop and pick another.
 2. Assign it to the current user, set status `In Progress`.
-3. Comment: `🤖 Claimed by <user> via <agent tool> [on <machine>] · branch <branch-name>`.
+3. Comment: ``🤖 Claimed by <user> via <agent tool> [on <machine>] · branch `<branch-name>` `` (the branch in backticks: `/test` reads it).
 On GitHub Projects, `haam.py issue claim <number> --tool "<tool>" --machine "<machine>"` does all three and refuses if someone got there first.
 
 **Never move an issue another chat has claimed.** On GitHub Projects, `issue status` refuses for a claimed issue unless this chat is on its branch; `--force` is only for when the human asks (e.g. `/triage stale` releasing a stuck claim).
 
 **While working:** keep the issue updated with short comments at meaningful points (plan posted, PR opened, blocked, handover). Not a running commentary.
 
-**If you stop before finishing:** push the branch, open/update a **draft** PR, and post a handover comment: *Done / Not done / Next step / Gotchas*.
+**If you stop before finishing:** push the branch (checks-first: open or update a **draft** PR; test-first: no PR) and post a handover comment: *Done / Not done / Next step / Gotchas*.
 
 ## 7. Working with Git
 

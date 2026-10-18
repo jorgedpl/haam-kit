@@ -1,6 +1,9 @@
 # Gate G4 enforcement: a PR can only merge to main when a human has passed UAT
 # (label `uat-passed`) or a human has overridden the gate (label `gate-override`
 # plus a PR comment starting with "OVERRIDE:").
+# A pass belongs to the code that was tested: a push after it removes `uat-passed`,
+# unless the new head carries the owner's `uat` commit status (`haam.py publish`
+# posts it on exactly the commit they tested). Drafts included.
 # Docs-only PRs (docs/**, *.md) are exempt.
 # Branch protection on `main` requires the status check named "release-gate".
 name: Gates
@@ -13,7 +16,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write   # remove a stale uat-passed label
   issues: read
   statuses: write
 
@@ -25,8 +28,11 @@ jobs:
     name: evaluate release gate
     # For comments, only run when the comment is on a PR.
     # Only events that can change the result start a runner: code pushes, the two gate labels,
-    # and override comments (contains() ignores case).
+    # and override comments (contains() ignores case). Drafts only when a push may make a pass stale.
     if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.draft &&
+        github.event.action == 'synchronize' &&
+        contains(github.event.pull_request.labels.*.name, 'uat-passed')) ||
       (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
         ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
          github.event.label.name == 'uat-passed' || github.event.label.name == 'gate-override')) ||
@@ -45,7 +51,22 @@ jobs:
               : context.payload.issue.number;
 
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
-            const labels = pr.labels.map(l => l.name);
+            let labels = pr.labels.map(l => l.name);
+
+            // New commits after the owner's pass: the pass no longer covers the code, unless the new
+            // head is exactly the commit they tested (`uat` status from haam.py publish).
+            if (context.payload.action === 'synchronize' && labels.includes('uat-passed')) {
+              const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef,
+                { owner, repo, ref: pr.head.sha });
+              const tested = statuses.some(s => s.context === 'uat' && s.state === 'success');
+              if (!tested) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: 'uat-passed' })
+                  .catch(e => core.warning(`Couldn't remove uat-passed: ${e.message}`));
+                await github.rest.issues.createComment({ owner, repo, issue_number: number,
+                  body: 'New commits after the UAT pass, so `uat-passed` was removed: the owner tests this version again (`/test`).' });
+                labels = labels.filter(l => l !== 'uat-passed');
+              }
+            }
 
             // Docs-only PRs are exempt.
             const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: number });

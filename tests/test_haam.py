@@ -778,6 +778,17 @@ class TestLinkedIssues(unittest.TestCase):
         self.assertEqual(f({"title": "Add x", "body": "Refs #7\nalso fixes #9", "headRefName": "x"}), [7, 9])
         self.assertEqual(f({"title": "Add x", "body": "", "headRefName": "33-add-x"}), [33])
         self.assertEqual(f({"title": "Bump #2 deps", "body": "see issue #4", "headRefName": "dependabot/x"}), [])
+        pat = mod.branch_pattern
+        self.assertTrue(pat(12).search("12-fix"))
+        self.assertFalse(pat(12).search("120-other"))
+        self.assertFalse(pat(12).search("spike/12-try"))
+        self.assertTrue(pat("APP-12").search("app-12-fix"))
+        self.assertTrue(pat("APP-12").search("jorge/app-12-fix"))
+        self.assertFalse(pat("APP-12").search("spike/app-12-try"))
+        self.assertFalse(pat("APP-12").search("app-120-fix"))
+        self.assertEqual(mod.branch_issue("jorge/app-12-fix", "APP-1"), "APP-12")
+        self.assertEqual(mod.branch_issue("12-epic-x", 13), 12)
+        self.assertIsNone(mod.branch_issue("spike/12-x", 13))
 
 class TestWorktrees(ToolTestCase):
     def setUp(self):
@@ -934,12 +945,76 @@ class TestWorktrees(ToolTestCase):
                                 text=True).stdout.strip()
         self.assertEqual(remote, res["commit"])                                 # the tested commit was pushed
         self.assertEqual(json.loads(tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "In Review")
-        # A change after the test is refused
+        # The pass is recorded on exactly that commit, for the gate
+        self.assertIn({"state": "success", "context": "uat", "sha": res["commit"]},
+                      [{k: x[k] for k in ("state", "context", "sha")} for x in st["statuses"]])
+        # A change pushed after the test is refused (unpushed local commits aren't the hand-over)
         (wt / "fix.txt").write_text("changed again\n")
         git(wt, "commit", "-qam", "more")
+        git(wt, "push", "-q", "origin", f"{n}-export-crash")
         p = tool("publish", str(n), "--human", check=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("changed since it was tested", p.stderr)
+
+    def test_test_first_batch_and_races(self):
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        state = self.tmp / "gh-state.json"
+        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state),
+               "FAKE_GH_ORIGIN": str(self.origin), "HAAM_POLL_SECONDS": "0", "HAAM_CHECKS_GRACE_SECONDS": "30"}
+        tool = lambda *a, **kw: self.run_tool(*a, tool=self.installed_tool(), env=env, **kw)
+        tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM")
+        tool("github-project", "--apply")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "config")
+        git(self.proj, "push", "-q", "origin", "main")
+        a = json.loads(tool("issue", "create", "--stream", "bug", "--title", "Crash A", "--json").stdout)["number"]
+        b = json.loads(tool("issue", "create", "--stream", "bug", "--title", "Crash B", "--status", "Ready",
+                            "--json").stdout)["number"]
+        # One batch branch, named after the first issue; the second issue's claim comment names it.
+        branch = f"{a}-epic-crashes"
+        tool("issue", "claim", str(b), "--tool", "test", "--branch", branch)
+        wt = Path(json.loads(tool("worktree", "new", "agent", "--json").stdout)["path"])
+        git(wt, "switch", "-q", "-c", branch)
+        (wt / "fix.txt").write_text("fixed\n")
+        git(wt, "add", "fix.txt")
+        git(wt, "commit", "-qm", f"#{a} #{b}: fix")
+        git(wt, "push", "-q", "-u", "origin", branch)
+        git(wt, "commit", "-q", "--allow-empty", "-m", "not pushed yet")      # local differs from GitHub
+        git(self.proj, "branch", "-q", f"spike/{a}-try")                       # spikes never count
+        res = json.loads(tool("checkout-pr", str(b), "--json").stdout)
+        self.assertEqual(res["branch"], branch)
+        self.assertTrue(res["pushed"])                                          # GitHub's copy is the hand-over
+        self.assertIn("differs from GitHub", res["note"])
+        tool("checkout-pr", "--back")
+        # A bad --also stops before anything is pushed or opened
+        p = tool("publish", str(b), "--human", "--also", "x1", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertFalse(json.loads(state.read_text()).get("prs"))
+        res = json.loads(tool("publish", str(b), "--human", "--json").stdout)
+        self.assertEqual(res["issues"], [f"#{a}", f"#{b}"])                    # the whole batch, lead first
+        st = json.loads(state.read_text())
+        num, pr = next(iter(st["prs"].items()))
+        self.assertEqual(pr["title"], f"#{a} #{b}: Crash A")
+        # ship on a just-opened PR waits for the checks to start instead of stopping; and if the gate dropped
+        # uat-passed in a race, ship puts it back, because the tested head carries the owner's `uat` status
+        st["no_checks"] = 1
+        st["prs"][num]["labels"] = []
+        state.write_text(json.dumps(st))
+        p = tool("ship", str(b), "--human", "--no-deploy", check=False)
+        self.assertNotIn("No checks have started", p.stdout + p.stderr)
+        self.assertIn("Put back 'uat-passed'", p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        # An agent push after the test: no `uat` status on the new head, so ship refuses
+        tool("checkout-pr", str(b), "--branch", branch)
+        tool("checkout-pr", "--back")
+        st = json.loads(state.read_text())
+        st["prs"][num].update(labels=[], state="OPEN")
+        state.write_text(json.dumps(st))
+        git(wt, "push", "-q", "origin", branch)
+        p = tool("ship", str(b), "--human", "--no-deploy", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("hasn't passed UAT", p.stdout + p.stderr)
 
     def test_ship_refuses_in_an_agents_worktree(self):
         wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])

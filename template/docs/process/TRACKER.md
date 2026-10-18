@@ -49,7 +49,7 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Comment** | `haam.py issue comment 123 --body "…"` or `--body-file` | Create comment |
 | **Reject or duplicate** (in `/triage`, `/epic` or `/decide`) | `haam.py issue status 123 Canceled --human` (also closes the issue as not planned); comment the reason or the original's ID | Status Canceled, comment |
 | **Test a change** (human, in `/test`) | `haam.py checkout-pr 123`, then `haam.py checkout-pr --back` | Same (the code is in GitHub either way) |
-| **Open the PR after a pass** (test-first, human said `pass`) | `haam.py publish 123 --human`: pushes the tested commit, opens the PR labelled `uat-passed`, moves the issue to In Review | `haam.py publish APP-123 --human` |
+| **Open the PR after a pass** (test-first, human said `pass`) | `haam.py publish 123 --human`: pushes the tested commit, opens the PR labelled `uat-passed`, moves the issue to In Review | `haam.py publish APP-123 --human` (`--label human-review` if the issue has it), then move the issue to In Review and comment, as it prints |
 | **Ship after a pass** (human said `ship`) | `haam.py ship 123 --human`: merge, approve deploy, wait, close | `haam.py ship APP-123 --human`, then set Done in Linear |
 | **Room for new work?** (`/next` checks first) | `haam.py capacity` (open PRs and UAT queue vs `max_open_prs`, `max_in_uat`) | Same command (counts PRs; the UAT count needs GitHub Projects) |
 | **Batch PR** (an epic's bugs) | Title `#12 #13 #14: …`, a `Refs #n` line per issue; `ship` closes them all | Title `APP-12 APP-13: …` |

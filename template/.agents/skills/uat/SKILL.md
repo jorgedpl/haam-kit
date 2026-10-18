@@ -20,5 +20,5 @@ Target: $ARGUMENTS
 4. **Release note:** create `docs/changes/<FILE-ID>.md` with one line a user would understand (`- <ID>: <what changed for them>`). One file per change, so parallel PRs never conflict.
    **Rework after a failed test** (label `uat-failed`): keep the existing plan, update only what changed, and add a regression case for each reported failure; don't add a second release note.
 5. Usually `/build` wrote the plan and the release note before marking the PR ready, so there's nothing to commit here. Only if they're missing: commit `<ID>: UAT plan` and push (this re-runs CI and the reviews, so avoid it).
-6. **Tracker:** status `UAT`; comment with the branch name, a link to the plan and a 3–5 line "how to test in 5 minutes" summary. Mention the product owner so they get notified.
+6. **Tracker:** status `UAT`; comment with the branch name written as ``branch `<branch>` `` (so `/test` finds a batch's branch from any of its issues), a link to the plan and a 3–5 line "how to test in 5 minutes" summary. Mention the product owner so they get notified.
 7. **Reply** to the user: what to test in one line, and "When you're ready: `/test <ID>`. I'll set it up, and you just tell me `pass` or what went wrong."

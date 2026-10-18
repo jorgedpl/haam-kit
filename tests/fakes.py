@@ -140,7 +140,7 @@ class FakeLinear:
 
 FAKE_GH_PROJECTS = r'''#!/usr/bin/env python3
 """Stateful stand-in for the gh CLI covering what haam.py uses for GitHub Projects."""
-import json, os, sys
+import json, os, subprocess, sys
 STATE = os.environ["FAKE_GH_STATE"]
 LOG = os.environ.get("FAKE_GH_LOG")
 a = sys.argv[1:]
@@ -221,22 +221,35 @@ if a[:2] == ["issue", "comment"]:
     st["comments"].append({"issue": int(a[2]), "body": opt(a, "--body")}); save(); sys.exit(0)
 if a[:2] == ["issue", "close"]:
     st["issues"][a[2]]["state"] = "CLOSED"; save(); sys.exit(0)
+def origin_head(branch):
+    o = os.environ.get("FAKE_GH_ORIGIN")
+    if not o or not branch:
+        return None
+    r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", branch], cwd=o, capture_output=True, text=True)
+    return r.stdout.strip() or None
 if a[:2] == ["pr", "view"]:
-    out(st["prs"][a[2]])
+    p = st["prs"][a[2]]
+    if os.environ.get("FAKE_GH_ORIGIN") and not p.get("pinned_head"):
+        p["headRefOid"] = origin_head(p.get("headRefName"))
+    out(p)
 if a[:2] == ["pr", "create"]:
     n = str(100 + len(st["prs"]))
     st["prs"][n] = {"title": opt(a, "--title"), "body": open(opt(a, "--body-file")).read(), "headRefName": opt(a, "--head"),
                     "state": "OPEN", "isDraft": False, "labels": [{"name": l} for l in opts(a, "--label")],
-                    "url": f"https://github.com/example-org/example-app/pull/{n}", "headRefOid": st.get("pushed", {}).get(opt(a, "--head"))}
+                    "url": f"https://github.com/example-org/example-app/pull/{n}", "headRefOid": origin_head(opt(a, "--head"))}
     save(); print(st["prs"][n]["url"]); sys.exit(0)
 if a[:2] == ["pr", "edit"]:
     p = st["prs"][a[2]]
-    p["labels"] += [{"name": l} for l in opts(a, "--add-label")]
+    p["labels"] += [{"name": l} for l in opts(a, "--add-label") if {"name": l} not in p["labels"]]
+    p["labels"] = [l for l in p["labels"] if l["name"] not in opts(a, "--remove-label")]
     save(); sys.exit(0)
 if a[:2] == ["pr", "list"]:
     want = {"open": "OPEN", "merged": "MERGED"}.get(opt(a, "--state", "open"))
     out([dict(p, number=int(k)) for k, p in st["prs"].items() if p.get("state", "OPEN") == want])
 if a[:2] == ["pr", "checks"]:
+    if st.get("no_checks"):
+        st["no_checks"] -= 1; save()
+        print("no checks reported on the 'x' branch", file=sys.stderr); sys.exit(1)
     if st.get("checks_pending"):
         st["checks_pending"] -= 1; save()
         print(json.dumps([{"name": "ci", "bucket": "pass"}, {"name": "release-gate", "bucket": "pending"}])); sys.exit(8)
@@ -265,7 +278,10 @@ if a and a[0] == "api" and len(a) > 1 and a[1].split("?")[0].endswith("/jobs"):
     rid = a[1].split("/actions/runs/")[1].split("/")[0]
     out({"jobs": st.get("jobs_api", {}).get(rid, [])})
 if a and a[0] == "api" and len(a) > 3 and "/statuses/" in a[3]:
-    st.setdefault("statuses", []).append(json.loads(stdin)); save(); out({})
+    st.setdefault("statuses", []).append(dict(json.loads(stdin), sha=a[3].rsplit("/", 1)[-1])); save(); out({})
+if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/statuses"):
+    sha = a[3].split("/commits/")[1].split("/")[0]
+    out([x for x in st.get("statuses", []) if x.get("sha") == sha])
 if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/pending_deployments"):
     if a[2] == "GET":
         out([{"environment": {"id": 1, "name": "production"}}])

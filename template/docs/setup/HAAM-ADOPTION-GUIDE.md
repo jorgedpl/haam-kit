@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.7.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.7.1 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 
@@ -142,7 +142,7 @@ You need:
 - [ ] A coding agent installed and signed in, in your own account
 - [ ] Python 3, Git, Make, and the GitHub CLI signed in (`gh auth login`)
 - [ ] gitleaks (`brew install gitleaks`, or from its GitHub releases page)
-- [ ] An Anthropic API key for the reviewer agents (console.anthropic.com), with a monthly spend limit
+- [ ] A Claude secret for the reviewer agents: a Claude plan token (`claude setup-token`) or an Anthropic API key with a monthly spend limit (console.anthropic.com)
 - [ ] Your project runs locally today
 
 Decide now:
@@ -234,7 +234,7 @@ This makes the checks exist in GitHub so they can be required. The first AI revi
    python3 tools/haam/haam.py github --apply   # after you agree
    ```
    It creates the labels, a ruleset on the default branch (PR required, the six required checks, no force pushes; admins can bypass only when merging a PR, for emergencies, never by pushing to main; "up to date before merging" off, to save CI runs). If the ruleset already exists, it only adds what's missing and keeps your settings (`--reset` replaces it), the `production` environment with your approvers, the `PRODUCTION_URL` variable, and turns on secret scanning, push protection and Dependabot where your plan allows.
-2. **Reviewer key** `[YOU, in your terminal]`: `gh secret set ANTHROPIC_API_KEY -R owner/repo` (it asks for the key without showing it). The AI review can use `CLAUDE_CODE_OAUTH_TOKEN` instead (from `claude setup-token`, billed to your Claude plan); the security review needs the API key.
+2. **Reviewer key** `[YOU, in your terminal]`: one secret runs both reviews. Either `gh secret set CLAUDE_CODE_OAUTH_TOKEN -R owner/repo` with the token from `claude setup-token` (uses your Claude plan), or `gh secret set ANTHROPIC_API_KEY -R owner/repo` with a dedicated API key (billed per review; with it, the security review uses Anthropic's security review action). Either command asks for the value without showing it.
 3. **Fork PRs** `[YOU, in the browser]`: Settings → Actions → General → require approval for outside collaborators.
 4. **Deploys:**
    - *Already deploying from GitHub Actions?* Add `environment: production` to your deploy job: that alone gives you Gate G5. Delete the kit's `deploy.yml` or keep it as reference.
@@ -319,7 +319,7 @@ Then try the edges once: ask the agent to commit a fake key on a throwaway branc
 At every level, agents stop at the human gates.
 
 ### Running costs
-Besides GitHub, Linear (if you use it) and each person's agent subscription, the only usage-based cost is the reviewer agents: two Claude calls per reviewed PR push, billed to `ANTHROPIC_API_KEY`. Keep the spend limit on and PRs small.
+Besides GitHub, Linear (if you use it) and each person's agent subscription, the only usage-based cost is the reviewer agents: two Claude calls per reviewed PR push, billed to `ANTHROPIC_API_KEY` or counted against your Claude plan (`CLAUDE_CODE_OAUTH_TOKEN`). Keep the spend limit on and PRs small.
 
 ### Staying up to date
 New kit versions are published at https://github.com/jorgedpl/haam-kit/releases. `python3 tools/haam/haam.py doctor --check-updates` tells you when one is out. Run `/haam-update` (Codex: `$haam-update`) on a branch: files you never changed are updated, your customisations are kept, and where both changed the agent merges them. The CHANGELOG lists any migration steps.
@@ -351,7 +351,7 @@ Daily (10–15 min): test **UAT**, empty **Triage** (`/triage`). Weekly (30–45
 | A required check is missing from the list | It hasn't run yet | Open any PR first |
 | Commits blocked: "gitleaks is not installed" | gitleaks missing on that machine | Install it, then `make hooks` |
 | Commit blocked for a secret that isn't one | False positive | A human adds the fingerprint to `.gitleaksignore` in a reviewed commit |
-| `ai-review` pending or erroring | Missing `ANTHROPIC_API_KEY`, fork PR, or ran out of turns | Add the secret; re-run; raise `--max-turns`; or `ai-review-overruled` |
+| `ai-review` or `security-review` pending or erroring | No reviewer secret (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), fork PR, or ran out of turns | Add the secret; re-run; raise `--max-turns`; or `ai-review-overruled` |
 | Reviewer too strict | Instructions not tuned | Edit `.github/review/REVIEWER.md` |
 | `dependencies` fails on every PR | Old vulnerabilities | Fix, or raise the threshold temporarily and track as bugs |
 | Specs too vague, builds go wrong | G2 too loose | Tighten the Definition of Ready in `docs/process/GATES.md` |

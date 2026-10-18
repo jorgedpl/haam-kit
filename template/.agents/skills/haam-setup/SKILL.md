@@ -64,7 +64,7 @@ Commit (`Adopt the Human-Agent Agile Methodology (HAAM)`), ask before pushing, p
 
 ## Phase 6: GitHub
 1. `python3 tools/haam/haam.py github` → show the plan in plain words → on the human's yes: `… github --apply`.
-2. Human-only steps the tool lists, e.g. `[YOU, in your terminal] gh secret set ANTHROPIC_API_KEY -R owner/name` and the fork-PR setting in the browser. Wait for confirmation, then re-run `github` to verify.
+2. Human-only steps the tool lists, e.g. `[YOU, in your terminal] gh secret set CLAUDE_CODE_OAUTH_TOKEN -R owner/name` (or `ANTHROPIC_API_KEY`; either runs both reviews) and the fork-PR setting in the browser. Wait for confirmation, then re-run `github` to verify.
 3. If something needs a paid GitHub plan, explain the trade-off briefly and continue.
 4. **Actions minutes** (private repositories have a monthly allowance). Explain the choices in a few lines and ask:
    - AI reviews on GitHub (default: tamper-proof, but each review keeps a runner busy while Claude reads) or **on the owner's computer** (`haam.py review`, uses their Claude plan; protected-area PRs still reviewed on GitHub): `python3 tools/haam/haam.py ci-settings --review local` (plan) → `--apply`.

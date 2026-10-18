@@ -244,6 +244,35 @@ class TestUpdate(ToolTestCase):
         self.assertIn("0 files updated (you hadn't changed them)", texts)
         self.assertFalse([t for t in texts if t.startswith("Needs a merge")])
 
+    def test_github_tracker_never_gets_the_linear_connection(self):
+        self.install()
+        settings = self.proj / ".claude/settings.json"
+        self.assertIn("linear", json.loads(settings.read_text()).get("enabledMcpjsonServers", []))
+        self.run_tool("config", "--product", "Acme", "--tracker", "github", "--team-key", "ACM",
+                      "--github-repo", "example-org/example-app", "--owner", "octocat", tool=self.installed_tool())
+        self.assertNotIn("linear", json.loads(settings.read_text()).get("enabledMcpjsonServers", []))
+        self.assertFalse((self.proj / ".mcp.json").exists())          # it held only the Linear connection
+        self.assertFalse((self.proj / ".cursor/mcp.json").exists())
+        # The project's own MCP server is kept, and updates never bring Linear back
+        (self.proj / ".mcp.json").write_text(json.dumps({"mcpServers": {"db": {"command": "db-mcp"}}}))
+        new = self.make_new_kit()
+        new_tool = new / "tools/haam/haam.py"
+        self.run_tool("update", "--target", str(self.proj), "--apply", tool=new_tool)
+        self.run_tool("update", "--target", str(self.proj), "--apply", tool=new_tool)
+        self.assertNotIn("linear", json.loads(settings.read_text()).get("enabledMcpjsonServers", []))
+        self.assertEqual(json.loads((self.proj / ".mcp.json").read_text()), {"mcpServers": {"db": {"command": "db-mcp"}}})
+        self.assertFalse((self.proj / ".cursor/mcp.json").exists())
+        self.assertIn("hooks", json.loads(settings.read_text()))      # the rest of the settings still merge
+        out = self.run_tool("agents", tool=new_tool).stdout
+        self.assertNotIn("declares Linear", out)
+
+    def test_linear_tracker_keeps_the_linear_connection(self):
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--tracker", "linear", "--team-key", "ACM",
+                      "--github-repo", "example-org/example-app", "--owner", "octocat", tool=self.installed_tool())
+        self.assertIn("linear", json.loads((self.proj / ".mcp.json").read_text())["mcpServers"])
+        self.assertIn("linear", json.loads((self.proj / ".claude/settings.json").read_text())["enabledMcpjsonServers"])
+
     def test_refuses_downgrade(self):
         self.install()
         lock = self.lock()

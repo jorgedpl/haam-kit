@@ -2,16 +2,19 @@
 # did not write the code.
 #   ai-review        - spec conformance, test honesty, correctness, project rules
 #                      (instructions: .github/review/REVIEWER.md)
-#   security-review  - Anthropic's Claude Code security review of the diff
+#   security-review  - a security-only review of the diff: Anthropic's Claude Code security review
+#                      with ANTHROPIC_API_KEY, or a Claude session following
+#                      .github/review/SECURITY-REVIEWER.md with CLAUDE_CODE_OAUTH_TOKEN
 #
 # Results are published as commit statuses named "ai-review" and "security-review".
 # Branch protection on `main` requires both. Only two things can turn them green:
 # a passing review, or a human adding the PR label `ai-review-overruled`.
 # (Statuses are used instead of job results because a skipped job counts as passing.)
 #
-# Needs repository secret ANTHROPIC_API_KEY (billed per review, separate from Claude
-# subscriptions); the ai-review can use CLAUDE_CODE_OAUTH_TOKEN instead. Docs-only PRs pass
-# without calling Claude.
+# Needs one repository secret: ANTHROPIC_API_KEY (billed per review, separate from Claude
+# subscriptions) or CLAUDE_CODE_OAUTH_TOKEN (your Claude plan; create it with `claude setup-token`).
+# Both reviews work with either. The review instructions are always read from the base branch,
+# not from the PR (which its author controls). Docs-only PRs pass without calling Claude.
 name: Review
 
 on:
@@ -111,18 +114,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Review instructions from the base branch
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          mkdir -p .haam-review
+          git show "origin/$BASE:.github/review/REVIEWER.md" > .haam-review/REVIEWER.md 2>/dev/null \
+            || cp .github/review/REVIEWER.md .haam-review/REVIEWER.md   # first PR, before the kit is on main
+
       - name: Independent review
         uses: anthropics/claude-code-action@v1
         with:
           # Either secret works: an API key (billed per review) or CLAUDE_CODE_OAUTH_TOKEN (your Claude plan;
-          # create it with `claude setup-token`). The security review below needs the API key.
+          # create it with `claude setup-token`).
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
-            Follow the instructions in .github/review/REVIEWER.md exactly to review this pull request.
+            Follow the instructions in .haam-review/REVIEWER.md exactly to review this pull request.
           # TODO(setup): add --model to choose cost/quality; raise max-turns if reviews get cut short.
           claude_args: >-
             --max-turns 30
@@ -146,14 +157,19 @@ jobs:
     if: needs.scope.outputs.run == 'true'
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 25
+    env:
+      # Which secret the repository has decides how the security review runs.
+      HAS_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      HAS_PLAN_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: Claude Code security review
+      - name: Claude Code security review (API key)
         id: security
+        if: env.HAS_API_KEY == 'true'
         continue-on-error: true
         uses: anthropics/claude-code-security-review@main   # TODO(setup): pin to a commit SHA
         with:
@@ -164,13 +180,53 @@ jobs:
           # custom-security-scan-instructions: .github/review/security-rules.md
           # false-positive-filtering-instructions: .github/review/security-false-positives.md
 
+      - name: Security instructions from the base branch
+        if: env.HAS_API_KEY != 'true' && env.HAS_PLAN_TOKEN == 'true'
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          mkdir -p .haam-review
+          for f in SECURITY-REVIEWER.md REVIEWER.md; do
+            git show "origin/$BASE:.github/review/$f" > ".haam-review/$f" 2>/dev/null \
+              || cp ".github/review/$f" ".haam-review/$f"   # first PR, before the kit is on main
+          done
+          rm -f security-findings.txt
+
+      - name: Security review on the Claude plan (CLAUDE_CODE_OAUTH_TOKEN)
+        id: plan
+        if: env.HAS_API_KEY != 'true' && env.HAS_PLAN_TOKEN == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            Follow the instructions in .haam-review/SECURITY-REVIEWER.md exactly to review this pull request.
+            Its references to .github/review/REVIEWER.md mean .haam-review/REVIEWER.md.
+          claude_args: >-
+            --max-turns 30
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+
       - name: Publish result
         if: always()
         env:
           OUTCOME: ${{ steps.security.outcome }}
           FINDINGS: ${{ steps.security.outputs.findings-count }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
         run: |
-          if [ "$OUTCOME" != "success" ] || [ -z "$FINDINGS" ]; then
+          if [ "$HAS_API_KEY" != "true" ]; then
+            if [ "$HAS_PLAN_TOKEN" != "true" ]; then
+              OUTCOME=missing
+            else
+              OUTCOME=$PLAN_OUTCOME
+              FINDINGS=$(tr -cd '0-9' < security-findings.txt 2>/dev/null || true)
+            fi
+          fi
+          if [ "$OUTCOME" = "missing" ]; then
+            state=error; desc="No reviewer secret: add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+          elif [ "$OUTCOME" != "success" ] || [ -z "$FINDINGS" ]; then
             state=error; desc="Security review did not finish: re-run, or human can overrule"
           elif [ "$FINDINGS" = "0" ]; then
             state=success; desc="No security findings"

@@ -66,7 +66,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -298,10 +298,10 @@ def ask(prompt, default=""):
 
 # ----------------------------------------------------------------------------- install
 
-def merge_json(dst, src, merger):
+def merge_json(dst, src_bytes, merger):
     try:
         a = json.loads(dst.read_text())
-        b = json.loads(src.read_text())
+        b = json.loads(src_bytes)
     except (json.JSONDecodeError, OSError):
         return False
     before = json.dumps(a, sort_keys=True)
@@ -355,6 +355,46 @@ def merge_claude_settings(a, b):
     return a
 
 
+LINEAR_FILES = (".mcp.json", ".cursor/mcp.json", ".claude/settings.json")
+
+
+def without_linear(data):
+    """A kit JSON file minus its Linear connection (for projects that track work on GitHub)."""
+    servers = data.get("mcpServers")
+    if isinstance(servers, dict) and LINEAR_MCP in json.dumps(servers.get("linear", {})):
+        servers.pop("linear")
+    if isinstance(data.get("enabledMcpjsonServers"), list):
+        data["enabledMcpjsonServers"] = [x for x in data["enabledMcpjsonServers"] if x != "linear"]
+        if not data["enabledMcpjsonServers"]:
+            data.pop("enabledMcpjsonServers")
+    return data
+
+
+def remove_linear_connection(root, apply=True):
+    """GitHub-tracker projects don't use Linear: take the kit's Linear connection out of the MCP and Claude settings
+    (a file that held nothing else is removed). Returns the files changed. Other servers are left alone."""
+    changed = []
+    for rel in LINEAR_FILES:
+        f = root / rel
+        if not f.exists():
+            continue
+        try:
+            data = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        before = json.dumps(data, sort_keys=True)
+        data = without_linear(data)
+        if json.dumps(data, sort_keys=True) == before:
+            continue
+        changed.append(rel)
+        if apply:
+            if rel != ".claude/settings.json" and data == {"mcpServers": {}}:
+                f.unlink()
+            else:
+                f.write_text(json.dumps(data, indent=2) + "\n")
+    return changed
+
+
 JSON_MERGERS = {
     ".mcp.json": merge_mcp,
     ".cursor/mcp.json": merge_mcp,
@@ -386,9 +426,15 @@ def make_renderer(target):
     tcfg = load_config(target) if (target / CONFIG_NAME).exists() else None
     applied_key = (tcfg or {}).get("_applied", {}).get("team_key", PLACEHOLDER_KEY)
     applied_product = (tcfg or {}).get("_applied", {}).get("product_name", "")
+    github_tracker = (tcfg or {}).get("tracker") == "github"
 
     def render(path, rel_s):
         data = path.read_bytes()
+        if github_tracker and rel_s in LINEAR_FILES:
+            kit = without_linear(json.loads(data))
+            if kit == {"mcpServers": {}}:
+                return None          # nothing left for this project: don't install the file
+            return (json.dumps(kit, indent=2) + "\n").encode()
         in_scope = any(rel_s == r or rel_s.startswith(r + "/") for r in RENAME_ROOTS)
         if not in_scope or path.suffix not in TEXT_SUFFIXES or (applied_key == PLACEHOLDER_KEY and not applied_product):
             return data
@@ -534,6 +580,8 @@ def cmd_install(args):
     for p, rel_s in kit_files(src):
         dst = target / rel_s
         content = render(p, rel_s)
+        if content is None:
+            continue
         lock["files"][rel_s] = sha(content)
         if not dst.exists():
             if not args.dry_run:
@@ -546,7 +594,7 @@ def cmd_install(args):
             same.append(rel_s)
             continue
         if rel_s in JSON_MERGERS:
-            result = "dry" if args.dry_run else merge_json(dst, p, JSON_MERGERS[rel_s])
+            result = "dry" if args.dry_run else merge_json(dst, content, JSON_MERGERS[rel_s])
             if result == "same":
                 same.append(rel_s)
                 continue
@@ -625,8 +673,11 @@ def cmd_update(args):
         dst = target / rel_s
         new = render(p, rel_s)
         base = lock.get("files", {}).get(rel_s)
+        if new is None:              # not used by this project (e.g. the Linear connection on a GitHub tracker)
+            new_lock.pop(rel_s, None)
+            continue
         if rel_s in JSON_MERGERS and dst.exists():
-            result = "dry" if args.dry_run or not args.apply else merge_json(dst, p, JSON_MERGERS[rel_s])
+            result = "dry" if args.dry_run or not args.apply else merge_json(dst, new, JSON_MERGERS[rel_s])
             (same if result == "same" else merged).append(rel_s)
             new_lock[rel_s] = sha(new)
             continue
@@ -668,6 +719,8 @@ def cmd_update(args):
         new_lock.pop(r, None)
 
     gi_changed = sync_gitignore(src, target, dry_run=not args.apply)
+    tcfg = load_config(target) if (target / CONFIG_NAME).exists() else {}
+    unlinked = remove_linear_connection(target, apply=args.apply) if tcfg.get("tracker") == "github" else []
 
     rep.add("ok" if added else "info", f"{len(added)} new files", ", ".join(added[:8]) + (" …" if len(added) > 8 else ""))
     rep.add("ok" if updated else "info", f"{len(updated)} files updated (you hadn't changed them)",
@@ -676,6 +729,8 @@ def cmd_update(args):
         rep.add("ok", f"{len(merged)} settings files merged", ", ".join(merged))
     if gi_changed:
         rep.add("ok", ".gitignore HAAM block refreshed")
+    if unlinked:
+        rep.add("ok", "Linear connection taken out (this project tracks work on GitHub)", ", ".join(unlinked))
     rep.add("info", f"{len(same)} files already current")
     if kept:
         rep.add("info", f"{len(kept)} of your customised files kept (no kit change)", ", ".join(kept[:8]))
@@ -848,6 +903,10 @@ def cmd_config(args):
     apply_renames(root, cfg, rep, dry_run=args.dry_run)
     if not args.dry_run:
         save_config(root, cfg)
+    if cfg.get("tracker") == "github":
+        unlinked = remove_linear_connection(root, apply=not args.dry_run)
+        if unlinked:
+            rep.add("ok", "Linear connection taken out (work is tracked on GitHub)", ", ".join(unlinked))
 
     missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
     for k in ("product_name", "tracker", "team_key", "github_repo", "product_owner_github",
@@ -924,6 +983,12 @@ def cmd_agents(args):
 
     agents = cfg.get("agents") or DEFAULT_CONFIG["agents"]
     guide = "docs/setup/AGENTS-SETUP.md"
+    linear = cfg.get("tracker") != "github"
+    if not linear:
+        unlinked = remove_linear_connection(root, apply=args.apply)
+        rep.section("Tracker")
+        rep.add("ok" if not unlinked or args.apply else "warn", "GitHub Projects: no Linear connection",
+                ("removed from " if args.apply else "will remove from ") + ", ".join(unlinked) if unlinked else "")
 
     def present(*names):
         return any(have(n) for n in names)
@@ -936,12 +1001,14 @@ def cmd_agents(args):
                 "" if points else ("missing" if not cm.exists() else "it's your old CLAUDE.md: merge it (see .haam/incoming)"))
         rep.add("ok" if (root / ".claude/settings.json").exists() else "fail",
                 ".claude/settings.json (guard-rails + hooks)")
-        rep.add("ok" if (root / ".mcp.json").exists() else "fail", ".mcp.json declares Linear")
+        if linear:
+            rep.add("ok" if (root / ".mcp.json").exists() else "fail", ".mcp.json declares Linear")
         rep.add("info", "CLI " + ("found" if present("claude") else "not found on this machine"))
     if "cursor" in agents:
         rep.section("Cursor")
         rep.add("ok", "Reads AGENTS.md and .agents/skills natively")
-        rep.add("ok" if (root / ".cursor/mcp.json").exists() else "fail", ".cursor/mcp.json declares Linear")
+        if linear:
+            rep.add("ok" if (root / ".cursor/mcp.json").exists() else "fail", ".cursor/mcp.json declares Linear")
         rep.add("info", "Cursor also reads .claude/skills for compatibility; if skills show twice, "
                         "disable 'Claude skills' compatibility in Cursor settings", "")
     if "codex" in agents:
@@ -949,12 +1016,14 @@ def cmd_agents(args):
         rep.add("ok", "Reads AGENTS.md and .agents/skills natively")
         policies = list((root / ".agents/skills").glob("*/agents/openai.yaml"))
         rep.add("ok" if len(policies) >= 4 else "warn", f"Human-only skills marked explicit-only: {len(policies)}")
-        rep.add("info", "Linear MCP is configured per user (not per repo) in Codex")
-        rep.action(WHO_TERMINAL, "Each Codex user connects Linear once", f"codex mcp add linear --url {LINEAR_MCP}")
+        if linear:
+            rep.add("info", "Linear MCP is configured per user (not per repo) in Codex")
+            rep.action(WHO_TERMINAL, "Each Codex user connects Linear once", f"codex mcp add linear --url {LINEAR_MCP}")
     if "grok" in agents:
         rep.section("Grok Build")
         rep.add("ok" if (root / ".grok/skills").exists() else "warn", ".grok/skills → .agents/skills")
-        rep.add("ok" if (root / ".mcp.json").exists() else "warn", "Linear via .mcp.json (Grok reads it)")
+        if linear:
+            rep.add("ok" if (root / ".mcp.json").exists() else "warn", "Linear via .mcp.json (Grok reads it)")
         rep.add("warn", "Confirm Grok loads AGENTS.md on first run",
                 f"ask it 'what are the hard rules in this repo?'; if it can't answer, see {guide}")
     if "gemini" in agents or (root / ".gemini/settings.json").exists():
@@ -965,8 +1034,9 @@ def cmd_agents(args):
 
     if not args.apply:
         rep.add("info", "Plan only. Re-run with --apply to make changes")
-    rep.action(WHO_TERMINAL, "Each developer signs in to Linear from their agent tool (OAuth, one time)",
-               f"see {guide}")
+    if linear:
+        rep.action(WHO_TERMINAL, "Each developer signs in to Linear from their agent tool (OAuth, one time)",
+                   f"see {guide}")
     rep.print(args.json)
 
 
@@ -1226,16 +1296,15 @@ def cmd_github(args):
     code, out, _ = run(["gh", "secret", "list", "-R", repo, "--json", "name"])
     names = {s["name"] for s in json.loads(out)} if code == 0 and out else set()
     if "ANTHROPIC_API_KEY" in names:
-        rep.add("ok", "ANTHROPIC_API_KEY (for the reviewer agents)")
+        rep.add("ok", "ANTHROPIC_API_KEY (both reviewer agents; billed per review)")
     elif "CLAUDE_CODE_OAUTH_TOKEN" in names:
-        rep.add("ok", "CLAUDE_CODE_OAUTH_TOKEN (the AI review runs on your Claude subscription)")
-        rep.add("warn", "The security review still needs ANTHROPIC_API_KEY", "without it, security-review stays red "
-                "until a human overrules it; add the key when you can")
+        rep.add("ok", "CLAUDE_CODE_OAUTH_TOKEN (both reviewer agents run on your Claude plan)")
     else:
-        rep.add("fail", "No key for the reviewer agents", "set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN for the AI review)")
-        rep.action(WHO_TERMINAL, "Create a dedicated API key with a spend limit at console.anthropic.com, then "
-                   "paste it when this command asks (it is not shown or stored anywhere else)",
-                   f"gh secret set ANTHROPIC_API_KEY -R {repo}")
+        rep.add("fail", "No key for the reviewer agents", "set CLAUDE_CODE_OAUTH_TOKEN (your Claude plan) or ANTHROPIC_API_KEY")
+        rep.action(WHO_TERMINAL, "Either run `claude setup-token` and paste the token it prints, or create a dedicated "
+                   "API key with a spend limit at console.anthropic.com and paste that. The command asks for it "
+                   "without showing it; it isn't stored anywhere else",
+                   f"gh secret set CLAUDE_CODE_OAUTH_TOKEN -R {repo}   (or: gh secret set ANTHROPIC_API_KEY -R {repo})")
 
     rep.section("Manual steps GitHub doesn't expose to the tool")
     rep.add("info", "Fork PRs: Settings → Actions → General → require approval for outside collaborators")

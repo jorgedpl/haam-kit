@@ -2,7 +2,7 @@
 
 This turns gates G3–G5 from conventions into rules GitHub enforces.
 
-> **Automated:** labels (§1), branch rules (§2), the production environment (§4) and security features (§3b–c) are done by `python3 tools/haam/haam.py github --apply` (plan first without `--apply`). This page is the manual equivalent, plus the steps GitHub only offers in the browser. The `ANTHROPIC_API_KEY` secret is always added by you: `gh secret set ANTHROPIC_API_KEY -R owner/repo`.
+> **Automated:** labels (§1), branch rules (§2), the production environment (§4) and security features (§3b–c) are done by `python3 tools/haam/haam.py github --apply` (plan first without `--apply`). This page is the manual equivalent, plus the steps GitHub only offers in the browser. The reviewer secret is always added by you: `gh secret set CLAUDE_CODE_OAUTH_TOKEN -R owner/repo` (token from `claude setup-token`, your Claude plan) or `gh secret set ANTHROPIC_API_KEY -R owner/repo` (API key, billed per review). One of them runs both reviews.
 
 ## 1. Labels
 Create these repository labels (Issues → Labels), or run:
@@ -27,12 +27,12 @@ Settings → **Rules → Rulesets** → New branch ruleset (or classic Branch pr
 
 ## 3. Code review and security
 
-### 3a. Anthropic API key for the reviewer agents
-The independent reviewers (`.github/workflows/review.yml`) run Claude in GitHub Actions.
-1. Create an API key at console.anthropic.com (a dedicated key for this repo, with a monthly spend limit).
-2. Settings → **Secrets and variables → Actions** → New repository secret **`ANTHROPIC_API_KEY`**.
+### 3a. A Claude secret for the reviewer agents
+The independent reviewers (`.github/workflows/review.yml`) run Claude in GitHub Actions. One repository secret runs both reviews (Settings → **Secrets and variables → Actions** → New repository secret). Choose one of these:
+- **`CLAUDE_CODE_OAUTH_TOKEN`:** run `claude setup-token` and use the token it prints. The reviews then count against that Claude plan.
+- **`ANTHROPIC_API_KEY`:** a dedicated API key for this repo from console.anthropic.com, with a monthly spend limit. It's billed per review, separately from anyone's Claude subscription. With it, the security review uses Anthropic's security review action.
 
-This is billed per review, separately from anyone's Claude subscription. Draft and docs-only PRs don't call Claude. Review instructions live in `.github/review/REVIEWER.md`; tune them as you learn.
+Draft and docs-only PRs don't call Claude. The review instructions are in `.github/review/REVIEWER.md` and `SECURITY-REVIEWER.md`, and are always read from `main`. Tune them as you learn.
 
 ### 3b. Secret scanning and push protection
 Settings → **Security** (Code security / Advanced Security, depending on your plan):

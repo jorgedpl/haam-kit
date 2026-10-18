@@ -113,7 +113,7 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → UAT →
 
 ### Stage 6: Automated verification and code review (In Review, Gate G3)
 - **Deterministic checks** on every PR: `ci` (lint, types, unit tests, build), `secrets` (gitleaks over every commit), `dependencies` (vulnerability audit).
-- **Independent reviewer agent**: a separate Claude running in GitHub Actions, which never saw the code being written, reviews the diff against the spec and `AGENTS.md` (`ai-review`), and Anthropic's security review checks for vulnerabilities (`security-review`). They post comments and can block; they can't approve or merge.
+- **Independent reviewer agent**: a separate Claude running in GitHub Actions, which never saw the code being written, reviews the diff against the spec and `AGENTS.md` (`ai-review`), and a security-only review checks for vulnerabilities (`security-review`: Anthropic's security review with an API key, or a Claude session following `.github/review/SECURITY-REVIEWER.md` with a Claude plan token). Either secret runs both, and their instructions come from `main`. They post comments and can block; they can't approve or merge.
 - The building agent fixes blocking findings (max two rounds, then hands over to a human). Only a human can overrule an AI review (label `ai-review-overruled`).
 - **Human review** is mandatory for protected areas (`human-review` label).
 - Full detail: `docs/process/GATES.md` § How code review works.

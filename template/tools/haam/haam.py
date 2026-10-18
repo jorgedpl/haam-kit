@@ -358,23 +358,23 @@ def merge_claude_settings(a, b):
 LINEAR_FILES = (".mcp.json", ".cursor/mcp.json", ".claude/settings.json")
 
 
-def without_linear(data):
-    """A kit JSON file minus its Linear connection (for projects that track work on GitHub)."""
+def without_linear(data, keep_enabled=False):
+    """A kit JSON file minus its Linear connection (for projects that track work on GitHub). A server called
+    "linear" that isn't Linear's own (a project's proxy, say) is left alone, and so is its switch when keep_enabled."""
     servers = data.get("mcpServers")
     if isinstance(servers, dict) and LINEAR_MCP in json.dumps(servers.get("linear", {})):
         servers.pop("linear")
-    if isinstance(data.get("enabledMcpjsonServers"), list):
+    if isinstance(data.get("enabledMcpjsonServers"), list) and not keep_enabled:
         data["enabledMcpjsonServers"] = [x for x in data["enabledMcpjsonServers"] if x != "linear"]
-        if not data["enabledMcpjsonServers"]:
-            data.pop("enabledMcpjsonServers")
     return data
 
 
 def remove_linear_connection(root, apply=True):
     """GitHub-tracker projects don't use Linear: take the kit's Linear connection out of the MCP and Claude settings
-    (a file that held nothing else is removed). Returns the files changed. Other servers are left alone."""
-    changed = []
-    for rel in LINEAR_FILES:
+    (a file that held nothing else is removed, and forgotten in the lock so switching to Linear later restores it).
+    Returns the files changed. Other servers are left alone."""
+    changed, own_linear = [], False
+    for rel in LINEAR_FILES:          # the MCP files first: they decide whether a project's own "linear" stays on
         f = root / rel
         if not f.exists():
             continue
@@ -383,13 +383,19 @@ def remove_linear_connection(root, apply=True):
         except (json.JSONDecodeError, OSError):
             continue
         before = json.dumps(data, sort_keys=True)
-        data = without_linear(data)
+        data = without_linear(data, keep_enabled=own_linear)
+        if rel == ".mcp.json" and "linear" in (data.get("mcpServers") or {}):
+            own_linear = True
         if json.dumps(data, sort_keys=True) == before:
             continue
         changed.append(rel)
         if apply:
             if rel != ".claude/settings.json" and data == {"mcpServers": {}}:
                 f.unlink()
+                if (root / LOCK_NAME).exists():
+                    lock = load_lock(root)
+                    if lock.get("files", {}).pop(rel, None) is not None:
+                        save_lock(root, lock)
             else:
                 f.write_text(json.dumps(data, indent=2) + "\n")
     return changed

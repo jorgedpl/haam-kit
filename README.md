@@ -115,7 +115,7 @@ On GitHub Projects every agent uses the same `haam.py issue` commands, so there'
 - A GitHub repository (rulesets and deploy approvals on **private** repos need a paid GitHub plan; public repos work on the free plan)
 - A tracker: a GitHub Projects board (free, on any GitHub plan) or a Linear workspace (any plan)
 - Python 3.8+, Git, Make, GitHub CLI, [gitleaks](https://github.com/gitleaks/gitleaks)
-- An Anthropic API key for the CI reviewer agents (usage-based; set a spend limit)
+- A Claude secret for the CI reviewer agents: a Claude plan token (`claude setup-token`) or an Anthropic API key (usage-based; set a spend limit)
 - Any supported coding agent
 
 ## Repository layout

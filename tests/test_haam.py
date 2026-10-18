@@ -265,6 +265,31 @@ class TestUpdate(ToolTestCase):
         self.assertIn("hooks", json.loads(settings.read_text()))      # the rest of the settings still merge
         out = self.run_tool("agents", tool=new_tool).stdout
         self.assertNotIn("declares Linear", out)
+        # Updates that change nothing say so
+        again = self.run_json("update", "--target", str(self.proj), "--apply", tool=new_tool)
+        texts = [i["text"] for sec in again["sections"] for i in sec["items"]]
+        self.assertFalse([t for t in texts if "merged" in t or "Linear connection taken out" in t], texts)
+        # A project's own server called "linear" stays on
+        (self.proj / ".mcp.json").write_text(json.dumps({"mcpServers": {"linear": {"command": "my-linear-proxy"}}}))
+        st = json.loads(settings.read_text())
+        st["enabledMcpjsonServers"] = ["linear"]
+        settings.write_text(json.dumps(st))
+        self.run_tool("agents", "--apply", tool=new_tool)
+        self.assertEqual(json.loads(settings.read_text())["enabledMcpjsonServers"], ["linear"])
+        self.assertIn("linear", json.loads((self.proj / ".mcp.json").read_text())["mcpServers"])
+
+    def test_switching_back_to_linear_restores_the_connection(self):
+        self.install()
+        tool = self.installed_tool()
+        args = ["--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app", "--owner", "octocat"]
+        self.run_tool("config", "--tracker", "github", *args, tool=tool)
+        self.assertFalse((self.proj / ".mcp.json").exists())
+        self.run_tool("config", "--tracker", "linear", *args, tool=tool)
+        new_tool = self.make_new_kit() / "tools/haam/haam.py"
+        self.run_tool("update", "--target", str(self.proj), "--apply", tool=new_tool)
+        self.assertIn("linear", json.loads((self.proj / ".mcp.json").read_text())["mcpServers"])
+        self.assertTrue((self.proj / ".cursor/mcp.json").exists())
+        self.assertIn("linear", json.loads((self.proj / ".claude/settings.json").read_text())["enabledMcpjsonServers"])
 
     def test_linear_tracker_keeps_the_linear_connection(self):
         self.install()

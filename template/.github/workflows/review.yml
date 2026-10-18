@@ -121,6 +121,7 @@ jobs:
           mkdir -p .haam-review
           git show "origin/$BASE:.github/review/REVIEWER.md" > .haam-review/REVIEWER.md 2>/dev/null \
             || cp .github/review/REVIEWER.md .haam-review/REVIEWER.md   # first PR, before the kit is on main
+          rm -f review-verdict.txt   # only the reviewer writes the verdict, never the PR
 
       - name: Independent review
         uses: anthropics/claude-code-action@v1

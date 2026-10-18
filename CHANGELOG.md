@@ -11,11 +11,12 @@ Each release lists **Migration** steps when a project needs to do more than run 
 Two fixes reported from a project running v1.7.0.
 
 ### Fixed
-- **No Linear connection on GitHub-tracker projects.** The settings merge kept re-adding `linear` to `enabledMcpjsonServers` in `.claude/settings.json` (and the Linear server to `.mcp.json` / `.cursor/mcp.json`) on every update, even after the project removed it. Now, when `"tracker"` is `github`, the kit's Linear entries are never installed or merged. `config --tracker github`, `agents` and `update` also take out what an earlier version added; a file that held only the Linear server is removed, and the project's own servers are kept. `agents` no longer asks GitHub-tracker projects to sign in to Linear.
+- **No Linear connection on GitHub-tracker projects.** The settings merge kept re-adding `linear` to `enabledMcpjsonServers` in `.claude/settings.json` (and the Linear server to `.mcp.json` / `.cursor/mcp.json`) on every update, even after the project removed it. Now, when `"tracker"` is `github`, the kit's Linear entries are never installed or merged. `config --tracker github`, `agents` and `update` also take out what an earlier version added; a file that held only the Linear server is removed (and comes back if the project later switches to Linear), and the project's own servers, including one it calls `linear`, are kept and stay switched on. `agents` no longer asks GitHub-tracker projects to sign in to Linear.
 - **The security review runs on the Claude plan token.** With only `CLAUDE_CODE_OAUTH_TOKEN` (no `ANTHROPIC_API_KEY`), `security-review` used to stay red. Now a Claude session follows the new `.github/review/SECURITY-REVIEWER.md` and reports the number of findings. With an API key, Anthropic's security review action runs as before. One secret, either one, runs both reviews; `github` and the setup docs say so.
 
 ### Changed
-- Both AI reviews read their instructions (`REVIEWER.md`, `SECURITY-REVIEWER.md`) from the base branch, not from the PR, so a PR can't rewrite its own review rules (the first PR, before the kit is on `main`, uses its own copy).
+- Both AI reviews read their instructions (`REVIEWER.md`, `SECURITY-REVIEWER.md`) from the base branch, not from the PR, so a PR can't rewrite its own review rules (the first PR, before the kit is on `main`, uses its own copy). A `review-verdict.txt` or `security-findings.txt` committed in the PR is deleted before the review, so it can't stand in for one.
+- README, `SECURITY.md` and the lifecycle say either secret works.
 
 ### Migration
 - `haam.py update`. On GitHub-tracker projects it removes the Linear connection the earlier versions added. Merge the updated `review.yml` and the new `SECURITY-REVIEWER.md`.

@@ -42,7 +42,7 @@ jobs:
         ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
          github.event.label.name == 'uat-passed' || github.event.label.name == 'gate-override')) ||
       (github.event.issue.pull_request &&
-        (contains(github.event.comment.body, 'OVERRIDE:') || contains(github.event.comment.body, 'EMERGENCY BYPASS:')))
+        (contains(github.event.comment.body, 'OVERRIDE') || contains(github.event.comment.body, 'EMERGENCY BYPASS')))
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
@@ -92,7 +92,8 @@ jobs:
               description = 'UAT passed';
             } else if (labels.includes('gate-override')) {
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number });
-              const reason = comments.find(c => /^\s*(OVERRIDE|EMERGENCY BYPASS):/i.test(c.body));
+              // "OVERRIDE: <reason>" (also accepts a note before the colon: "OVERRIDE (Level 1) by x: <reason>")
+              const reason = comments.find(c => /^\s*(OVERRIDE|EMERGENCY BYPASS)\b[^:\n]{0,80}:\s*\S/i.test(c.body));
               if (reason) {
                 state = 'success';
                 description = `Gate overridden by ${reason.user.login}`;

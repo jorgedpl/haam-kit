@@ -24,8 +24,11 @@ concurrency:
 
 jobs:
   sync:
-    # A draft PR moves its issue when it's marked ready, not when it's opened.
-    if: github.event.action != 'opened' || !github.event.pull_request.draft
+    # A draft PR moves its issue when it's marked ready, not when it's opened. A PR closed without merging
+    # changes nothing on the board, so it doesn't start a runner either.
+    if: >-
+      (github.event.action != 'opened' || !github.event.pull_request.draft) &&
+      (github.event.action != 'closed' || github.event.pull_request.merged)
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:

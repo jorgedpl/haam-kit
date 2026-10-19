@@ -152,7 +152,7 @@ Agents take **bugs before features, older before newer, smaller before larger**.
 | **Decision** | 5 or fewer | Book 20 minutes and decide |
 | **UAT** | 3 or fewer | Stop starting agents and test. Agents produce faster than you can test |
 | **Agents running** | No more than you can test tomorrow | Fewer agents, smaller items |
-| **Open PRs** | `max_open_prs` in `haam.config.json` (default 5) | Agents hold new work automatically (`haam.py capacity`): every open PR costs CI minutes on each push. Test and ship what's open |
+| **Open PRs** | `max_open_prs` in `haam.config.json` (default 10) | Agents hold new work automatically (`haam.py capacity`): every open PR costs CI minutes on each push. Test and ship what's open |
 
 ### 5.6 Changing priorities
 Change them whenever the facts change, but say why in a comment. Agents and colleagues read the history. Never quietly demote an Urgent item: comment, and tell whoever reported it.

@@ -77,7 +77,7 @@ If you want to tag an agent on a PR for a quick fix (e.g. the Claude GitHub app 
 
 ## 8. Keeping Actions minutes down
 
-Private repositories get a monthly allowance of Actions minutes; agents opening many PRs use it fast. What the kit already does: by default (test-first) agents push branches without opening PRs, and a PR opens only after you've tested and passed the change, so the checks run once on tested code (checks-first projects: draft PRs don't run anything, and agents mark a PR ready once, when it's complete); docs-only PRs skip the checks; `main` is checked nightly instead of after every merge; labels, comments and new issues don't start runners; agents hold new work at 5 open PRs (`max_open_prs`).
+Private repositories get a monthly allowance of Actions minutes; agents opening many PRs use it fast. What the kit already does: by default (test-first) agents push branches without opening PRs, and a PR opens only after you've tested and passed the change, so the checks run once on tested code (checks-first projects: draft PRs don't run anything, and agents mark a PR ready once, when it's complete); docs-only PRs skip the checks; `main` is checked nightly instead of after every merge; labels, comments and new issues don't start runners; agents hold new work at 10 open PRs or 10 changes waiting for you to test (`max_open_prs`, `max_in_uat`).
 
 Find out where the minutes go: `python3 tools/haam/haam.py ci-usage` (last 7 days, by workflow, job, trigger and day).
 

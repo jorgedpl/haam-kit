@@ -11,9 +11,8 @@ setup:  ## Install dependencies
 #   Python:  pip install -r requirements.txt -r requirements-dev.txt
 #   Laravel: composer install && npm ci
 
-hooks:  ## Turn on the shared git hooks (secret scan before every commit). Run once per clone.
-	git config core.hooksPath .githooks
-	chmod +x .githooks/* scripts/*.sh .claude/hooks/*.sh
+hooks:  ## Turn on the secret scan before every commit (keeps your own git hooks working). Run once per clone.
+	python3 tools/haam/haam.py hooks --apply
 
 dev:  ## Run the app locally (used for UAT)
 	@echo "TODO(setup): make dev"; exit 1

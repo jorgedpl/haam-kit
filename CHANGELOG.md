@@ -6,6 +6,26 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-10-19
+
+Fixes found while updating a real project from 1.2.0 to 1.7.x.
+
+### Fixed
+- **`/override` now satisfies the gate.** The skill posted `OVERRIDE (Level 1, skip UAT) by …: <reason>`, which `gates.yml` didn't accept (it wants a comment starting `OVERRIDE:`) and which didn't even start a gate run, so the gate stayed red. The skill now posts `OVERRIDE: <reason> (Level 1, skip UAT, by @user)` before adding the label; the gate also accepts a short note before the colon and starts on any comment mentioning `OVERRIDE`. A test checks the skill's comment against the gate's own pattern.
+- **`/override` works on a PR with no issue** (a kit update, a config change): `/override PR <number> "<reason>"` skips the issue comment and the follow-up issue.
+- **The AI review always leaves its comment.** The reviewer used to post the comment itself, and that could be refused (long comments), leaving "Changes requested: see PR comment" with nothing to read. The reviewer now writes `review-comment.md` and the workflow posts it with the verdict (approvals too). Changes requested with no comment is reported as an `error` (re-run), not a `failure`. The security review on the Claude plan token works the same way (`security-comment.md`). Neither session can post comments any more.
+- **`dev --apply` no longer switches off a repository's own git hooks.** `core.hooksPath` (shared by every worktree) made git ignore `.git/hooks`. If a clone has hooks of its own, the secret scan is now chained from `.git/hooks/pre-commit` instead, and a clone already switched the old way is moved over (your `.git/hooks/pre-push` and others run again). A `pre-commit` of your own is never edited: the tool prints the one line to add. New `haam.py hooks [--apply]`; `make hooks` uses it; `doctor` warns when the old setting is hiding hooks.
+- **`.mcp.json` removed by the project stays off:** the settings merge no longer switches its servers back on in `.claude/settings.json` (GitHub-tracker projects were fixed in 1.7.1).
+- **`tracker-sync` no longer starts a runner for a PR closed without merging.**
+
+### Changed
+- `max_open_prs` and `max_in_uat` default to 10 (were 5 and 3). `capacity` lists the PRs and UAT issues it counted (`--list`, and always when it holds work) and says how to make room.
+
+### Migration
+- `haam.py update`, then `make hooks` (or `haam.py dev --apply`) once per clone.
+- Your `haam.config.json` keeps the limits it already has: raise them with `haam.py config --max-open-prs 10 --max-in-uat 10`.
+- **Moving from checks-first to test-first (1.7.0):** PRs opened under checks-first (drafts, red, blocked, or waiting for UAT) still count towards `max_open_prs`. Close the ones that are stale, red or untested: in test-first, `/test` and `publish` work from the branch, so closing a PR loses nothing, and the PR opens again after your pass. `haam.py capacity --list` shows what's counted.
+
 ## [1.7.1] - 2026-10-18
 
 Two fixes reported from a project running v1.7.0.
@@ -203,7 +223,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.7.1...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.7.2...HEAD
+[1.7.2]: https://github.com/jorgedpl/haam-kit/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/jorgedpl/haam-kit/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/jorgedpl/haam-kit/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/jorgedpl/haam-kit/compare/v1.5.0...v1.6.0

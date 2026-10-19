@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.7.1 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.7.2 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 

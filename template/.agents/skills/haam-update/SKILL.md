@@ -43,4 +43,4 @@ Do each step from the CHANGELOG. Typical ones:
 ## 7. Verify and open the PR
 1. `python3 tools/haam/haam.py doctor --role admin` and `make check`.
 2. Commit (`Update HAAM to <target-version>`), including `haam.lock.json`; ask before pushing; open a PR summarising the changes and migration steps done.
-3. Remind the human to tell the other developers to pull and re-run `python3 tools/haam/haam.py dev --apply`.
+3. Remind the human to tell the other developers to pull and re-run `python3 tools/haam/haam.py dev --apply` (it turns the commit secret scan on without switching off anyone's own git hooks: if a clone has hooks of its own in `.git/hooks`, it chains the scan from there instead of setting `core.hooksPath`).

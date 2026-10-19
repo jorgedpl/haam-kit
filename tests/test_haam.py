@@ -67,6 +67,22 @@ class ToolTestCase(unittest.TestCase):
 
 
 class TestRepository(unittest.TestCase):
+    def test_override_comment_satisfies_the_gate(self):
+        """The comment /override posts must be one gates.yml accepts, and one that starts a gate run."""
+        gates = (KIT / ".github/workflows/gates.yml").read_text()
+        js = re.search(r"comments\.find\(c => /(.+?)/i\.test\(c\.body\)\)", gates).group(1)
+        accepts = re.compile(js.replace("\\/", "/"), re.I)
+        triggers = re.findall(r"contains\(github\.event\.comment\.body, '([^']+)'\)", gates)
+        skill = (KIT / ".agents/skills/override/SKILL.md").read_text()
+        body = re.search(r'gh pr comment <pr> --body "([^"]+)"', skill).group(1)
+        posted = body.replace("<reason>", "Hotfix for login outage").replace("<user>", "octocat")
+        self.assertTrue(accepts.search(posted), posted)
+        self.assertTrue(any(t.lower() in posted.lower() for t in triggers), (triggers, posted))
+        self.assertTrue(accepts.search("OVERRIDE: urgent fix"))
+        self.assertTrue(accepts.search("EMERGENCY BYPASS: CI broken"))
+        self.assertFalse(accepts.search("Please don't OVERRIDE: this"))     # must start the comment
+        self.assertFalse(accepts.search("OVERRIDE:"))                       # needs a reason
+
     def test_versions_match(self):
         tool_version = re.search(r'^VERSION = "([^"]+)"', TOOL.read_text(), re.M).group(1)
         self.assertEqual((ROOT / "VERSION").read_text().strip(), tool_version)
@@ -278,6 +294,20 @@ class TestUpdate(ToolTestCase):
         self.assertEqual(json.loads(settings.read_text())["enabledMcpjsonServers"], ["linear"])
         self.assertIn("linear", json.loads((self.proj / ".mcp.json").read_text())["mcpServers"])
 
+    def test_removed_mcp_json_is_not_switched_back_on(self):
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--tracker", "linear", "--team-key", "ACM",
+                      "--github-repo", "example-org/example-app", "--owner", "octocat", tool=self.installed_tool())
+        (self.proj / ".mcp.json").unlink()
+        settings = self.proj / ".claude/settings.json"
+        st = json.loads(settings.read_text())
+        st["enabledMcpjsonServers"] = []
+        settings.write_text(json.dumps(st))
+        new_tool = self.make_new_kit() / "tools/haam/haam.py"
+        self.run_tool("update", "--target", str(self.proj), "--apply", tool=new_tool)
+        self.assertFalse((self.proj / ".mcp.json").exists())
+        self.assertEqual(json.loads(settings.read_text())["enabledMcpjsonServers"], [])
+
     def test_switching_back_to_linear_restores_the_connection(self):
         self.install()
         tool = self.installed_tool()
@@ -332,6 +362,31 @@ class TestAgentsDoctorDev(ToolTestCase):
         hooks = subprocess.run(["git", "config", "core.hooksPath"], cwd=self.proj, capture_output=True, text=True).stdout.strip()
         self.assertEqual(hooks, ".githooks")
         self.assertTrue((self.proj / ".env").exists())
+
+    def test_dev_keeps_the_repositorys_own_git_hooks(self):
+        self.install()
+        hooks = self.proj / ".git/hooks"
+        (hooks / "pre-push").write_text("#!/bin/sh\necho own guard\n")
+        (hooks / "pre-push").chmod(0o755)
+        hooks_path = lambda: subprocess.run(["git", "config", "core.hooksPath"], cwd=self.proj, capture_output=True,
+                                            text=True).stdout.strip()
+        # Already switched on the old way: the tool moves to the chained hook so pre-push runs again
+        git(self.proj, "config", "core.hooksPath", ".githooks")
+        self.assertIn("switching off this repository's own hooks",
+                      self.run_tool("doctor", tool=self.installed_tool(), check=False).stdout)
+        self.run_tool("dev", "--apply", tool=self.installed_tool())
+        self.assertEqual(hooks_path(), "")
+        self.assertIn(".githooks/pre-commit", (hooks / "pre-commit").read_text())
+        self.assertEqual((hooks / "pre-push").read_text(), "#!/bin/sh\necho own guard\n")   # untouched
+        self.assertIn("commit secret hook on", self.run_tool("doctor", tool=self.installed_tool(), check=False).stdout)
+        # Running it again changes nothing
+        self.run_tool("hooks", "--apply", tool=self.installed_tool())
+        self.assertEqual(hooks_path(), "")
+        # The project's own pre-commit is never edited: the tool says what line to add
+        (hooks / "pre-commit").write_text("#!/bin/sh\necho own pre-commit\n")
+        out = self.run_tool("hooks", "--apply", tool=self.installed_tool()).stdout
+        self.assertIn("add this line", out)
+        self.assertEqual((hooks / "pre-commit").read_text(), "#!/bin/sh\necho own pre-commit\n")
 
     @unittest.skipUnless(shutil.which("gitleaks"), "gitleaks not installed")
     def test_commit_hook_blocks_a_key(self):
@@ -687,12 +742,14 @@ class TestGitHubProjects(ToolTestCase):
         self.setup_board()
         st = self.gh_state()
         st["prs"] = {str(k): {"title": f"PR {k}", "headRefName": f"b{k}", "state": "OPEN", "labels": [], "url": "u",
-                              "isDraft": False} for k in range(1, 6)}
+                              "isDraft": False} for k in range(1, 11)}
         self.state.write_text(json.dumps(st))
         res = json.loads(self.tool("capacity", "--json").stdout)
         self.assertTrue(res["hold"])
-        self.assertEqual(res["open_prs"], 5)
-        self.tool("config", "--max-open-prs", "10")
+        self.assertEqual(res["open_prs"], 10)
+        self.assertEqual(len(res["counted_prs"]), 10)                      # it says which PRs it counted
+        self.assertIn("PR #3: PR 3", self.tool("capacity").stdout)
+        self.tool("config", "--max-open-prs", "20")
         self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
 
     def test_manual_deploy_and_batch_pr(self):

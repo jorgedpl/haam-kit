@@ -121,7 +121,7 @@ jobs:
           mkdir -p .haam-review
           git show "origin/$BASE:.github/review/REVIEWER.md" > .haam-review/REVIEWER.md 2>/dev/null \
             || cp .github/review/REVIEWER.md .haam-review/REVIEWER.md   # first PR, before the kit is on main
-          rm -f review-verdict.txt   # only the reviewer writes the verdict, never the PR
+          rm -f review-verdict.txt review-comment.md   # only the reviewer writes these, never the PR
 
       - name: Independent review
         uses: anthropics/claude-code-action@v1
@@ -138,17 +138,26 @@ jobs:
           # TODO(setup): add --model to choose cost/quality; raise max-turns if reviews get cut short.
           claude_args: >-
             --max-turns 30
-            --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
 
-      - name: Publish verdict
+      - name: Publish the review and the verdict
         if: always()
         run: |
+          # The reviewer writes its comment to a file and this step posts it, so a verdict always comes with
+          # something to act on (posting from inside the session was being refused for long comments).
           verdict=$(tr -d '[:space:]' < review-verdict.txt 2>/dev/null || echo MISSING)
+          posted=false
+          if [ -s review-comment.md ]; then
+            gh pr comment "$PR" -R "$REPO" --body-file review-comment.md && posted=true
+          fi
           case "$verdict" in
             APPROVE)           state=success; desc="AI review approved" ;;
             CHANGES_REQUESTED) state=failure; desc="Changes requested: see PR comment (human can overrule)" ;;
             *)                 state=error;   desc="Review did not finish: re-run, or human can overrule" ;;
           esac
+          if [ "$posted" != "true" ] && [ "$state" = "failure" ]; then
+            state=error; desc="Review asked for changes but left no comment: re-run, or human can overrule"
+          fi
           gh api "repos/$REPO/statuses/$SHA" -f context=ai-review -f state="$state" -f description="$desc" >/dev/null
           echo "$verdict → $state"
 
@@ -191,7 +200,7 @@ jobs:
             git show "origin/$BASE:.github/review/$f" > ".haam-review/$f" 2>/dev/null \
               || cp ".github/review/$f" ".haam-review/$f"   # first PR, before the kit is on main
           done
-          rm -f security-findings.txt
+          rm -f security-findings.txt security-comment.md   # only the reviewer writes these, never the PR
 
       - name: Security review on the Claude plan (CLAUDE_CODE_OAUTH_TOKEN)
         id: plan
@@ -208,7 +217,7 @@ jobs:
             Its references to .github/review/REVIEWER.md mean .haam-review/REVIEWER.md.
           claude_args: >-
             --max-turns 30
-            --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
 
       - name: Publish result
         if: always()
@@ -223,6 +232,11 @@ jobs:
             else
               OUTCOME=$PLAN_OUTCOME
               FINDINGS=$(tr -cd '0-9' < security-findings.txt 2>/dev/null || true)
+              if [ -s security-comment.md ]; then
+                gh pr comment "$PR" -R "$REPO" --body-file security-comment.md || FINDINGS=""
+              elif [ -n "$FINDINGS" ] && [ "$FINDINGS" != "0" ]; then
+                FINDINGS=""   # findings with nothing to read count as a review that didn't finish
+              fi
             fi
           fi
           if [ "$OUTCOME" = "missing" ]; then

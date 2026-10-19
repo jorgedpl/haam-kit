@@ -31,7 +31,7 @@ Don't report:
 - issues in `docs/` or in test fixtures that hold only synthetic data.
 
 ## 3. Report
-1. If you found anything, post **one** PR comment with `gh pr comment <PR> --body-file <file>`:
+1. If you found anything, write your comment to the file `security-comment.md` in the workspace root, in this format. Don't post it yourself: the workflow posts it on the PR.
 
 ```
 ## 🔒 Security review: <N> finding(s)
@@ -41,7 +41,7 @@ Don't report:
 _Humans can overrule this review with the PR label `ai-review-overruled`._
 ```
 
-   If you found nothing, don't comment.
+   If you found nothing, don't write the file.
 2. Write the number of findings, digits only, to the file `security-findings.txt` in the workspace root. Write `0` if you found nothing.
 
-Never push commits, never edit code in the PR, never change labels.
+Never push commits, never edit code in the PR, never change labels. The only files you write are `security-comment.md` and `security-findings.txt`.

@@ -66,7 +66,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -94,8 +94,8 @@ DEFAULT_CONFIG = {
     "production_url": "",
     "agents": ["claude", "cursor", "codex", "grok"],
     "deploy": "github",          # github: deploy.yml runs on merge; manual: the owner deploys by hand
-    "max_open_prs": 5,           # agents hold new work when this many PRs are open (CI minutes and your review time)
-    "max_in_uat": 3,             # ...or when this many changes are waiting for the owner to test
+    "max_open_prs": 10,          # agents hold new work when this many PRs are open (CI minutes and your review time)
+    "max_in_uat": 10,            # ...or when this many changes are waiting for the owner to test
     "review": "github",          # github: AI reviews run in Actions; local: `haam.py review` on the owner's computer
     "flow": "test-first",        # test-first: the owner tests locally before any PR exists; checks-first: PR + checks, then test
     "_applied": {"team_key": PLACEHOLDER_KEY, "product_name": ""},
@@ -433,6 +433,8 @@ def make_renderer(target):
     applied_key = (tcfg or {}).get("_applied", {}).get("team_key", PLACEHOLDER_KEY)
     applied_product = (tcfg or {}).get("_applied", {}).get("product_name", "")
     github_tracker = (tcfg or {}).get("tracker") == "github"
+    # The project removed the .mcp.json the kit installed: don't switch on servers it no longer declares.
+    mcp_removed = ".mcp.json" in (load_lock(target).get("files") or {}) and not (target / ".mcp.json").exists()
 
     def render(path, rel_s):
         data = path.read_bytes()
@@ -440,6 +442,10 @@ def make_renderer(target):
             kit = without_linear(json.loads(data))
             if kit == {"mcpServers": {}}:
                 return None          # nothing left for this project: don't install the file
+            return (json.dumps(kit, indent=2) + "\n").encode()
+        if mcp_removed and rel_s == ".claude/settings.json":
+            kit = json.loads(data)
+            kit["enabledMcpjsonServers"] = []
             return (json.dumps(kit, indent=2) + "\n").encode()
         in_scope = any(rel_s == r or rel_s.startswith(r + "/") for r in RENAME_ROOTS)
         if not in_scope or path.suffix not in TEXT_SUFFIXES or (applied_key == PLACEHOLDER_KEY and not applied_product):
@@ -982,10 +988,9 @@ def cmd_agents(args):
     for rel in SKILL_LINKS:
         ensure_skill_link(root, rel, args.apply, rep)
 
-    hc, hooks_path, _ = run(["git", "config", "core.hooksPath"], cwd=root)
-    rep.add("ok" if hooks_path == ".githooks" else "warn",
-            "Git pre-commit secret hook (works for every agent that commits with git)",
-            "on" if hooks_path == ".githooks" else "off on this machine: run `make hooks`")
+    hook_on = secret_hook_on(root)
+    rep.add("ok" if hook_on else "warn", "Git pre-commit secret hook (works for every agent that commits with git)",
+            "on" if hook_on else "off on this machine: run `make hooks`")
 
     agents = cfg.get("agents") or DEFAULT_CONFIG["agents"]
     guide = "docs/setup/AGENTS-SETUP.md"
@@ -2800,20 +2805,24 @@ def cmd_capacity(args):
     """Whether agents should start new work: open PRs and changes waiting in UAT against the limits in haam.config.json."""
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
-    max_prs, max_uat = int(cfg.get("max_open_prs") or 5), int(cfg.get("max_in_uat") or 3)
+    max_prs = int(cfg.get("max_open_prs") or DEFAULT_CONFIG["max_open_prs"])
+    max_uat = int(cfg.get("max_in_uat") or DEFAULT_CONFIG["max_in_uat"])
     code, out, err = run(["gh", "pr", "list", "-R", cfg.get("github_repo") or "", "--state", "open", "--limit", "200",
-                          "--json", "number,isDraft,author"])
+                          "--json", "number,title,isDraft,author"])
     if code != 0:
         sys.exit(f"Couldn't count open pull requests: {(err or out)[:200]}")
     # Bots' PRs (Dependabot…) cost CI too, but they shouldn't stop the agents' own work.
-    open_prs = len([p for p in json.loads(out or "[]")
-                    if not ((p.get("author") or {}).get("login", "").endswith("[bot]") or (p.get("author") or {}).get("is_bot"))])
+    counted = [p for p in json.loads(out or "[]")
+               if not ((p.get("author") or {}).get("login", "").endswith("[bot]") or (p.get("author") or {}).get("is_bot"))]
+    open_prs = len(counted)
+    uat_items = []
     in_uat = args.in_uat     # Linear: the agent counts the UAT items with the Linear connection and passes them
     if in_uat is None and cfg.get("tracker") == "github":
         try:
             board = GHProject(cfg)
             board.load()
-            in_uat = len([i for i in board.items() if i["status"] == "UAT" and i["state"] == "OPEN"])
+            uat_items = [i for i in board.items() if i["status"] == "UAT" and i["state"] == "OPEN"]
+            in_uat = len(uat_items)
         except RuntimeError:
             in_uat = None
     reasons = []
@@ -2826,7 +2835,10 @@ def cmd_capacity(args):
     else:
         reasons_note = ""
     res = {"hold": bool(reasons), "open_prs": open_prs, "max_open_prs": max_prs, "in_uat": in_uat,
-           "max_in_uat": max_uat, "reasons": reasons, "note": reasons_note}
+           "max_in_uat": max_uat, "reasons": reasons, "note": reasons_note,
+           "counted_prs": [{"number": p["number"], "title": p.get("title", ""), "draft": bool(p.get("isDraft"))}
+                           for p in counted],
+           "uat_issues": [{"number": i["number"], "title": i.get("title", "")} for i in uat_items]}
     if args.json:
         print(json.dumps(res, indent=2))
         return
@@ -2836,6 +2848,15 @@ def cmd_capacity(args):
         print(f"{OK} Room for new work: {open_prs}/{max_prs} open PRs" + (f", {in_uat}/{max_uat} in UAT" if in_uat is not None else ""))
     if reasons_note:
         print(f"{INFO} {reasons_note}")
+    if args.list or reasons:
+        for p in counted:
+            print(f"   PR #{p['number']}{' (draft)' if p.get('isDraft') else ''}: {p.get('title', '')}")
+        for i in uat_items:
+            print(f"   In UAT: #{i['number']} {i.get('title', '')}")
+        if reasons:
+            print("   To make room: test and ship what's waiting (/test); close PRs that are stale, red or untested "
+                  "(test-first works from the branch, so closing loses nothing); or raise the limits: "
+                  "haam.py config --max-open-prs N --max-in-uat N")
 
 
 # ----------------------------------------------------------------------------- CI cost: usage, settings, local review
@@ -3326,7 +3347,7 @@ def cmd_worktree(args):
 
     if act == "prep":
         copied, skipped = copy_includes(main, top)
-        hooks_on = git_out(top, "config", "core.hooksPath") == ".githooks"
+        hooks_on = secret_hook_on(top)
         if args.json:
             print(json.dumps({"in_worktree": linked, "copied": copied, "skipped": skipped,
                               "secret_hook_on": hooks_on}, indent=2))
@@ -3461,6 +3482,90 @@ def cmd_invite(args):
 
 # ----------------------------------------------------------------------------- dev
 
+HOOK_MARK = "HAAM secret hook"
+CHAINED_HOOK = f"""#!/usr/bin/env bash
+# {HOOK_MARK}: runs the shared secret scan (.githooks/pre-commit) when this branch has it.
+# Installed by `haam.py hooks --apply` instead of core.hooksPath, so this repository's other hooks keep working.
+top=$(git rev-parse --show-toplevel)
+if [ -x "$top/.githooks/pre-commit" ]; then "$top/.githooks/pre-commit" || exit $?; fi
+"""
+CHAIN_LINE = '[ -x "$(git rev-parse --show-toplevel)/.githooks/pre-commit" ] && { "$(git rev-parse --show-toplevel)/.githooks/pre-commit" || exit $?; }'
+
+
+def git_hooks_dir(root):
+    common = git_out(root, "rev-parse", "--git-common-dir") or ".git"
+    return (Path(root) / common).resolve() / "hooks"
+
+
+def own_git_hooks(root):
+    """This repository's own hooks in .git/hooks (not git's samples, not ours). core.hooksPath would switch them off."""
+    d = git_hooks_dir(root)
+    if not d.is_dir():
+        return []
+    return sorted(f.name for f in d.iterdir() if f.is_file() and not f.name.endswith(".sample")
+                  and HOOK_MARK not in f.read_text(errors="ignore"))
+
+
+def secret_hook_on(root):
+    if git_out(root, "config", "core.hooksPath") == ".githooks":
+        return True
+    pc = git_hooks_dir(root) / "pre-commit"
+    return pc.is_file() and os.access(pc, os.X_OK) and ".githooks/pre-commit" in pc.read_text(errors="ignore")
+
+
+def setup_secret_hook(root, apply, rep):
+    """Turn on the commit secret scan without switching off the repository's own git hooks: core.hooksPath when
+    .git/hooks holds nothing of its own, otherwise a small pre-commit in .git/hooks that calls .githooks/pre-commit."""
+    hp = git_out(root, "config", "core.hooksPath")
+    mine = own_git_hooks(root)
+    if hp and hp != ".githooks":
+        rep.add("ok" if secret_hook_on(root) else "warn", f"Git hooks are managed elsewhere (core.hooksPath = {hp})",
+                f"add the secret scan to that hook manager's pre-commit: {CHAIN_LINE}")
+        return
+    if hp == ".githooks" and not mine:
+        rep.add("ok", "Secret-scan commit hook on")
+        return
+    if hp == ".githooks":
+        rep.add("warn", "core.hooksPath = .githooks is switching off this repository's own hooks: " + ", ".join(mine),
+                "will chain the secret scan instead, so they run again" if not apply else "")
+        if apply:
+            run(["git", "config", "--unset", "core.hooksPath"], cwd=root)
+    pc = git_hooks_dir(root) / "pre-commit"
+    if pc.is_file() and HOOK_MARK not in pc.read_text(errors="ignore"):
+        if ".githooks/pre-commit" in pc.read_text(errors="ignore"):
+            rep.add("ok", "Secret-scan commit hook on (called from your own pre-commit)")
+        else:
+            rep.add("warn", "You have your own .git/hooks/pre-commit, so the secret scan isn't on",
+                    f"add this line to it (it's yours, so the kit doesn't edit it): {CHAIN_LINE}")
+        return
+    if not apply:
+        if not secret_hook_on(root):
+            rep.add("warn", "Secret-scan commit hook off",
+                    "will turn on" + (" (chained: your own hooks keep working)" if mine else " (git config core.hooksPath .githooks)"))
+        return
+    if mine or hp == ".githooks":
+        pc.parent.mkdir(parents=True, exist_ok=True)
+        pc.write_text(CHAINED_HOOK)
+        pc.chmod(0o755)
+        rep.add("ok", "Secret-scan commit hook turned on", "chained from .git/hooks/pre-commit; your own hooks keep working")
+    else:
+        c2, _, e2 = run(["git", "config", "core.hooksPath", ".githooks"], cwd=root)
+        rep.add("ok" if c2 == 0 else "fail", "Secret-scan commit hook turned on" if c2 == 0 else "Couldn't set the hook", e2[:160])
+    for f in list((root / ".githooks").glob("*")) + list((root / "scripts").glob("*.sh")) + \
+            list((root / ".claude/hooks").glob("*.sh")):
+        f.chmod(f.stat().st_mode | 0o111)
+
+
+def cmd_hooks(args):
+    root = find_repo_root(Path.cwd())
+    rep = Report()
+    rep.section("Git hooks on this machine")
+    setup_secret_hook(root, args.apply, rep)
+    if not args.apply:
+        rep.add("info", "Plan only. Re-run with --apply to make changes")
+    rep.print(args.json)
+
+
 def cmd_dev(args):
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
@@ -3488,17 +3593,8 @@ def cmd_dev(args):
     rep.add("info", "Agent tools found: " + (", ".join(found) if found else "none on PATH (IDE apps may still be installed)"))
 
     rep.section("This copy of the repository")
-    _, hooks_path, _ = run(["git", "config", "core.hooksPath"], cwd=root)
-    if hooks_path == ".githooks":
-        rep.add("ok", "Secret-scan commit hook on")
-    elif args.apply and (root / ".githooks/pre-commit").exists():
-        c2, _, e2 = run(["git", "config", "core.hooksPath", ".githooks"], cwd=root)
-        for f in list((root / ".githooks").glob("*")) + list((root / "scripts").glob("*.sh")) + \
-                list((root / ".claude/hooks").glob("*.sh")):
-            f.chmod(f.stat().st_mode | 0o111)
-        rep.add("ok" if c2 == 0 else "fail", "Secret-scan commit hook turned on" if c2 == 0 else "Couldn't set the hook", e2[:160])
-    else:
-        rep.add("warn", "Secret-scan commit hook off", "will turn on (git config core.hooksPath .githooks)")
+    if (root / ".githooks/pre-commit").exists():
+        setup_secret_hook(root, args.apply, rep)
 
     env, example = root / ".env", root / ".env.example"
     if env.exists():
@@ -3613,8 +3709,11 @@ def cmd_doctor(args):
     rep.section("This machine")
     for b in ("git", "gh", "make", "gitleaks"):
         rep.add("ok" if have(b) else "fail", b)
-    _, hp, _ = run(["git", "config", "core.hooksPath"], cwd=root)
-    rep.add("ok" if hp == ".githooks" else "warn", "commit secret hook " + ("on" if hp == ".githooks" else "off"))
+    hook_on = secret_hook_on(root)
+    rep.add("ok" if hook_on else "warn", "commit secret hook " + ("on" if hook_on else "off"))
+    if git_out(root, "config", "core.hooksPath") == ".githooks" and own_git_hooks(root):
+        rep.add("warn", "core.hooksPath = .githooks is switching off this repository's own hooks: "
+                + ", ".join(own_git_hooks(root)), "python3 tools/haam/haam.py hooks --apply chains the scan instead")
     for rel in SKILL_LINKS:
         rep.add("ok" if (root / rel).exists() else "warn", rel)
 
@@ -3731,8 +3830,8 @@ def main():
     p.add_argument("--project-owner", help="GitHub user/org that owns the board (default: repo owner)")
     p.add_argument("--deploy", help="github (deploy.yml on merge, default) or manual (you deploy by hand)")
     p.add_argument("--flow", help="test-first (default: owner tests before the PR) or checks-first")
-    p.add_argument("--max-open-prs", type=int, help="agents hold new work at this many open PRs (default 5)")
-    p.add_argument("--max-in-uat", type=int, help="...or at this many changes waiting for you to test (default 3)")
+    p.add_argument("--max-open-prs", type=int, help="agents hold new work at this many open PRs (default 10)")
+    p.add_argument("--max-in-uat", type=int, help="...or at this many changes waiting for you to test (default 10)")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_config)
 
@@ -3813,8 +3912,13 @@ def main():
     p.add_argument("--no-deploy", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_ship)
 
+    p = common(sub.add_parser("hooks", help="turn on the commit secret scan without switching off your own git hooks"))
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_hooks)
+
     p = common(sub.add_parser("capacity", help="should agents start new work? open PRs and UAT queue vs limits"))
     p.add_argument("--in-uat", type=int, help="Linear: how many issues are in UAT (counted with the Linear connection)")
+    p.add_argument("--list", action="store_true", help="list the PRs and issues it counted")
     p.set_defaults(func=cmd_capacity)
 
     p = common(sub.add_parser("ci-usage", help="where the GitHub Actions minutes went"))

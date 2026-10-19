@@ -103,10 +103,10 @@ Sometimes production is on fire or a deadline won't wait. Overrides exist for th
 ### Level 1: skip UAT (most common)
 Use when the fix is urgent and verified by tests but there's no time for a full UAT cycle.
 
-1. Human runs `/override <ID> "<reason>"`, or manually adds the PR label `gate-override` and comments `OVERRIDE: <reason>` on the PR.
+1. Human runs `/override <ID> "<reason>"` (for a PR with no issue: `/override PR <number> "<reason>"`), or manually comments `OVERRIDE: <reason>` on the PR (the comment must start with `OVERRIDE:`) and adds the PR label `gate-override`.
 2. The `release-gate` check passes on the override label.
 3. CI (`ci` check) **still must pass**.
-4. The agent automatically creates a follow-up issue in the tracker: `Post-override UAT for <ID>` (priority High, label `stream:bug`, `override-followup`), so the skipped verification still happens after the fact.
+4. When the PR has an issue, the agent creates a follow-up issue in the tracker: `Post-override UAT for <ID>` (priority High, label `stream:bug`, `override-followup`), so the skipped verification still happens after the fact.
 
 ### Level 2: emergency bypass (rare)
 Use only when CI itself is broken or blocking a production fix.

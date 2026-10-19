@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Git pre-commit hook for humans (agents are covered by the Claude Code hook too).
-# Enable once per clone with:  make hooks   (runs: git config core.hooksPath .githooks)
+# Enable once per clone with:  make hooks   (haam.py hooks --apply: core.hooksPath, or chained from .git/hooks if you have your own hooks)
 "$(git rev-parse --show-toplevel)/scripts/scan-secrets.sh"
 rc=$?
 if [ "$rc" = "3" ]; then

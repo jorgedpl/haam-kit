@@ -20,7 +20,10 @@ env:
 jobs:
   secrets:
     name: secrets
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    # Always on PRs, whatever the settings: it's fast, and a leaked key can't be taken back.
+    if: >-
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+      (github.event_name == 'schedule' && vars.HAAM_NIGHTLY != 'off') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
@@ -62,7 +65,12 @@ jobs:
 
   dependencies:
     name: dependencies
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    # Follows the CI setting on PRs (local: the owner's `haam.py local-ci`; off: not run) and HAAM_NIGHTLY at night.
+    if: >-
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+        vars.HAAM_CI != 'local' && vars.HAAM_CI != 'off') ||
+      (github.event_name == 'schedule' && vars.HAAM_NIGHTLY != 'off') ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:

@@ -45,7 +45,7 @@ jobs:
     # overrule label (and, when reviews run locally, the human-review label, which brings them back here).
     if: >-
       (github.event.action != 'labeled' || github.event.label.name == 'ai-review-overruled' ||
-       (vars.HAAM_REVIEW == 'local' && github.event.label.name == 'human-review')) &&
+       ((vars.HAAM_REVIEW == 'local' || vars.HAAM_REVIEW == 'protected-only') && github.event.label.name == 'human-review')) &&
       (github.event.action == 'labeled' || !github.event.pull_request.draft)
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 5
@@ -58,6 +58,7 @@ jobs:
           REVIEW_MODE: ${{ vars.HAAM_REVIEW }}
           LABEL: ${{ github.event.label.name }}
           DRAFT: ${{ github.event.pull_request.draft }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           status() {  # context state description
             gh api "repos/$REPO/statuses/$SHA" -f context="$1" -f state="$2" -f description="$3" >/dev/null
@@ -91,6 +92,40 @@ jobs:
           if [ "$docs_only" = "true" ]; then
             both success "Docs-only change: no code review needed"
             echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # The project's settings (repository variable HAAM_REVIEW, from `haam.py settings`):
+          #   off            - no AI reviews at all
+          #   protected-only - only PRs that change a protected area are reviewed. Decided from the PR's files
+          #                    and the protected_paths on the base branch (with the base branch's own haam.py),
+          #                    not from a label, so the review can't be skipped before the gate labels the PR.
+          if [ "$REVIEW_MODE" = "off" ]; then
+            both success "Not needed: AI reviews are off in this project's settings"
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$REVIEW_MODE" = "protected-only" ] && ! echo "$labels" | grep -qx "human-review"; then
+            tmp="$RUNNER_TEMP/haam-scope"; mkdir -p "$tmp"
+            gh api "repos/$REPO/contents/tools/haam/haam.py?ref=$BASE_REF" --jq .content | base64 -d > "$tmp/haam_base.py" || true
+            gh api "repos/$REPO/contents/haam.config.json?ref=$BASE_REF" --jq .content | base64 -d > "$tmp/config.json" || true
+            gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)' > "$tmp/files"
+            touched=$(python3 - "$tmp" <<'PY' || echo unknown
+          import importlib.util, json, sys, pathlib
+          d = pathlib.Path(sys.argv[1])
+          spec = importlib.util.spec_from_file_location("haam_base", d / "haam_base.py")
+          mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+          try:
+              pats = json.loads((d / "config.json").read_text()).get("protected_paths")
+          except Exception:
+              pats = None
+          files = (d / "files").read_text().split()
+          hits = mod.protected_matches(pats or mod.DEFAULT_CONFIG["protected_paths"], files)
+          print(len(hits) if len(files) < 3000 else "unknown")
+          PY
+          )
+            if [ "$touched" = "0" ]; then
+              both success "Not needed: only protected areas get AI reviews in this project's settings"
+              echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
           fi
 
           # Reviews on the owner's computer (repository variable HAAM_REVIEW=local): wait for `haam.py review`,

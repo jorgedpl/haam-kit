@@ -6,6 +6,35 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-19
+
+The product owner decides how HAAM runs.
+
+### Added
+- **`/haam-settings`** (human-only). It walks the owner through every setting: what it does, each option's trade-off, a recommendation based on the project's own numbers (Actions minutes, the UAT queue), and combinations that undo each other's safety. It applies what they choose and syncs GitHub.
+- **`haam.py settings`**: `[--explain]` shows the settings, `--set key=value` changes one (validated, saved in `haam.config.json`), and `--apply` syncs GitHub: repository variables, required checks, production approval. `ci-settings` still works and maps onto it.
+- New settings, defaults first:
+  - **`ci`**:
+    - `every-pr`;
+    - `local`: `make check` (and `make audit`) on the owner's computer on a clean copy of the PR's commit, posted as `ci-local`, which becomes the required check. `ship` runs it automatically. New `haam.py local-ci`.
+    - `off`: the secret scan still runs on every PR.
+  - **`nightly`**: `on` | `off` (the full check and dependency audit on main).
+  - **`review`**: `github` | `local` | `protected-only` (only PRs changing protected areas get the AI reviews, decided from the files and the base branch's `protected_paths`) | `off`.
+  - **`uat`**: `owner-decides` (the `uat:skip` lane) | `always` (no lane) | `bugs-skip` (bugs take the lane; protected areas never do).
+  - **`grouping`**:
+    - `per-issue`;
+    - `per-epic`: agents always batch an epic's items;
+    - `release`: no PR per change. `publish` records the owner's pass. `ship --all` (or `ship <IDs>`) merges every passed change into one fresh branch from main and opens one release PR. Each change's tested commit is listed in the release PR; changes that conflict or moved after their test are left out with a reason. The checks and AI reviews run once, then it merges, deploys once, closes every issue and deletes the merged branches.
+  - **`deploy_approval`**: `each` | `automatic` (deploys start on merge: the production environment has no required reviewer).
+  - **`runner`**: `github` | `self-hosted` (now stored in the config too).
+  - **`worktree_cleanup`**: `after-ship` (each ship tidies agents' worktrees that are merged or abandoned with nothing unsaved) | `manual`.
+  - Limits: **`max_review_rounds`** (2) and **`max_pr_lines`** (400) join `max_open_prs` and `max_in_uat`. Agents follow them (`AGENTS.md`, `/build`).
+- No auto-merge in the no-UAT lane with `ci: local`. The owner's `ship` runs the check, then merges.
+
+### Migration
+- `haam.py update`, then merge the updated workflows (`ci.yml`, `security.yml`, `review.yml`, `gates.yml`).
+- Nothing changes until you choose: the defaults are today's behaviour, except `worktree_cleanup`, which is now `after-ship`. Type `/haam-settings` to go through them.
+
 ## [1.8.1] - 2026-10-19
 
 Two fixes found while updating a real project to 1.8.0.
@@ -274,7 +303,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/jorgedpl/haam-kit/compare/v1.8.1...v1.9.0
 [1.8.1]: https://github.com/jorgedpl/haam-kit/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/jorgedpl/haam-kit/compare/v1.7.2...v1.8.0
 [1.7.2]: https://github.com/jorgedpl/haam-kit/compare/v1.7.1...v1.7.2

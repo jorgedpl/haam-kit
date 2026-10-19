@@ -20,7 +20,7 @@ If the item you pick will change files (build, spec, assessment), you need your 
 
 GitHub Projects: `python3 tools/haam/haam.py issue list --status Ready --unassigned --open-only` (and `--status Backlog`, `--status Triage` for steps 4–5). Linear: list the team's issues.
 
-Take the first match, in this order. **Batch an epic's items:** when two or more Ready items of the same epic share a priority (bugs, and small features (XS/S) with approved specs), offer them as one item (one branch, one PR; see `/build`). One PR instead of several means one CI run and one review instead of several, and the human tests them together.
+Take the first match, in this order. **Batch an epic's items** (always when the setting `grouping` is `per-epic`; otherwise when it helps): when two or more Ready items of the same epic share a priority (bugs, and small features (XS/S) with approved specs), offer them as one item (one branch, one PR; see `/build`). One PR instead of several means one CI run and one review instead of several, and the human tests them together.
 
 0. **Rework**: status `Ready` with label `uat-failed` (the human tested it and found problems): always first.
 1. **Bugs**: label `stream:bug`, status `Ready`, priority Urgent or High.

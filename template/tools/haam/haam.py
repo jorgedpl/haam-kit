@@ -67,7 +67,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.8.1"
+VERSION = "1.9.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -97,8 +97,17 @@ DEFAULT_CONFIG = {
     "deploy": "github",          # github: deploy.yml runs on merge; manual: the owner deploys by hand
     "max_open_prs": 10,          # agents hold new work when this many PRs are open (CI minutes and your review time)
     "max_in_uat": 10,            # ...or when this many changes are waiting for the owner to test
-    "review": "github",          # github: AI reviews run in Actions; local: `haam.py review` on the owner's computer
+    "review": "github",          # github | local | protected-only | off  (see SETTINGS below and `haam.py settings`)
     "flow": "test-first",        # test-first: the owner tests locally before any PR exists; checks-first: PR + checks, then test
+    "grouping": "per-issue",     # per-issue | per-epic | release
+    "ci": "every-pr",            # every-pr | local | off
+    "nightly": "on",             # on | off: the full check and dependency audit on main every night
+    "uat": "owner-decides",      # owner-decides | always | bugs-skip
+    "deploy_approval": "each",   # each: you approve every production deploy; automatic: deploys start on merge
+    "runner": "github",          # github | self-hosted
+    "worktree_cleanup": "after-ship",  # after-ship | manual
+    "max_review_rounds": 2,      # failing AI review rounds before an agent hands over to the human
+    "max_pr_lines": 400,         # target size of one PR (changed lines)
     # Protected areas (AGENTS.md §4) as path patterns: the gate never lets these through the no-UAT lane and labels the
     # PR human-review. ** = any folders, * = within one folder. Add the project's own (auth, payments, migrations…).
     "protected_paths": ["AGENTS.md", "CLAUDE.md", ".agents/**", ".claude/**", ".cursor/**", ".codex/**", ".grok/**",
@@ -108,6 +117,83 @@ DEFAULT_CONFIG = {
 }
 
 REQUIRED_CHECKS = ["ci", "secrets", "dependencies", "ai-review", "security-review", "release-gate"]
+
+
+def required_checks(cfg):
+    """The checks the branch rules require, given the project's settings."""
+    ci = cfg.get("ci") or "every-pr"
+    checks = list(REQUIRED_CHECKS)
+    if ci == "local":
+        checks[0] = "ci-local"          # posted by `haam.py local-ci` on the owner's computer
+    elif ci == "off":
+        checks.remove("ci")
+    return checks
+
+
+# The owner's choices: what each setting does, its options and the trade-off. `haam.py settings` shows them,
+# /haam-settings walks through them, `settings --set key=value` changes one, `settings --apply` syncs GitHub.
+SETTINGS = [
+    ("Testing", "flow", ["test-first", "checks-first"], "When you test a change.", {
+        "test-first": "You test the agent's branch before any PR exists; the PR and its checks come after your pass, "
+                      "once. Fewest Actions minutes. (Recommended)",
+        "checks-first": "PR and checks first, then your test. You only test code that already passed the checks, "
+                        "but every rework round runs the checks again."}),
+    ("Testing", "uat", ["owner-decides", "always", "bugs-skip"], "Which changes you test yourself.", {
+        "owner-decides": "You test everything, except issues you mark uat:skip (config, dependency bumps, invisible "
+                         "refactors): those merge once the checks and reviews pass. (Recommended)",
+        "always": "You test every change. Most control, most of your time.",
+        "bugs-skip": "Bugs merge once the checks and reviews pass, without your test; features still come to you. "
+                     "Protected areas always need you. Fast for bug fixes, but agents also file bugs, so you rely on "
+                     "the tests and the reviews to catch a wrong fix."}),
+    ("Grouping", "grouping", ["per-issue", "per-epic", "release"], "How changes become pull requests.", {
+        "per-issue": "One PR per issue: easy to follow and to revert. The checks run once per issue. (Recommended "
+                     "to start)",
+        "per-epic": "Agents batch an epic's small items into one branch and one PR: fewer PRs and check runs, but "
+                    "a problem in one item holds back the rest.",
+        "release": "No PR per change. After your pass, ship --all combines everything you passed into one release "
+                   "PR: the checks and the AI reviews run once per release. Fewest Actions minutes; but a bigger "
+                   "diff to review, and a failing release check needs sorting out before anything ships."}),
+    ("Checks", "ci", ["every-pr", "local", "off"], "Where `make check` (lint, types, tests, build) runs for a PR.", {
+        "every-pr": "On GitHub for every PR (once, when it's ready). Tamper-proof. (Recommended)",
+        "local": "On your computer: `haam.py local-ci` runs it on a clean copy of the PR's commit and posts the "
+                 "result. No Actions minutes; but not tamper-proof (anything using your login could post a pass), "
+                 "and your machine must be able to build everything.",
+        "off": "No check on PRs: you rely on the agents running make check before handing over, and on your test. "
+               "Cheapest; risky for anything but a solo prototype. (Secret scanning still runs.)"}),
+    ("Checks", "nightly", ["on", "off"], "A full check and dependency audit on main every night.", {
+        "on": "Catches what PRs skipped (e.g. only the changed packages were tested) and new vulnerabilities. "
+              "About one run a day. (Recommended)",
+        "off": "Saves those minutes; you find out about breakage and vulnerabilities later."}),
+    ("Checks", "review", ["github", "local", "protected-only", "off"], "Where the two AI reviews run.", {
+        "github": "In GitHub Actions, by a Claude that never saw the code being written. Tamper-proof. "
+                  "(Recommended)",
+        "local": "On your computer (`haam.py review`), using your Claude plan instead of Actions minutes. Not "
+                 "tamper-proof; protected areas are still reviewed on GitHub.",
+        "protected-only": "Only PRs that touch protected areas get the AI reviews (on GitHub); the rest rely on "
+                          "the checks and your test. Saves most review minutes and tokens.",
+        "off": "No AI reviews: you review the code yourself, or nobody does."}),
+    ("Checks", "runner", ["github", "self-hosted"], "Whose machines run the jobs.", {
+        "github": "GitHub's runners: nothing to maintain. (Recommended)",
+        "self-hosted": "Your own machine (private repositories only): no Actions minutes, but it must be on and "
+                       "kept up to date."}),
+    ("Shipping", "deploy", ["github", "manual"], "How production is deployed.", {
+        "github": "deploy.yml deploys when a PR merges. (Recommended)",
+        "manual": "You deploy by hand (or another platform does); ship merges and then waits for you to say live."}),
+    ("Shipping", "deploy_approval", ["each", "automatic"], "Whether a deploy waits for your approval.", {
+        "each": "Every deploy waits for you (ship approves it when you say ship; one approval covers everything "
+                "merged before it). (Recommended)",
+        "automatic": "Deploys start as soon as a PR merges: fastest, but a merged change goes live without a last "
+                     "look. Best with uat: always."}),
+    ("Limits", "max_open_prs", int, "Agents hold new work at this many open PRs.", {}),
+    ("Limits", "max_in_uat", int, "...or at this many changes waiting for your test.", {}),
+    ("Limits", "max_review_rounds", int, "Failing AI review rounds before an agent stops and hands over to you.", {}),
+    ("Limits", "max_pr_lines", int, "Target size of one PR, in changed lines (bigger PRs are split).", {}),
+    ("Housekeeping", "worktree_cleanup", ["after-ship", "manual"], "Tidying agents' worktrees (about 1-2 GB each).", {
+        "after-ship": "After each ship, worktrees whose work is merged or abandoned (and that have nothing "
+                      "unsaved) are removed. (Recommended)",
+        "manual": "You run haam.py worktree clean yourself."}),
+]
+SETTING_KEYS = {k: (g, opts, what, helps) for g, k, opts, what, helps in SETTINGS}
 
 GITHUB_LABELS = [
     ("uat-passed", "0E8A16", "Gate G4 passed: human UAT OK"),
@@ -1126,7 +1212,7 @@ def ruleset_body(cfg):
             {"type": "required_status_checks", "parameters": {
                 # Off: "must be up to date before merging" re-runs CI on every open PR after each merge.
                 "strict_required_status_checks_policy": False,
-                "required_status_checks": [{"context": c_} for c_ in REQUIRED_CHECKS],
+                "required_status_checks": [{"context": c_} for c_ in required_checks(cfg)],
             }},
         ],
     }
@@ -1260,7 +1346,7 @@ def cmd_github(args):
         else:
             rep.add("ok" if current else "warn", "Ruleset 'HAAM main protection'",
                     "exists: --reset replaces it with HAAM defaults" if current else "will create")
-    rep.add("info", "Required checks: " + ", ".join(REQUIRED_CHECKS))
+    rep.add("info", "Required checks: " + ", ".join(required_checks(cfg)))
     rep.add("info", "Admins can bypass only when merging a pull request (Level 2 emergency override), never by pushing to main")
 
     # Production environment
@@ -1275,7 +1361,7 @@ def cmd_github(args):
         exists = code == 0
         if apply:
             reviewers = []
-            for a in approvers:
+            for a in (approvers if setting_value(cfg, "deploy_approval") != "automatic" else []):
                 c3, uid, _ = run(["gh", "api", f"users/{a}", "--jq", ".id"])
                 if c3 == 0 and uid:
                     reviewers.append({"type": "User", "id": int(uid)})
@@ -1285,7 +1371,9 @@ def cmd_github(args):
                         "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
             c2, _, e2 = gh_api("PUT", f"repos/{repo}/environments/production", env_body)
             if c2 == 0:
-                rep.add("ok", "Environment 'production' with required approval", ", ".join(approvers))
+                rep.add("ok", "Environment 'production' with required approval" if reviewers else
+                        "Environment 'production': deploys start on merge (deploy_approval: automatic)",
+                        ", ".join(approvers) if reviewers else "")
                 c4, _, e4 = gh_api("POST", f"repos/{repo}/environments/production/deployment-branch-policies",
                                    {"name": cfg.get("default_branch", "main"), "type": "branch"})
                 rep.add("ok" if c4 == 0 or "already" in (e4 or "").lower() else "warn",
@@ -2448,11 +2536,16 @@ def tracker_issues(cfg, ref, branch, also):
     return issues
 
 
-def uat_status_ok(repo, sha):
-    """Whether the owner's pass is recorded on this exact commit (the `uat` commit status `publish` posts)."""
+def status_ok(repo, sha, context):
+    """Whether this commit's latest `context` status is a success."""
     code, data, _ = gh_api("GET", f"repos/{repo}/commits/{sha}/status?per_page=100")   # latest per context
     return code == 0 and isinstance(data, dict) and any(
-        s.get("context") == "uat" and s.get("state") == "success" for s in data.get("statuses") or [])
+        s.get("context") == context and s.get("state") == "success" for s in data.get("statuses") or [])
+
+
+def uat_status_ok(repo, sha):
+    """Whether the owner's pass is recorded on this exact commit (the `uat` commit status `publish` posts)."""
+    return status_ok(repo, sha, "uat")
 
 
 def cmd_publish(args):
@@ -2504,6 +2597,31 @@ def cmd_publish(args):
         if any("human-review" in board.issue(n)["labels"] for n in issues) and "human-review" not in labels:
             labels.append("human-review")
     title = title or re.sub(r"^(?:[^/]+/)?(?:\d+|[a-z]{2,5}-\d+)-", "", branch.lower()).replace("-", " ")
+    if not pr and setting_value(cfg, "grouping") == "release":
+        # Release grouping: no PR per change. The pass is recorded; ship --all puts every passed change into one
+        # release PR, so the checks and the AI reviews run once per release.
+        f = tested_file(root)
+        data = json.loads(f.read_text()) if f.exists() else {}
+        data.setdefault("passed", {})[show_ref(ref)] = {"sha": sha, "branch": branch, "title": title,
+                                                         "issues": [show_ref(n) for n in issues], "by": who, "on": when}
+        f.write_text(json.dumps(data, indent=2) + "\n")
+        steps = []
+        for n in issues:
+            msg = f"✅ Tested and passed by @{who} at `{sha[:8]}`. It goes out with the next release (`ship --all`)."
+            if board:
+                board.set_option(board.issue(n), "Status", "In Review")
+                run(["gh", "issue", "comment", str(n), "-R", repo, "--body", msg])
+            else:
+                steps.append(f"{show_ref(n)}: status In Review; comment \"{msg}\"")
+        if args.json:
+            print(json.dumps({"issue": show_ref(ref), "issues": [show_ref(n) for n in issues], "branch": branch,
+                              "commit": sha, "pr_url": None, "release": True, "tracker_steps": steps}, indent=2))
+            return
+        print(f"{OK} Passed {', '.join(show_ref(n) for n in issues)} at {sha[:8]}: it goes out with the next release.")
+        for st_ in steps:
+            print(f"   Linear (do it with the Linear connection): {st_}")
+        print("   When you're ready: python3 tools/haam/haam.py ship --all --human (one release PR, one deploy)")
+        return
     if pr:
         num = str(pr["number"])
         run(["gh", "pr", "edit", num, "-R", repo] + sum((["--add-label", l] for l in labels), []))
@@ -2756,10 +2874,130 @@ def ship_candidates(cfg, repo):
     return refs
 
 
+def tidy_worktrees(root, cfg, say):
+    """worktree_cleanup = after-ship: remove agents' worktrees whose work is merged or abandoned (nothing unsaved)."""
+    if setting_value(cfg, "worktree_cleanup") != "after-ship":
+        return
+    c, o, _ = run([sys.executable, str(Path(__file__).resolve()), "worktree", "clean", "--apply"], cwd=root)
+    last = [l for l in (o or "").splitlines() if l.strip()]
+    if c == 0 and last:
+        say(f"{INFO} Worktrees tidied: {last[-1].strip()}")
+
+
+def ship_release(args, root, cfg):
+    """grouping = release: everything the owner passed goes into ONE release PR (merged together on a fresh branch
+    from main), which gets the checks and the AI reviews once, then merges and deploys once."""
+    repo = cfg["github_repo"]
+    me = [sys.executable, str(Path(__file__).resolve())]
+    tf = tested_file(root)
+    data = json.loads(tf.read_text()) if tf.exists() else {}
+    passed = data.get("passed") or {}
+
+    def out(state, code, message, **extra):
+        if args.json:
+            print(json.dumps({"ok": code == 0, "state": state, "message": message, **extra}, indent=2))
+        else:
+            print(message, flush=True)
+        sys.exit(code)
+
+    # A release PR that's already open (an earlier run is waiting for its checks): carry on with it.
+    c, o, _ = run(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "50", "--json", "number,headRefName,title"])
+    open_rel = [p for p in (json.loads(o or "[]") if c == 0 else []) if (p.get("headRefName") or "").startswith("release/")]
+    if not open_rel:
+        wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
+        items = [(k, v) for k, v in sorted(passed.items()) if not wanted or k in wanted]
+        if not items:
+            out("nothing to ship", 0, "Nothing has passed since the last release.")
+        run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+        base = cfg.get("default_branch") or "main"
+        _, main, _ = git_paths(root)
+        wt = main / ".haam" / "release-build"
+        run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+        code, _, err = run(["git", "worktree", "add", "--detach", str(wt), f"origin/{base}"], cwd=root)
+        if code != 0:
+            out("stopped", 1, f"Couldn't prepare the release: {err[:200]}")
+        included, skipped = [], []
+        try:
+            for key, v in items:
+                tip = git_out(root, "rev-parse", "--verify", "--quiet", f"origin/{v['branch']}")
+                if tip and tip != v["sha"]:
+                    skipped.append(f"{key}: changed after your test ({v['sha'][:8]} → {tip[:8]}): test it again")
+                    continue
+                c2, _, e2 = run(["git", "merge", "--no-ff", "--no-edit", "-m", f"{' '.join(v['issues'])}: {v['title']}",
+                                 v["sha"]], cwd=wt)
+                if c2 != 0:
+                    run(["git", "merge", "--abort"], cwd=wt)
+                    skipped.append(f"{key}: conflicts with the rest of the release: send it back to an agent to "
+                                   "rebase on main, then test it again")
+                    continue
+                included.append((key, v))
+            if not included:
+                out("stopped", 1, "Nothing could go into the release. " + " ".join(skipped))
+            head = git_out(wt, "rev-parse", "HEAD")
+            name = f"release/{time.strftime('%Y%m%d-%H%M')}"
+            c3, _, e3 = run(["git", "push", "--quiet", "origin", f"HEAD:refs/heads/{name}"], cwd=wt)
+            if c3 != 0:
+                out("stopped", 1, f"Couldn't push the release branch: {e3[:200]}")
+        finally:
+            run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+        ids = []
+        for _, v in included:
+            ids += [i for i in v["issues"] if i not in ids]
+        who = gh_login() or "the owner"
+        gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "success", "context": "uat",
+               "description": f"Release of changes each passed by @{who}"[:140]})
+        body = ("\n".join(f"Refs {i}" for i in ids) + "\n\n## Release\nEach change was tested and passed on its own "
+                "before going in (HAAM release grouping); the checks and the AI reviews run once, on the whole "
+                "release.\n\n| Change | Tested commit | Passed by |\n|---|---|---|\n"
+                + "".join(f"| {' '.join(v['issues'])}: {v['title']} | `{v['sha'][:8]}` | @{v['by']} on {v['on']} |\n"
+                          for _, v in included))
+        f = main / ".haam" / "pr-release.md"
+        f.write_text(body)
+        c4, o4, e4 = run(["gh", "pr", "create", "-R", repo, "--head", name, "--base", base, "--title",
+                          f"{' '.join(ids)}: Release {time.strftime('%Y-%m-%d')}", "--body-file", str(f),
+                          "--label", "uat-passed"])
+        f.unlink()
+        if c4 != 0:
+            out("stopped", 1, f"Couldn't open the release PR: {(e4 or o4)[:200]}")
+        lead = ids[0]
+        data = json.loads(tf.read_text()) if tf.exists() else {}
+        data[lead] = head                                 # ship merges exactly this combination
+        data.setdefault("branches", {})[lead] = name
+        data["release"] = {"branch": name, "issues": ids, "included": [k for k, _ in included],
+                           "branches": [v["branch"] for _, v in included]}
+        tf.write_text(json.dumps(data, indent=2) + "\n")
+        if not args.json:
+            print(f"{OK} Release PR opened with {', '.join(ids)}: {o4.strip().splitlines()[-1] if o4 else ''}", flush=True)
+            for sk in skipped:
+                print(f"{WARN} Not in this release: {sk}", flush=True)
+    else:
+        lead = pr_title_issues(open_rel[0])[0] if pr_title_issues(open_rel[0]) else None
+        if lead is None:
+            out("stopped", 1, f"The open release PR #{open_rel[0]['number']} names no issue in its title.")
+        lead = show_ref(lead)
+    c5, o5, e5 = run(me + ["ship", lead.lstrip("#") if lead.startswith("#") else lead, "--human", "--release-pr",
+                           "--wait", str(args.wait)] + (["--json"] if args.json else []), cwd=root)
+    if not args.json:
+        print(o5 + (e5 or ""), end="")
+    if c5 == 0:     # released: forget the passes, delete the merged changes' branches
+        data = json.loads(tf.read_text()) if tf.exists() else {}
+        rel = data.pop("release", {}) or {}
+        for k in rel.get("included", []):
+            (data.get("passed") or {}).pop(k, None)
+        for b_ in rel.get("branches", []):
+            gh_api("DELETE", f"repos/{repo}/git/refs/heads/{b_}")
+        tf.write_text(json.dumps(data, indent=2) + "\n")
+    if args.json:
+        print(o5, end="")
+    sys.exit(c5)
+
+
 def ship_batch(args, root, cfg):
     """Ship several changes with one production deploy: merge each (when its checks pass), approve only the newest
     deploy run (it carries all of them; older waiting runs are cancelled), then close every issue.
     Safe to run again; exit codes as for one issue."""
+    if setting_value(cfg, "grouping") == "release":
+        return ship_release(args, root, cfg)
     repo = cfg["github_repo"]
     deadline = time.time() + args.wait * 60
     out_steps, merged, stopped, pending = [], [], [], []
@@ -2857,6 +3095,7 @@ def ship_batch(args, root, cfg):
             say(f"{WARN} {m['issue']}: couldn't close it ({(e or o)[:160]})")
     if deployed:
         close_released(cfg, repo, deployed, run_url, {m["ref"] for m in merged}, say)
+    tidy_worktrees(root, cfg, say)
     msg = ", ".join(m["issue"] for m in merged) + " " + ("are" if len(merged) > 1 else "is") + " live."
     if not_closed:
         msg += " Couldn't close " + ", ".join(not_closed) + ": run the same command again, or /release them."
@@ -2877,7 +3116,9 @@ def cmd_ship(args):
     if git_paths(root)[2]:
         sys.exit("ship runs only from the owner's own chat in the main project folder, never from an agent's worktree.")
     issues = args.issue or []
-    if args.all or len(issues) > 1:
+    release = (setting_value(cfg, "grouping") == "release" and not args.release_pr and not args.merge_only
+               and not args.released_in and not args.merged_only)
+    if args.all or len(issues) > 1 or release:
         return ship_batch(args, root, cfg)
     if not issues:
         sys.exit("Give the issue (ship 12), several (ship 12 13 14), or --all")
@@ -2936,6 +3177,16 @@ def cmd_ship(args):
             say(f"{INFO} Put back 'uat-passed': the owner's pass is recorded on this exact commit")
         if not sha and not lane:
             say(f"{WARN} No record of which commit the human tested (they didn't use checkout-pr); merging the current head")
+        if setting_value(cfg, "ci") == "local":
+            head0 = pr_head(repo, num)
+            if head0 and not status_ok(repo, head0, "ci-local"):
+                # ci = local: the check runs here, on the owner's computer, before anything merges.
+                say(f"{INFO} Running make check on this computer (setting ci: local)…")
+                c_l, o_l, e_l = run([sys.executable, str(Path(__file__).resolve()), "local-ci", "--pr", num], cwd=root)
+                if c_l != 0:
+                    stop(f"make check failed on this computer for PR #{num} (ci-local): send it back to an agent. "
+                         + ((e_l or o_l or "").strip().splitlines() or [""])[-1][:160])
+                say(f"{OK} make check passed here (ci-local)")
         said_waiting = False
         started = time.time()
         while True:
@@ -3074,6 +3325,8 @@ def cmd_ship(args):
         data.pop(show_ref(ref), None)
         (data.get("branches") or {}).pop(show_ref(ref), None)
         tf.write_text(json.dumps(data, indent=2) + "\n")
+    if not args.released_in:
+        tidy_worktrees(root, cfg, say)
     finish("live", 0, f"{show_ref(ref)} is live.", run=run_info["url"] if run_info else None)
 
 
@@ -3215,60 +3468,220 @@ def cmd_ci_usage(args):
 
 
 def cmd_ci_settings(args):
-    """Where CI runs and where the AI reviews run, set as repository variables the workflows read."""
+    """Older name for two of the settings (runner, review); kept so existing instructions still work."""
+    sets = []
+    if args.runner is not None:
+        sets.append(f"runner={'github' if args.runner in ('github', '') else 'self-hosted'}")
+    if args.review is not None:
+        sets.append(f"review={args.review}")
+    args.set, args.explain = sets, False
+    return cmd_settings(args)
+
+
+def setting_value(cfg, key):
+    v = cfg.get(key)
+    return DEFAULT_CONFIG.get(key) if v in (None, "") else v
+
+
+def github_variables(cfg):
+    """Repository variables the workflows read (they can't read haam.config.json before they start)."""
+    return {
+        "HAAM_RUNNER": "" if setting_value(cfg, "runner") == "github" else "self-hosted",
+        "HAAM_REVIEW": "" if setting_value(cfg, "review") == "github" else setting_value(cfg, "review"),
+        "HAAM_CI": "" if setting_value(cfg, "ci") == "every-pr" else setting_value(cfg, "ci"),
+        "HAAM_NIGHTLY": "" if setting_value(cfg, "nightly") == "on" else "off",
+    }
+
+
+HAAM_CHECKS = set(REQUIRED_CHECKS) | {"ci-local"}
+
+
+def set_production_env(cfg, repo, rep):
+    """Production environment: the owner (and backups) must approve each deploy, unless deploy_approval is automatic."""
+    approvers = [a for a in [cfg.get("product_owner_github")] + list(cfg.get("backup_approvers_github") or []) if a]
+    automatic = setting_value(cfg, "deploy_approval") == "automatic"
+    reviewers = []
+    if not automatic:
+        for a in approvers:
+            c3, uid, _ = run(["gh", "api", f"users/{a}", "--jq", ".id"])
+            if c3 == 0 and uid.strip().isdigit():
+                reviewers.append({"type": "User", "id": int(uid)})
+            else:
+                rep.add("fail", f"GitHub user {a} not found")
+    body = {"reviewers": reviewers, "prevent_self_review": False,
+            "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+    code, _, err = gh_api("PUT", f"repos/{repo}/environments/production", body)
+    if code == 0:
+        gh_api("POST", f"repos/{repo}/environments/production/deployment-branch-policies",
+               {"name": cfg.get("default_branch", "main"), "type": "branch"})
+        rep.add("ok", "Deploys start automatically on merge (no approval)" if automatic
+                else "Each production deploy waits for approval", "" if automatic else ", ".join(approvers))
+    return code, err, body
+
+
+def cmd_settings(args):
+    """The owner's choices for this project, with their trade-offs; --set changes them, --apply syncs GitHub."""
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     rep = Report()
-    rep.section("CI settings")
-    if not gh_ready(rep, cfg):
-        rep.print(args.json)
-        return
-    repo = cfg["github_repo"]
-    code, out, _ = run(["gh", "variable", "list", "-R", repo, "--json", "name,value"])
-    current = {v["name"]: v["value"] for v in json.loads(out or "[]")} if code == 0 else {}
-    code, info, _ = gh_api("GET", f"repos/{repo}")
-    private = bool(info.get("private")) if code == 0 and isinstance(info, dict) else False   # unknown: assume public
-    rep.add("info", f"Runner: {current.get('HAAM_RUNNER') or 'GitHub-hosted (ubuntu-24.04)'}")
-    rep.add("info", f"AI reviews: {current.get('HAAM_REVIEW') or 'github'}")
-    changes = []
-    if args.runner is not None:
-        want = "" if args.runner in ("github", "") else args.runner
-        if want and not private:
-            rep.add("fail", "Own runners only on private repositories" if code == 0 else
-                    "Couldn't confirm the repository is private, so the runner wasn't changed",
-                    "on a public repository anyone's pull request could run code on your machine")
-            want = None
-        if want is not None and want != current.get("HAAM_RUNNER", ""):
-            changes.append(("HAAM_RUNNER", want))
-        if want:
-            rep.add("warn", f"Jobs will run on runners labelled '{want}'",
-                    "the machine must be on and registered (Settings → Actions → Runners → New self-hosted runner), "
-                    "with git, make, Python 3, curl and gitleaks installed, and your project's own tools")
-    if args.review is not None:
-        if args.review not in ("github", "local"):
-            sys.exit("--review must be github or local")
-        if args.review != (current.get("HAAM_REVIEW") or "github"):
-            changes.append(("HAAM_REVIEW", "" if args.review == "github" else "local"))
-        cfg["review"] = args.review
-        if args.review == "local":
-            rep.add("warn", "AI reviews will run on your computer (haam.py review), not on GitHub's runners",
-                    "uses your Claude plan instead of Actions minutes. Trade-off: the result is no longer tamper-proof. "
-                    "The agent that built the change starts the review (in fresh, read-only sessions), and anything "
-                    "using your login could post a passing result. PRs labelled human-review are always reviewed on GitHub.")
-    for name, value in changes:
-        if not args.apply:
-            rep.add("warn", f"Will set {name} = {value or '(default)'}")
-            continue
-        cmd = (["gh", "variable", "set", name, "--body", value, "-R", repo] if value
-               else ["gh", "variable", "delete", name, "-R", repo])
-        c2, _, e2 = run(cmd)
-        rep.add("ok" if c2 == 0 or not value else "fail", f"{name} = {value or '(default)'}", (e2 or "")[:120] if c2 else "")
-    if args.apply and args.review is not None:
+    changed = {}
+    for item in args.set or []:
+        k, _, v = item.partition("=")
+        k, v = k.strip().replace("-", "_"), v.strip()
+        if k not in SETTING_KEYS:
+            sys.exit(f"Unknown setting '{k}'. Settings: {', '.join(SETTING_KEYS)} (protected areas: config --protected)")
+        opts = SETTING_KEYS[k][1]
+        if opts is int:
+            if not v.isdigit() or int(v) < 1:
+                sys.exit(f"{k} must be a whole number of 1 or more")
+            v = int(v)
+        elif v not in opts:
+            sys.exit(f"{k} must be one of: {', '.join(opts)}")
+        changed[k] = v
+    refused = []
+    if changed.get("runner") == "self-hosted":
+        code, info, _ = gh_api("GET", f"repos/{cfg.get('github_repo')}")
+        if not (code == 0 and isinstance(info, dict) and info.get("private")):
+            changed.pop("runner")
+            refused.append("runner=self-hosted: own runners only on private repositories (couldn't confirm this one "
+                           "is private); on a public repository anyone's pull request could run code on your machine")
+    if changed:
+        cfg.update(changed)
         save_config(root, cfg)
-        rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged, so every agent knows reviews are {args.review}")
-    if changes and not args.apply:
-        rep.add("info", "Plan only. Re-run with --apply")
-    rep.print(args.json)
+    rows = []
+    for group, key, opts, what, helps in SETTINGS:
+        val = setting_value(cfg, key)
+        rows.append({"group": group, "key": key, "value": val, "default": DEFAULT_CONFIG.get(key),
+                     "options": [] if opts is int else list(opts), "what": what, "options_help": helps,
+                     "changed_now": key in changed})
+    res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "github_variables": github_variables(cfg),
+           "required_checks": required_checks(cfg), "applied": [], "changed": changed, "refused": refused}
+    for r_ in refused:
+        rep.add("fail", "Not changed: " + r_)
+    if args.apply:
+        rep.section("Applying the settings on GitHub")
+        if not gh_ready(rep, cfg):
+            rep.print(args.json)
+            return
+        repo = cfg["github_repo"]
+        code, out, _ = run(["gh", "variable", "list", "-R", repo, "--json", "name,value"])
+        current = {v["name"]: v["value"] for v in json.loads(out or "[]")} if code == 0 else {}
+        for name, value in github_variables(cfg).items():
+            if (current.get(name) or "") == value:
+                continue
+            cmd = (["gh", "variable", "set", name, "--body", value, "-R", repo] if value
+                   else ["gh", "variable", "delete", name, "-R", repo])
+            c2, _, e2 = run(cmd)
+            rep.add("ok" if c2 == 0 or not value else "fail", f"{name} = {value or '(default)'}", (e2 or "")[:120] if c2 else "")
+            res["applied"].append(name)
+        # Required checks follow the settings (e.g. ci-local instead of ci); the project's own extra checks stay.
+        code, rulesets, _ = gh_api("GET", f"repos/{repo}/rulesets")
+        rs = next((r for r in rulesets if r.get("name") == "HAAM main protection"), None) if isinstance(rulesets, list) else None
+        full = gh_api("GET", f"repos/{repo}/rulesets/{rs['id']}")[1] if rs else None
+        if isinstance(full, dict):
+            rule = next((r for r in full.get("rules") or [] if r["type"] == "required_status_checks"), None)
+            if rule:
+                params = rule.setdefault("parameters", {})
+                have = [c.get("context") for c in params.get("required_status_checks") or []]
+                want = [c for c in have if c not in HAAM_CHECKS] + required_checks(cfg)
+                if have != want:
+                    params["required_status_checks"] = [{"context": c} for c in want]
+                    body = {k: full[k] for k in ("name", "target", "enforcement", "conditions", "bypass_actors") if k in full}
+                    body["rules"] = [{k: v for k, v in r.items() if k in ("type", "parameters")} for r in full["rules"]]
+                    c3, _, e3 = gh_api("PUT", f"repos/{repo}/rulesets/{rs['id']}", body)
+                    rep.add("ok" if c3 == 0 else "fail", "Required checks: " + ", ".join(want), (e3 or "")[:160])
+                    res["applied"].append("required_checks")
+        else:
+            rep.add("warn", "No 'HAAM main protection' ruleset found", "run haam.py github --apply first")
+        code, env, _ = gh_api("GET", f"repos/{repo}/environments/production")
+        now_auto = code == 0 and isinstance(env, dict) and not any(
+            r.get("type") == "required_reviewers" and (r.get("reviewers") or []) for r in env.get("protection_rules") or [])
+        want_auto = setting_value(cfg, "deploy_approval") == "automatic"
+        # Turning approval back on is only tried when the owner just chose it (some GitHub plans can't have it).
+        if code == 0 and ((want_auto and not now_auto) or (not want_auto and now_auto and "deploy_approval" in changed)):
+            c_e, e_e, _ = set_production_env(cfg, repo, rep)
+            if c_e != 0:
+                rep.add("warn", "Couldn't change the production approval", (e_e or "")[:160])
+            res["applied"].append("production")
+        rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged: the gate and the agents read the settings "
+                   "from main (it's a protected file, so it needs your review)")
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    group = None
+    for r in rows:
+        if r["group"] != group:
+            group = r["group"]
+            print(f"\n{group}")
+        tag = "" if r["value"] == r["default"] else f"   (default: {r['default']})"
+        mark = f"{OK} " if r["changed_now"] else "  "
+        print(f"{mark}{r['key']:<18} {str(r['value']):<14} {r['what']}{tag}")
+        if args.explain:
+            for o in r["options"]:
+                print(f"      {'→' if o == r['value'] else '·'} {o}: {r['options_help'].get(o, '')}")
+    print(f"\n  protected_paths    {', '.join(cfg.get('protected_paths') or [])}")
+    if changed:
+        print(f"\n{OK} Saved in {CONFIG_NAME}: " + ", ".join(f"{k}={v}" for k, v in changed.items()))
+    for r_ in refused:
+        print(f"{BAD} Not changed: {r_}")
+    if not args.apply:
+        print(f"{INFO} Settings that change GitHub (runner, review, ci, nightly, deploy_approval) take effect with "
+              "--apply. Then commit haam.config.json.")
+    rep.print(False) if args.apply else None
+
+
+def cmd_local_ci(args):
+    """ci = local: run `make check` on a clean copy of the PR's commit on this computer and post the result as the
+    PR's `ci-local` status (the check the branch rules require in this mode)."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    repo = cfg["github_repo"]
+    num = args.pr
+    if not num:
+        if not args.issue:
+            sys.exit("Give the issue (local-ci 12) or the PR (--pr 34)")
+        try:
+            pr = find_pr(cfg, issue_ref(cfg, args.issue), ("open",))
+        except RuntimeError as e:
+            sys.exit(str(e))
+        if not pr:
+            sys.exit("No open PR for that issue.")
+        num = pr["number"]
+    sha = pr_head(repo, num)
+    if not sha:
+        sys.exit(f"Couldn't read PR #{num}'s head commit.")
+    run(["git", "fetch", "--quiet", "origin", sha], cwd=root)
+    _, main, _ = git_paths(root)
+    wt = main / ".haam" / f"local-ci-{num}"
+    run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+    code, _, err = run(["git", "worktree", "add", "--detach", str(wt), sha], cwd=root)
+    if code != 0:
+        sys.exit(f"Couldn't check out {sha[:8]}: {err[:200]}")
+    gh_api("POST", f"repos/{repo}/statuses/{sha}", {"state": "pending", "context": "ci-local",
+                                                     "description": f"make check running on {gh_login() or 'the owner'}'s computer"})
+    print(f"{INFO} make check on PR #{num} at {sha[:8]} (a clean copy in {wt.relative_to(main)})…", flush=True)
+    try:
+        p = subprocess.run(["make", "check"], cwd=wt, timeout=args.timeout * 60)
+        ok = p.returncode == 0
+        desc = "make check passed on the owner's computer" if ok else "make check failed on the owner's computer"
+        if ok and re.search(r"^audit:", (wt / "Makefile").read_text(errors="ignore") if (wt / "Makefile").exists() else "", re.M):
+            a = subprocess.run(["make", "audit"], cwd=wt, timeout=args.timeout * 60)     # the dependencies check too
+            if a.returncode != 0:
+                ok, desc = False, "make audit found vulnerable dependencies (owner's computer)"
+            else:
+                desc = "make check and make audit passed on the owner's computer"
+    except subprocess.TimeoutExpired:
+        ok, desc = False, f"make check didn't finish within {args.timeout} minutes"
+    finally:
+        run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+    if pr_head(repo, num) != sha:
+        gh_api("POST", f"repos/{repo}/statuses/{sha}", {"state": "error", "context": "ci-local",
+                                                         "description": "The PR changed while checking: run local-ci again"})
+        sys.exit("The PR changed while the check ran. Run it again.")
+    gh_api("POST", f"repos/{repo}/statuses/{sha}", {"state": "success" if ok else "failure", "context": "ci-local",
+                                                     "description": desc})
+    print(f"{OK if ok else BAD} {desc} (posted as ci-local on PR #{num})")
+    sys.exit(0 if ok else 1)
 
 
 REVIEW_DENY = "Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Agent"
@@ -4259,6 +4672,7 @@ def main():
     p.add_argument("--all", action="store_true",
                    help="everything ready: PRs that passed UAT or are in the no-UAT lane, and merged ones waiting to deploy")
     p.add_argument("--merge-only", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--release-pr", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--released-in", help=argparse.SUPPRESS)
     p.add_argument("--human", action="store_true", help="the human said 'ship' in this session")
     p.add_argument("--wait", type=float, default=1.5, help="minutes to wait before handing back (exit 2: run again)")
@@ -4288,7 +4702,19 @@ def main():
     p.add_argument("--repo", help="owner/name (default: github_repo from haam.config.json)")
     p.set_defaults(func=cmd_ci_usage)
 
-    p = common(sub.add_parser("ci-settings", help="where CI and the AI reviews run (repository variables)"))
+    p = common(sub.add_parser("settings", help="your choices for this project (CI, reviews, testing, shipping, limits)"))
+    p.add_argument("--set", action="append", help="change one: key=value (repeat for more)")
+    p.add_argument("--explain", action="store_true", help="show every option and its trade-off")
+    p.add_argument("--apply", action="store_true", help="sync GitHub: variables, required checks, production approval")
+    p.set_defaults(func=cmd_settings)
+
+    p = common(sub.add_parser("local-ci", help="ci = local: run make check on the PR's commit here and post ci-local"))
+    p.add_argument("issue", nargs="?", help="issue number (#12) or Linear ID")
+    p.add_argument("--pr", type=int, help="the PR number instead of the issue")
+    p.add_argument("--timeout", type=float, default=30, help="minutes")
+    p.set_defaults(func=cmd_local_ci)
+
+    p = common(sub.add_parser("ci-settings", help="older name for settings --set runner=… / review=…"))
     p.add_argument("--runner", help="github (default) or a self-hosted runner label, e.g. self-hosted")
     p.add_argument("--review", help="github (default) or local (haam.py review on this computer)")
     p.add_argument("--apply", action="store_true")

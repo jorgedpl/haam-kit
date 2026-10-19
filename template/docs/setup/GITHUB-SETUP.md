@@ -83,7 +83,7 @@ Private repositories get a monthly allowance of Actions minutes; agents opening 
 
 Find out where the minutes go: `python3 tools/haam/haam.py ci-usage` (last 7 days, by workflow, job, trigger and day).
 
-Two switches, set with `python3 tools/haam/haam.py ci-settings … --apply` (they're repository variables the workflows read):
+Two of the settings (`/haam-settings`, or `python3 tools/haam/haam.py settings --set … --apply`; they become repository variables the workflows read). The others (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) save more: see `settings --explain`.
 
 | Switch | What changes | Trade-off |
 |---|---|---|

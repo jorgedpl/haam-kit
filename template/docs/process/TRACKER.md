@@ -53,6 +53,8 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Record a failed test** (human said it failed) | `haam.py test-failed 123 --human`, then label `uat-failed`, status Ready, no assignee | `haam.py test-failed APP-123 --human`, then the same in Linear |
 | **Ship after a pass** (human said `ship`) | `haam.py ship 123 --human`: merge, approve deploy, wait, close | `haam.py ship APP-123 --human`, then set Done in Linear |
 | **Ship everything ready, one deploy** | `haam.py ship --all --human` (or `ship 12 13 14 --human`): merges each, approves the newest deploy only, closes all | `haam.py ship APP-12 APP-13 --human` (list them: `--all` can't read Linear) |
+| **See or change how HAAM runs** (owner) | `/haam-settings`; `haam.py settings [--explain]`, `settings --set key=value`, `settings --apply` | Same |
+| **Run CI here** (setting `ci: local`) | `haam.py local-ci 123` (ship runs it for you) | Same |
 | **No UAT for this issue** (owner's decision) | `haam.py issue label 123 --add uat:skip --human` | Label `uat:skip` |
 | **Room for new work?** (`/next` checks first) | `haam.py capacity` (open PRs and UAT queue vs `max_open_prs`, `max_in_uat`) | Same command (counts PRs; the UAT count needs GitHub Projects) |
 | **Batch PR** (an epic's bugs) | Title `#12 #13 #14: …`, a `Refs #n` line per issue; `ship` closes them all | Title `APP-12 APP-13: …` |

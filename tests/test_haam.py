@@ -85,7 +85,8 @@ const github = {
               listComments: 'comments', removeLabel: async () => {}, createComment: async () => {},
               addLabels: async (x) => calls.labels.push(...x.labels) },
     repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify(Object.assign({ tracker: scenario.tracker },
-                 scenario.protected ? { protected_paths: scenario.protected } : {}))).toString('base64') } }),
+                 scenario.protected ? { protected_paths: scenario.protected } : {},
+                 scenario.uat ? { uat: scenario.uat } : {}))).toString('base64') } }),
              createCommitStatus: async (x) => calls.statuses.push(x), listCommitStatusesForRef: 'statuses' },
   },
 };
@@ -165,6 +166,16 @@ class TestRepository(unittest.TestCase):
                                files=[{"filename": "src/billing.py"}])
         self.assertEqual(st, "success")
         self.assertEqual(calls["labels"], [])
+        # The uat setting: always (no lane at all) and bugs-skip (a bug counts as marked)
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, uat="always")
+        self.assertEqual(st, "failure")
+        self.assertIn("every change", desc)
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["stream:bug"]}, uat="bugs-skip")
+        self.assertEqual(st, "success")
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["stream:bug"]})
+        self.assertEqual(st, "failure")                                             # not by default
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["stream:feature"]}, uat="bugs-skip")
+        self.assertEqual(st, "failure")
         # The owner takes uat:skip off the issue: its open PR is re-checked and loses auto-merge
         st, desc, calls = gate(event="issues", pr={"labels": ["uat:skip"], "auto_merge": {"x": 1}}, issues={12: []})
         self.assertEqual(st, "failure")
@@ -226,7 +237,8 @@ class TestRepository(unittest.TestCase):
     def test_every_skill_is_valid_and_human_only_skills_are_marked(self):
         skills = sorted(KIT.glob(".agents/skills/*/SKILL.md"))
         self.assertGreaterEqual(len(skills), 14)
-        human_only = {"triage", "decide", "uat-result", "override", "release", "haam-setup", "haam-onboard", "haam-update"}
+        human_only = {"triage", "decide", "uat-result", "override", "release", "haam-setup", "haam-onboard", "haam-update",
+                      "haam-settings", "test", "epic"}
         for s in skills:
             front = s.read_text().split("---")[1]
             name = re.search(r"^name: (.+)$", front, re.M).group(1).strip()
@@ -514,6 +526,34 @@ class TestAgentsDoctorDev(ToolTestCase):
         self.assertNotEqual(p.returncode, 0)                                     # a failed comparison isn't "clean"
         self.assertIn("Couldn't compare", p.stderr)
 
+    def test_settings_show_set_and_validate(self):
+        self.install()
+        tool = self.installed_tool()
+        res = json.loads(self.run_tool("settings", "--json", tool=tool).stdout)
+        keys = {r["key"]: r for r in res["settings"]}
+        for k in ("flow", "uat", "grouping", "ci", "nightly", "review", "runner", "deploy", "deploy_approval",
+                  "max_open_prs", "max_in_uat", "max_review_rounds", "max_pr_lines", "worktree_cleanup"):
+            self.assertIn(k, keys)
+            self.assertTrue(keys[k]["what"])
+            for o in keys[k]["options"]:
+                self.assertTrue(keys[k]["options_help"].get(o), f"{k}={o} has no explanation")
+        self.assertEqual(res["required_checks"], ["ci", "secrets", "dependencies", "ai-review", "security-review",
+                                                  "release-gate"])
+        res = json.loads(self.run_tool("settings", "--set", "ci=local", "--set", "review=protected-only",
+                                       "--set", "max-in-uat=4", "--json", tool=tool).stdout)
+        self.assertEqual(res["required_checks"][0], "ci-local")
+        self.assertEqual(res["github_variables"]["HAAM_CI"], "local")
+        self.assertEqual(res["github_variables"]["HAAM_REVIEW"], "protected-only")
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual((cfg["ci"], cfg["max_in_uat"]), ("local", 4))
+        res = json.loads(self.run_tool("settings", "--set", "ci=off", "--json", tool=tool).stdout)
+        self.assertNotIn("ci", res["required_checks"])
+        for bad in ("ci=sometimes", "max_in_uat=0", "nosuch=1"):
+            self.assertNotEqual(self.run_tool("settings", "--set", bad, tool=tool, check=False).returncode, 0, bad)
+        # The older ci-settings command still works
+        self.run_tool("ci-settings", "--review", "github", tool=tool)
+        self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["review"], "github")
+
     def test_dev_keeps_the_repositorys_own_git_hooks(self):
         self.install()
         hooks = self.proj / ".git/hooks"
@@ -620,6 +660,24 @@ class TestGitHub(ToolTestCase):
         self.assertEqual(patch, [{"allow_auto_merge": True}])           # the no-UAT lane's auto-merge
         # Secrets are never set by the tool
         self.assertFalse([r for r in self.requests() if r["args"][:2] == ["secret", "set"]])
+
+    def test_settings_apply_syncs_github(self):
+        rs = self.tmp / "ruleset.json"
+        rs.write_text(json.dumps({"id": 1, "name": "HAAM main protection", "target": "branch", "enforcement": "active",
+                                  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+                                  "bypass_actors": [], "rules": [{"type": "required_status_checks", "parameters": {
+                                      "required_status_checks": [{"context": c} for c in
+                                                                 ["ci", "secrets", "my-check", "release-gate"]]}}]}))
+        self.env = {**self.env, "FAKE_GH_RULESET": str(rs)}
+        self.run_tool("settings", "--set", "ci=local", "--set", "nightly=off", "--apply", tool=self.installed_tool())
+        put = next(json.loads(r["body"]) for r in self.writes() if "rulesets/1" in " ".join(r["args"]))
+        checks = [c["context"] for c in put["rules"][0]["parameters"]["required_status_checks"]]
+        self.assertIn("my-check", checks)                                     # the project's own check stays
+        self.assertIn("ci-local", checks)
+        self.assertNotIn("ci", checks)
+        sets = [r["args"][2:5] for r in self.requests() if r["args"][:2] == ["variable", "set"]]
+        self.assertIn(["HAAM_CI", "--body", "local"], sets)
+        self.assertIn(["HAAM_NIGHTLY", "--body", "off"], sets)
 
     def test_existing_ruleset_is_merged_not_overwritten(self):
         rs = self.tmp / "ruleset.json"
@@ -1375,6 +1433,54 @@ class TestWorktrees(ToolTestCase):
         p = tool("ship", str(b), "--human", "--no-deploy", check=False)
         self.assertEqual(p.returncode, 1)
         self.assertIn("hasn't passed UAT", p.stdout + p.stderr)
+
+    def test_release_grouping_one_pr_for_everything_passed(self):
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        state = self.tmp / "gh-state.json"
+        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state),
+               "FAKE_GH_ORIGIN": str(self.origin), "HAAM_POLL_SECONDS": "0"}
+        tool = lambda *a, **kw: self.run_tool(*a, tool=self.installed_tool(), env=env, **kw)
+        tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM")
+        tool("settings", "--set", "grouping=release", "--set", "worktree_cleanup=manual")
+        tool("github-project", "--apply")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "config")
+        git(self.proj, "push", "-q", "origin", "main")
+        nums = []
+        for title, fname in (("Fix A", "a.txt"), ("Fix B", "b.txt")):
+            n = json.loads(tool("issue", "create", "--stream", "bug", "--title", title, "--status", "UAT",
+                                "--json").stdout)["number"]
+            nums.append(n)
+            git(self.proj, "switch", "-q", "-c", f"{n}-fix", "main")
+            (self.proj / fname).write_text(title + "\n")
+            git(self.proj, "add", fname)
+            git(self.proj, "commit", "-qm", f"#{n}: fix")
+            git(self.proj, "push", "-q", "-u", "origin", f"{n}-fix")
+            git(self.proj, "switch", "-q", "main")
+            tool("checkout-pr", str(n))
+            tool("checkout-pr", "--back")
+            res = json.loads(tool("publish", str(n), "--human", "--json").stdout)
+            self.assertTrue(res["release"])                                    # no PR per change
+        self.assertFalse(json.loads(state.read_text()).get("prs"))
+        res = tool("ship", "--all", "--human", check=False)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        st = json.loads(state.read_text())
+        rel = list(st["prs"].values())
+        self.assertEqual(len(rel), 1)                                          # one release PR
+        self.assertTrue(rel[0]["headRefName"].startswith("release/"))
+        self.assertEqual(rel[0]["title"].split(":")[0], f"#{nums[0]} #{nums[1]}")
+        self.assertEqual(rel[0]["state"], "MERGED")
+        self.assertEqual(len(st["approvals"]), 1)                              # one deploy
+        for n in nums:
+            self.assertEqual(st["issues"][str(n)]["state"], "CLOSED")
+            self.assertIn(f"repos/example-org/example-app/git/refs/heads/{n}-fix", st["deleted_refs"])
+        tested = json.loads((self.proj / ".haam/tested.json").read_text())
+        self.assertFalse(tested.get("passed"))
+        # Both changes are in the release branch that was merged
+        files = subprocess.run(["git", "ls-tree", "--name-only", rel[0]["headRefName"]], cwd=self.origin,
+                               capture_output=True, text=True).stdout.split()
+        self.assertTrue({"a.txt", "b.txt"} <= set(files))
 
     def test_ship_refuses_in_an_agents_worktree(self):
         wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])

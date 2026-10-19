@@ -47,6 +47,7 @@ You are guiding the **project admin** through adopting HAAM. The tool `tools/haa
    - The order of testing: **test-first** (default: they test the agent's branch locally, and the PR and checks come only after their pass, which saves the most CI minutes) or **checks-first** (PR and checks, then their test)
 2. `python3 tools/haam/haam.py config --product "…" --tracker github|linear --team-key … [--linear-team "…"] --github-repo … --owner … [--backup-approvers a,b] [--production-url …] --agents claude,cursor,… --deploy github|manual [--max-open-prs 10] [--max-in-uat 10] [--flow test-first|checks-first] [--protected "src/auth/**,db/migrations/**"]`
 3. `python3 tools/haam/haam.py agents --apply` and report per tool.
+   Then offer `/haam-settings`, which the human types themselves, to choose how CI, the AI reviews, testing, grouping and shipping work here. The defaults are a safe start.
 
 ## Phase 3: Teach HAAM about the project (your judgement work)
 1. **Command contract:** inspect the project (package.json, pyproject.toml, composer.json, go.mod, existing CI, README) and fill every `TODO(setup)` in `Makefile` (`setup`, `dev`, `test`, `lint`, `typecheck`, `build`, `audit`, `deploy` if they deploy from CI), and the runtime setup steps in `.github/workflows/ci.yml`, `security.yml`, `deploy.yml`. CI passes `make check` the list of changed files in `$CI_CHANGED_FILES`; if the project has clearly separate parts (e.g. a backend and a mobile app), offer to make `make check` run only the parts a PR touches, which saves a lot of CI minutes (the nightly run still checks everything). Run `make check`. If it fails on the current code, show the human why and agree whether to fix first or mark known failures.
@@ -68,8 +69,8 @@ Commit (`Adopt the Human-Agent Agile Methodology (HAAM)`), ask before pushing, p
 2. Human-only steps the tool lists, e.g. `[YOU, in your terminal] gh secret set CLAUDE_CODE_OAUTH_TOKEN -R owner/name` (or `ANTHROPIC_API_KEY`; either runs both reviews) and the fork-PR setting in the browser. Wait for confirmation, then re-run `github` to verify.
 3. If something needs a paid GitHub plan, explain the trade-off briefly and continue.
 4. **Actions minutes** (private repositories have a monthly allowance). Explain the choices in a few lines and ask:
-   - AI reviews on GitHub (default: tamper-proof, but each review keeps a runner busy while Claude reads) or **on the owner's computer** (`haam.py review`, uses their Claude plan; protected-area PRs still reviewed on GitHub): `python3 tools/haam/haam.py ci-settings --review local` (plan) → `--apply`.
-   - Their **own runner** (a computer or small server that stays on) instead of GitHub's machines, for private repos only: register it (Settings → Actions → Runners), then `ci-settings --runner self-hosted --apply`.
+   - AI reviews on GitHub (default: tamper-proof, but each review keeps a runner busy while Claude reads) or **on the owner's computer** (`haam.py review`, uses their Claude plan; protected-area PRs still reviewed on GitHub): `python3 tools/haam/haam.py settings --set review=local --apply`.
+   - Their **own runner** (a computer or small server that stays on) instead of GitHub's machines, for private repos only: register it (Settings → Actions → Runners), then `settings --set runner=self-hosted --apply`.
    - After the first busy week, `python3 tools/haam/haam.py ci-usage` shows where the minutes went.
 
 ## Phase 7: The tracker

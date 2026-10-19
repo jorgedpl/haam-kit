@@ -10,7 +10,10 @@
 #   - Draft PRs don't run at all: agents open their PR as a draft, run `make check` locally while they work,
 #     and mark it ready when done. That's when CI runs, once.
 #   - Runner: GitHub's ubuntu-24.04, or your own machine if the repository variable HAAM_RUNNER is set
-#     (`haam.py ci-settings --runner self-hosted`).
+#     (`haam.py settings --set runner=self-hosted --apply`).
+#   - The project's settings decide whether PRs run this at all (repository variable HAAM_CI, from
+#     `haam.py settings`): every-pr (default) · local (the owner's `haam.py local-ci` posts `ci-local` instead)
+#     · off. The nightly run follows HAAM_NIGHTLY (on by default).
 name: CI
 
 on:
@@ -30,7 +33,11 @@ permissions:
 jobs:
   ci:
     name: ci
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: >-
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+        vars.HAAM_CI != 'local' && vars.HAAM_CI != 'off') ||
+      (github.event_name == 'schedule' && vars.HAAM_NIGHTLY != 'off') ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:

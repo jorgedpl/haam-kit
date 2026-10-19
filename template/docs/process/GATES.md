@@ -77,11 +77,18 @@ Review is layered so that **no agent ever reviews its own work** and **secrets a
 3. A repo admin rewrites the branch history before merge (a new commit is not enough).
 4. Log a `/bug` with priority Urgent to record what happened and what was rotated (never include the secret itself).
 
+**The owner's settings change how G3 runs, not who decides** (`/haam-settings`):
+- `ci`: every PR, local (`ci-local`, posted by `haam.py local-ci` on the owner's computer), or off.
+- `review`: GitHub, local, protected areas only, or off.
+- `nightly`.
+
+The required checks follow the settings (`settings --apply`). The secret scan always runs.
+
 ## G4 Accepted (UAT)
 
 In the default test-first flow, G4 comes before G3: the owner tests the agent's pushed branch before a PR exists, and G3 then checks exactly the commit they passed (`haam.py publish`, then `ship`, which refuses anything else).
 
-**No-UAT lane:** G4 is decided up front instead. When the owner marks an issue `uat:skip` (in `/triage`, or "spec approved, no UAT"), the agent opens the PR with the same label and `release-gate` passes once every issue the PR is for carries it (GitHub Projects: the gate reads the issues; Linear: it trusts the PR label). Never when the PR changes a protected area: the gate checks the changed files against `protected_paths` in `haam.config.json` on `main` (agent and CI configuration by default, plus the project's own), adds `human-review` and keeps the lane closed, whatever the labels say. So a kit update never takes the lane: it changes agent configuration, and you review and ship it yourself. G3 still applies in full, and auto-merge (needs `HAAM_PROJECT_TOKEN`) merges only when every required check passes. There's no auto-merge on Linear, or when the AI reviews run locally (`ci-settings --review local`): their results aren't tamper-proof, so the owner ships those lane PRs (`ship`), which is still one decision for many. Only a human's decision adds `uat:skip` to an issue (`issue create` and `issue label` refuse it without `--human`).
+**No-UAT lane:** G4 is decided up front instead. When the owner marks an issue `uat:skip` (in `/triage`, or "spec approved, no UAT"), the agent opens the PR with the same label and `release-gate` passes once every issue the PR is for carries it (GitHub Projects: the gate reads the issues; Linear: it trusts the PR label). Never when the PR changes a protected area: the gate checks the changed files against `protected_paths` in `haam.config.json` on `main` (agent and CI configuration by default, plus the project's own), adds `human-review` and keeps the lane closed, whatever the labels say. So a kit update never takes the lane: it changes agent configuration, and you review and ship it yourself. G3 still applies in full, and auto-merge (needs `HAAM_PROJECT_TOKEN`) merges only when every required check passes. There's no auto-merge on Linear, or when the AI reviews run locally (`settings --set review=local`): their results aren't tamper-proof, so the owner ships those lane PRs (`ship`), which is still one decision for many. Only a human's decision adds `uat:skip` to an issue (`issue create` and `issue label` refuse it without `--human`).
 
 - [ ] UAT plan exists in `docs/uat/` with numbered steps and expected results
 - [ ] Human ran it locally on the branch (test-first: the agent's pushed branch, before any PR; checks-first: the PR branch)

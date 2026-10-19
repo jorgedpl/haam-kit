@@ -42,6 +42,15 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
    - **What went wrong** (*"step 3: the export button is still missing on mobile"*) → the agent records it on the issue, labels it `uat-failed` and sends it back to the agents, who fix it first. When it's fixed it comes back to `/test`.
 3. That's all. You don't need to touch branches, labels or the board.
 
+**How HAAM runs is your choice.** Type `/haam-settings`: it goes through each setting with your own numbers (Actions minutes, the UAT queue), recommends one option, and applies what you choose:
+- when CI and the AI reviews run (every PR, on your computer, only for protected areas, or off);
+- what you test yourself (everything, what you decide per issue, or bugs skip);
+- how changes are grouped (per issue, per epic, or one release PR for everything you passed);
+- whether deploys wait for your approval;
+- the limits.
+
+`python3 tools/haam/haam.py settings --explain` lists them all.
+
 **Changes you can't test yourself** (kit or config updates, dependency bumps, refactors you wouldn't notice, CI): mark them `uat:skip` when you triage them, or say "spec approved, no UAT". They never come to `/test`: their PR merges by itself once CI and both AI reviews pass (GitHub Projects), and your next `ship` deploys them with everything else and closes them. If you don't ship anything for a while, run `/test` and reply `ship` anyway, or `ship --all`: their deploy waits for your approval. On Linear, ship them by name (`ship APP-12 --human`). Keep it for changes no user would notice; never for protected areas.
 
 ### Weekly (30–45 minutes)
@@ -251,8 +260,8 @@ As on GitHub, agents follow the priority field, not the manual order of a list.
 Every pull request runs CI and two AI reviews on GitHub's machines, and private repositories have a monthly allowance of minutes. Agents work fast, so the allowance can go in days. What helps most, in order:
 1. **Look first:** `python3 tools/haam/haam.py ci-usage` shows which workflows and jobs used the minutes.
 2. **Fewer pull requests:** batch an epic's small items into one (`/work epic #9`), and keep the open-PR limit low (`max_open_prs` in `haam.config.json`).
-3. **Reviews on your computer:** `haam.py ci-settings --review local --apply`. The AI reviews then use your Claude plan instead of minutes; protected areas (`human-review`) are still reviewed on GitHub. The trade-off: on GitHub the review result is tamper-proof; locally it isn't. The reviews run in fresh, read-only sessions with the instructions from `main`, but the agent that built the change is the one that starts them, and anything using your login could post a passing result. For more separation, run `haam.py review <ID>` from your own chat yourself.
-4. **Your own runner:** `haam.py ci-settings --runner self-hosted --apply` after registering a machine that stays on (`docs/setup/GITHUB-SETUP.md` §8).
+3. **Reviews on your computer:** `haam.py settings --set review=local --apply` (or `/haam-settings`). The AI reviews then use your Claude plan instead of minutes; protected areas (`human-review`) are still reviewed on GitHub. The trade-off: on GitHub the review result is tamper-proof; locally it isn't. The reviews run in fresh, read-only sessions with the instructions from `main`, but the agent that built the change is the one that starts them, and anything using your login could post a passing result. For more separation, run `haam.py review <ID>` from your own chat yourself.
+4. **Your own runner:** `haam.py settings --set runner=self-hosted --apply` after registering a machine that stays on (`docs/setup/GITHUB-SETUP.md` §8).
 5. **Ask for smaller CI:** if the project has separate parts (e.g. backend and mobile app), have an agent make `make check` run only the parts a PR touches.
 
 ## 11. Traps to avoid

@@ -39,6 +39,7 @@ Do each step from the CHANGELOG. Typical ones:
 - New required checks or labels: `python3 tools/haam/haam.py github` (plan) → `--apply` on the human's OK.
 - New statuses, fields or labels: GitHub Projects: `python3 tools/haam/haam.py github-project` (plan) → `--apply` on the human's OK. Linear: the **human** runs `python3 tools/haam/haam.py linear` then `--apply` in their own terminal (it needs their API key).
 - New `TODO(setup)` placeholders: fill them from the codebase or ask the human.
+- New settings: run `python3 tools/haam/haam.py settings` and tell the human, in one line each, which settings are new and their defaults. They can change them with `/haam-settings`.
 
 ## 7. Verify and open the PR
 1. `python3 tools/haam/haam.py doctor --role admin` and `make check`.

@@ -47,6 +47,7 @@ Skills live in `.agents/skills/<name>/SKILL.md` (the shared Agent Skills format)
 | Adopt HAAM in a repo | `/haam-setup` | **human only** (project admin) |
 | Onboard a developer | `/haam-onboard` | **human only** (new developer) |
 | Upgrade HAAM to a new version | `/haam-update` | **human only** (project admin) |
+| Change how HAAM runs here (CI, reviews, testing, grouping, shipping, limits) | `/haam-settings` | **human only** (product owner) |
 
 Each skill's `SKILL.md` has the exact steps. Follow them; don't improvise a different process.
 
@@ -89,7 +90,7 @@ You never review your own work, and you never decide that a review is wrong on y
 - When the PR is marked ready: `secrets`, `dependencies`, `ai-review` and `security-review` run (on GitHub, or `ai-review`/`security-review` via `haam.py review` on the owner's computer when the project chose local reviews). The reviewer agent posts a comment with **Blocking / Should fix / Nits**.
 - Fix every Blocking item and push. Should-fix items: fix if small and in scope, otherwise log a `/bug`. Ignore nits unless trivial.
 - If you disagree with a finding, reply on the PR with your reasoning and ask the human. Never push changes just to game the reviewer.
-- After **two** failing review rounds, stop and hand over to the human (issue comment + chat).
+- After `max_review_rounds` failing review rounds (`haam.config.json`, default 2), stop and hand over to the human (issue comment + chat).
 
 ## 6. Working with the tracker
 
@@ -124,11 +125,12 @@ On GitHub Projects, `haam.py issue claim <number> --tool "<tool>" --machine "<ma
 
 - The assessment and spec are committed on the issue's own branch, without a PR, and ship with the code in one PR (epics and split specs are the exception: they get a docs PR). Fewer PRs means fewer CI runs.
 - Spikes use `spike/<branch-name>` and are never merged.
-- **No-UAT lane:** if the owner marked the issue `uat:skip` (their decision, for changes they can't meaningfully test), don't run `/uat`: open the PR ready (not draft) with `--label uat:skip`, and it merges by itself once CI and both AI reviews pass. Never for protected areas (§4). `/build` step 7 has the details.
+- **The owner's settings** (`haam.config.json`, changed with `/haam-settings`; `python3 tools/haam/haam.py settings` shows them) decide when CI and the AI reviews run, what the owner tests, how work is grouped (`grouping`: per-issue, per-epic, or one `release` PR for everything passed) and the limits. Follow them; never change them yourself.
+- **No-UAT lane:** if the owner marked the issue `uat:skip` (their decision, for changes they can't meaningfully test; with the setting `uat: bugs-skip`, every bug counts as marked), don't run `/uat`: open the PR ready (not draft) with `--label uat:skip`, and it merges by itself once CI and both AI reviews pass. Never for protected areas (§4). `/build` step 7 has the details.
 - **Test first (default, `"flow": "test-first"`):** push your branch as you go (free: branch pushes start no workflows) but **don't open a PR**. Hand over with `/uat`; the owner tests it on their computer, and their `/test` opens the PR after they pass it, so CI and the reviews run once, on tested code. If a PR exists during rework, turn it back into a draft before pushing (`gh pr ready --undo`).
 - **Keep CI cost down (checks-first projects):** open PRs as **drafts** (CI and reviews skip them), make the ready version complete (UAT plan and release note included), mark it ready once (`gh pr ready`), and group each round of fixes into one push. Before starting new work, `/next` checks `haam.py capacity`. If `haam.config.json` says `"review": "local"`, run `haam.py review <ID>` after marking ready (a fresh session reviews it; you don't review your own work).
 - Fill in `.github/pull_request_template.md` completely, including **Built with** (your agent tool and model).
-- Rebase on `main` before opening or updating a PR. Keep PRs small (target < 400 changed lines).
+- Rebase on `main` before opening or updating a PR. Keep PRs small (target: `max_pr_lines` changed lines, default 400).
 - **One chat, one folder.** Chats that share a folder overwrite each other's files and branches. When more than one agent chat may be open on a machine, each agent chat that changes files works in its own git worktree under `.claude/worktrees/`; `/work` sets one up (`python3 tools/haam/haam.py worktree status|new|prep|clean`). The main folder belongs to the human's chat. When unsure, use a worktree.
 
 ## 8. Commands (the contract between agents, CI and humans)

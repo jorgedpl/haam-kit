@@ -33,7 +33,7 @@ git switch <branch>                      # existing branch: tracks origin/<branc
                                          # `git switch --detach origin/main` first (ask the human if it's another chat's)
 git switch -c <branch> origin/main       # new: 123-short-title (GitHub) or Linear's branch name
 ```
-**Batch of an epic's items** (from `/next` or `/work epic <ID>`): claim each one (GitHub: `issue claim <n> --branch <branch>`), use one branch named after the first (`12-<epic-slug>`), and one PR titled `#12 #13 #14: <summary> (epic #9)` whose description has a `Refs #n` line for each. Each bug still gets its own failing test first, and each feature's acceptance criteria their tests. Keep the batch under ~400 changed lines; if it grows past that, open a second batch.
+**Batch of an epic's items** (from `/next` or `/work epic <ID>`): claim each one (GitHub: `issue claim <n> --branch <branch>`), use one branch named after the first (`12-<epic-slug>`), and one PR titled `#12 #13 #14: <summary> (epic #9)` whose description has a `Refs #n` line for each. Each bug still gets its own failing test first, and each feature's acceptance criteria their tests. Keep the batch under `max_pr_lines` changed lines (default 400); if it grows past that, open a second batch.
 Reworking an issue that already has a branch (review feedback, or label `uat-failed`): read the `❌ UAT failed` comment and fix every item on it; `git switch <branch> && git pull`. If git says the branch is checked out in another worktree under `.claude/worktrees/`, continue in that worktree (Claude Code: enter it); otherwise ask the human. Then hand it over again as step 7 says for your flow, so it comes back to the human.
 
 ## 3. Plan
@@ -53,7 +53,7 @@ Run `make check` until it passes. Also run any project-specific test skills list
 Do a security self-review of your diff and fix anything you find (Claude Code: `/security-review`; other tools: check `git diff origin/main...` against section D of `.github/review/REVIEWER.md`). Re-read your own diff (`git diff origin/main...`) against each acceptance criterion.
 
 ## 7. Hand it over
-First check the issue's labels. **`uat:skip`** (the owner decided this change needs no test of theirs): use the no-UAT lane below, whatever the flow. Otherwise check `"flow"` in `haam.config.json` (default `test-first`).
+First check the issue's labels and the settings (`python3 tools/haam/haam.py settings`). **`uat:skip`** (the owner decided this change needs no test of theirs), or a bug when the setting `uat` is `bugs-skip`: use the no-UAT lane below, whatever the flow. With `uat: always`, never use the lane. Otherwise check `"flow"` in `haam.config.json` (default `test-first`).
 
 ### No-UAT lane (`uat:skip` on the issue, every issue of a batch)
 - Run `python3 tools/haam/haam.py protected`: it lists changed files in protected areas (`protected_paths` in `haam.config.json`). If it lists any, the lane doesn't apply (the gate checks the same files and won't let it through): if a PR is open, first `gh pr merge <pr> --disable-auto`, then add `human-review`, tell the owner, and hand it over through your flow as usual.

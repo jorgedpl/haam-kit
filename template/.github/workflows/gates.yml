@@ -64,12 +64,14 @@ jobs:
         uses: actions/github-script@v7
         env:
           REVIEW_MODE: ${{ vars.HAAM_REVIEW }}
+          CI_MODE: ${{ vars.HAAM_CI }}
         with:
           script: |
             const { owner, repo } = context.repo;
 
             // Settings come from the default branch, never from the PR (which its author controls).
             let tracker = '';
+            let uatMode = 'owner-decides';   // the project's setting: owner-decides | always | bugs-skip
             let protectedPaths = ['AGENTS.md', 'CLAUDE.md', '.agents/**', '.claude/**', '.cursor/**', '.codex/**', '.grok/**',
               '.gemini/**', '.github/**', 'tools/haam/**', 'haam.config.json', '.mcp.json', 'Makefile', 'scripts/**',
               '.githooks/**', '.gitleaks.toml', '.gitleaksignore'];
@@ -77,6 +79,7 @@ jobs:
               const { data } = await github.rest.repos.getContent({ owner, repo, path: 'haam.config.json' });
               const cfg = JSON.parse(Buffer.from(data.content, 'base64').toString());
               tracker = cfg.tracker || '';
+              uatMode = cfg.uat || 'owner-decides';
               if (Array.isArray(cfg.protected_paths)) protectedPaths = cfg.protected_paths;
             } catch (e) { core.warning(`Couldn't read haam.config.json: ${e.message}`); }
 
@@ -165,7 +168,9 @@ jobs:
               let lane = false;
               let laneWhy = '';
               if (!docsOnly && labels.includes('uat:skip')) {
-                if (touched.length) {
+                if (uatMode === 'always') {
+                  laneWhy = 'This project tests every change (setting uat: always): needs UAT';
+                } else if (touched.length) {
                   laneWhy = `uat:skip never applies to protected areas (${touched.slice(0, 3).join(', ')}): needs UAT`;
                 } else if (labels.includes('human-review')) {
                   laneWhy = 'uat:skip never applies to protected areas (human-review): needs UAT';
@@ -176,8 +181,10 @@ jobs:
                   for (const n of ids) {
                     let iss = null;
                     try { iss = (await github.rest.issues.get({ owner, repo, issue_number: n })).data; } catch (e) { }
+                    const names = iss ? iss.labels.map(l => typeof l === 'string' ? l : l.name) : [];
+                    // The owner's mark, or (setting uat: bugs-skip) a bug: those skip UAT by the owner's choice.
                     const marked = iss && !iss.pull_request && iss.state === 'open' && n !== number &&
-                      iss.labels.map(l => typeof l === 'string' ? l : l.name).includes('uat:skip');
+                      (names.includes('uat:skip') || (uatMode === 'bugs-skip' && names.includes('stream:bug')));
                     if (!marked) {
                       lane = false;
                       laneWhy = `uat:skip on the PR, but #${n} isn't an open issue the owner marked uat:skip`;
@@ -225,8 +232,9 @@ jobs:
               // The lane merges by itself (GitHub Projects only). Not when the AI reviews run on the owner's computer
               // (HAAM_REVIEW=local): those results aren't tamper-proof, so the owner ships lane PRs themselves.
               // Anything else that had auto-merge on loses it.
+              // Nor with local CI (HAAM_CI=local): the owner's ship runs the check there, then merges.
               const autoLane = lane && state === 'success' && tracker === 'github' && !pr.draft &&
-                process.env.REVIEW_MODE !== 'local';
+                process.env.REVIEW_MODE !== 'local' && process.env.CI_MODE !== 'local';
               if (autoLane && !pr.auto_merge) enable.push(number);
               if (!autoLane && pr.auto_merge && !labels.includes('uat-passed') && !labels.includes('gate-override')) disable.push(number);
             }

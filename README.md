@@ -13,7 +13,8 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 - **A lifecycle with five human gates**: decide the idea, approve the spec, automated checks with independent AI review, human acceptance test, production approval. Every gate can be overridden in an emergency, and every override is recorded and followed up.
 - **Three work streams** agents pull from: bugs, ready features, and ideas to assess. The tracker (GitHub Projects or Linear) holds the backlog, priorities and status.
-- **18 shared skills** (`/idea`, `/bug`, `/assess`, `/triage`, `/epic`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/test`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`), in the open Agent Skills format.
+- **19 shared skills** (`/idea`, `/bug`, `/assess`, `/triage`, `/epic`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/test`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`, `/haam-settings`), in the open Agent Skills format.
+- **Your settings, your trade-offs:** `/haam-settings` lets the product owner choose when CI and the AI reviews run (every PR, locally, only for protected areas, or off), what they test themselves, how work is grouped (per issue, per epic, or one release PR), whether deploys wait for approval, and the limits, each with its trade-off and the project's own numbers.
 - **Testing in one word, before anything costs CI minutes**: type `/test`, try the agent's change on your computer, reply `pass` (only now is the pull request opened and checked, once, on exactly what you tested) then `ship` (the agent merges, deploys and closes it), or just say what's wrong (it goes straight back to the agents and returns to you when fixed). `/test all` takes everything waiting in one sitting, and `ship --all` deploys it with one approval.
 - **A no-UAT lane** for changes you can't meaningfully test (config, dependency bumps, invisible refactors): mark the issue `uat:skip` once, and its PR merges by itself when CI and both AI reviews pass.
 - **Epics with an agent that asks the right questions**: `/triage group` turns a pile of loose issues into epics (one per feature); `/epic` reads each one, writes a short brief, asks you a few focused questions, then tidies the issues: duplicates, gaps, splits, order.
@@ -29,7 +30,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.8.1 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.9.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -66,7 +67,8 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `issue list\|create\|claim\|status\|…` | agents | Work the GitHub Projects board from any agent tool |
 | `capacity` | agents | Hold new work when too many PRs are open or waiting for your test (limits in `haam.config.json`) |
 | `ci-usage [--days 7]` | admin | Where the GitHub Actions minutes went, by workflow, job, trigger and day |
-| `ci-settings --review local --runner self-hosted [--apply]` | admin | Run the AI reviews on your computer; run CI on your own machine |
+| `settings [--explain] [--set key=value] [--apply]` | owner/admin | Your choices: when CI and the AI reviews run, what you test, grouping, shipping, limits (`/haam-settings` walks you through them) |
+| `local-ci ISSUE` | owner | With `ci: local`: run `make check` on the PR's commit here and post it (ship does it for you) |
 | `review ISSUE` | agents | The two AI reviews in fresh local sessions, posted as the PR's statuses (when reviews are local) |
 | `checkout-pr ISSUE`, `publish ISSUE --human`, `ship ISSUE... \| --all --human` | `/test` | Put a change on this machine to test; after `pass` + `ship`: merge, approve the deploy (one for several), wait, close |
 | `worktree status\|new\|prep\|list\|clean` | agents, anyone | One worktree per agent chat; copies local files from `.worktreeinclude`; tidies finished ones |

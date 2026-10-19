@@ -304,6 +304,8 @@ if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/pending_deployments"):
     st["approved"] = json.loads(stdin) if stdin else True
     st.setdefault("approvals", []).append(rid)
     out([])
+if a and a[0] == "api" and len(a) > 3 and "/compare/" in a[3]:
+    out({"status": st.get("compare_status", "ahead")})
 if a and a[0] == "api" and a[2:3] == ["DELETE"]:
     st.setdefault("deleted_refs", []).append(a[3]); out({})
 if a[:2] == ["api", "user"]:

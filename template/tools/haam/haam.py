@@ -2610,6 +2610,102 @@ def pr_head(repo, num):
     return (json.loads(out).get("headRefOid") if code == 0 and out else "") or ""
 
 
+def commit_contains(repo, older, newer, cache=None):
+    """Whether commit `newer` includes `older` (same commit, or later on the same history)."""
+    if not older or not newer:
+        return False
+    if older == newer:
+        return True
+    key = (older, newer)
+    if cache is not None and key in cache:
+        return cache[key]
+    code, data, _ = gh_api("GET", f"repos/{repo}/compare/{older}...{newer}")
+    res = code == 0 and isinstance(data, dict) and data.get("status") in ("ahead", "identical")
+    if cache is not None:
+        cache[key] = res
+    return res
+
+
+def await_deploy(repo, workflow, shas, deadline, say, merged_age=0):
+    """Approve and wait for ONE production deploy that carries every commit in `shas` (the newest last).
+    A waiting older deploy run is cancelled (the newer one includes its change), and a run that GitHub cancelled
+    because a newer merge replaced it just means waiting for that newer one.
+    Returns (outcome, url or message, deployed sha): outcome is live, later, stop or failed."""
+    last, cache, cancelled = shas[-1], {}, set()
+    while True:
+        code, out, err = run(["gh", "run", "list", "-R", repo, "--workflow", workflow, "--limit", "30",
+                              "--json", "databaseId,status,conclusion,url,headSha"])
+        if code != 0:
+            return "stop", f"Couldn't list the deploy runs: {(err or out)[:200]}", None
+        runs = json.loads(out or "[]")                      # newest first
+        idx = next((i for i, r in enumerate(runs) if commit_contains(repo, last, r.get("headSha"), cache)), None)
+        target = runs[idx] if idx is not None else None
+        if target:
+            for old in runs[idx + 1:]:
+                if old["status"] in ("waiting", "pending", "queued", "requested") and old["databaseId"] not in cancelled \
+                        and commit_contains(repo, old.get("headSha"), target.get("headSha"), cache):
+                    cancelled.add(old["databaseId"])
+                    run(["gh", "run", "cancel", str(old["databaseId"]), "-R", repo])
+                    say(f"{INFO} Cancelled an older waiting deploy run (this one includes its change): {old['url']}")
+            if target["status"] == "completed":
+                if target["conclusion"] == "success":
+                    say(f"{OK} Deployed: {target['url']}")
+                    return "live", target["url"], target.get("headSha")
+                if target["conclusion"] != "cancelled":       # cancelled = replaced by a newer merge's run
+                    say(f"{BAD} The deploy failed: {target['url']}")
+                    return "failed", target["url"], None
+            if target["status"] == "waiting":
+                c2, pend, _ = gh_api("GET", f"repos/{repo}/actions/runs/{target['databaseId']}/pending_deployments")
+                pend = pend if isinstance(pend, list) else []
+                mine = [p["environment"]["id"] for p in pend if p.get("current_user_can_approve", True)]
+                if pend and not mine:
+                    return "later", ("You can't approve this environment: the approver must approve it in GitHub "
+                                     "(Actions → the run → Review deployments)."), None
+                if mine:
+                    c3, _, e3 = gh_api("POST", f"repos/{repo}/actions/runs/{target['databaseId']}/pending_deployments",
+                                       {"environment_ids": mine, "state": "approved",
+                                        "comment": f"Approved by {gh_login() or 'the product owner'} (HAAM ship)"})
+                    if c3 != 0:
+                        return "stop", (f"Couldn't approve the deploy ({str(e3)[:150]}). Approve it in GitHub: Actions "
+                                        "→ the run → Review deployments."), None
+                    say(f"{OK} Approved the production deploy")
+        if time.time() > deadline:
+            if target:
+                return "later", f"Deploy run: {target['url']}.", None
+            if merged_age < 600:
+                return "later", f"No '{workflow}' run for the merge yet.", None
+            return "stop", (f"No '{workflow}' run started for the merge. Ask the human how this project deploys; only "
+                            "if they confirm it's live, run again with --no-deploy (or --live)."), None
+        time.sleep(poll_seconds())
+
+
+def close_released(cfg, repo, deployed_sha, run_url, exclude, say):
+    """Close issues still in Deploying whose merged change went out in this deploy (e.g. the no-UAT lane's)."""
+    if cfg.get("tracker") != "github" or not deployed_sha:
+        return
+    board = GHProject(cfg)
+    board.load()
+    cache = {}
+    for item in board.items():
+        n = item["number"]
+        if item["status"] != "Deploying" or item["state"] != "OPEN" or n in exclude:
+            continue
+        try:
+            pr = find_pr(cfg, n, ("merged",))
+        except RuntimeError:
+            continue
+        if not pr:
+            continue
+        c, o, _ = run(["gh", "pr", "view", str(pr["number"]), "-R", repo, "--json", "mergeCommit"])
+        m = ((json.loads(o) if c == 0 and o else {}).get("mergeCommit") or {}).get("oid")
+        if m and commit_contains(repo, m, deployed_sha, cache):
+            iss = board.issue(n)
+            board.set_option(iss, "Status", "Done")
+            run(["gh", "issue", "comment", str(n), "-R", repo, "--body", f"🚀 Released to production · deploy run {run_url}"])
+            run(["gh", "issue", "close", str(n), "-R", repo, "--reason", "completed"])
+            say(f"{OK} #{n} is live and Done (it went out in the same deploy)")
+
+
 def ship_candidates(cfg, repo):
     """`ship --all`: open PRs that passed UAT or are in the no-UAT lane, plus merged ones still waiting to deploy."""
     refs = []
@@ -2654,6 +2750,9 @@ def ship_batch(args, root, cfg):
         sys.exit(code)
 
     refs = [issue_ref(cfg, x) for x in (args.issue or [])]
+    if args.all and cfg.get("tracker") != "github":
+        finish("stopped", 1, "--all needs GitHub Projects (it reads the board). On Linear, list the issues: "
+               "ship APP-12 APP-13 --human")
     if args.all:
         try:
             refs += [r for r in ship_candidates(cfg, repo) if r not in refs]
@@ -2665,14 +2764,15 @@ def ship_batch(args, root, cfg):
     me = [sys.executable, str(Path(__file__).resolve())]
     for r in refs:
         left = max(0.0, (deadline - time.time()) / 60)
-        c, o, e = run(me + ["ship", str(r), "--human", "--merge-only", "--json",
-                            "--wait", f"{left:.2f}"], cwd=root)
+        c, o, e = run(me + ["ship", str(r), "--human", "--merge-only", "--json", "--wait", f"{left:.2f}"]
+                      + (["--merged-only"] if args.merged_only else []), cwd=root)
         try:
             res = json.loads(o)
         except (json.JSONDecodeError, TypeError):
             res = {"message": (e or o or "")[:300]}
         if c == 0:
-            merged.append({"issue": show_ref(r), "ref": r, "sha": res.get("sha"), "docs_only": res.get("docs_only")})
+            merged.append({"issue": show_ref(r), "ref": r, "sha": res.get("sha"), "docs_only": res.get("docs_only"),
+                           "merged_at": res.get("merged_at") or ""})
             say(f"{OK} {show_ref(r)}: merged")
         elif c == SHIP_NOT_FINISHED:
             pending.append(show_ref(r))
@@ -2692,63 +2792,48 @@ def ship_batch(args, root, cfg):
     if cfg.get("deploy") == "manual" and not args.live:
         finish("deploy by hand", SHIP_WAITING_HUMAN, "Merged " + ", ".join(m["issue"] for m in merged) + ". Waiting for "
                "the human: deploy it your usual way, then say it's live (run this again with --live).")
+    deployed = None
     if shas and not args.live and not args.no_deploy:
         # The newest of the merges on the default branch (the batch may include changes merged earlier).
         cm, commits, _ = gh_api("GET", f"repos/{repo}/commits?sha={cfg.get('default_branch') or 'main'}&per_page=100")
         order = [x.get("sha") for x in commits] if cm == 0 and isinstance(commits, list) else []
         last = next((x for x in order if x in shas), shas[-1])
         shas = [x for x in shas if x != last] + [last]
-        cancelled = set()
-        while True:
-            c, o, e = run(["gh", "run", "list", "-R", repo, "--workflow", args.workflow, "--limit", "30",
-                           "--json", "databaseId,status,conclusion,url,headSha"])
-            if c != 0:
-                finish("stopped", 1, f"Couldn't list the deploy runs: {(e or o)[:200]}")
-            runs = [x for x in json.loads(o or "[]") if x.get("headSha") in shas]
-            # The run for the last merge carries every change; wait for it rather than approve an older one.
-            newest = next((x for x in runs if x.get("headSha") == shas[-1]), None)
-            if newest:
-                for old in runs:
-                    if old is not newest and old["status"] in ("waiting", "pending", "queued", "requested") \
-                            and old["databaseId"] not in cancelled:
-                        cancelled.add(old["databaseId"])
-                        run(["gh", "run", "cancel", str(old["databaseId"]), "-R", repo])
-                        say(f"{INFO} Cancelled an older deploy run (the newest one carries it): {old['url']}")
-            if newest and newest["status"] == "completed":
-                if newest["conclusion"] == "success":
-                    run_url = newest["url"]
-                    say(f"{OK} Deployed: {run_url}")
-                    break
-                finish("deploy failed", 1, f"The deploy failed: {newest['url']}. Show the human; report it as an "
-                       "Urgent bug if production is affected.")
-            if newest and newest["status"] == "waiting":
-                cp, pend, ep = gh_api("GET", f"repos/{repo}/actions/runs/{newest['databaseId']}/pending_deployments")
-                pend = pend if isinstance(pend, list) else []
-                mine = [x["environment"]["id"] for x in pend if x.get("current_user_can_approve", True)]
-                if pend and not mine:
-                    finish("waiting for deploy approval", SHIP_NOT_FINISHED, "You can't approve this environment: the "
-                           "approver must approve it in GitHub (Actions → the run → Review deployments). Run again after.")
-                if mine:
-                    ca, _, ea = gh_api("POST", f"repos/{repo}/actions/runs/{newest['databaseId']}/pending_deployments",
-                                       {"environment_ids": mine, "state": "approved",
-                                        "comment": f"Approved by {gh_login() or 'the product owner'} for "
-                                                   + ", ".join(m['issue'] for m in merged) + " (HAAM ship)"})
-                    if ca != 0:
-                        finish("stopped", 1, f"Couldn't approve the deploy ({str(ea)[:150]}). Approve it in GitHub.")
-                    say(f"{OK} Approved one production deploy for " + ", ".join(m["issue"] for m in merged))
-            if time.time() > deadline:
-                finish("deploying", SHIP_NOT_FINISHED, "Not finished yet: the deploy is "
-                       + (f"running ({newest['url']})" if newest else "starting") + ". Run the same command again.")
-            time.sleep(poll_seconds())
+        from datetime import datetime, timezone
+        ages = []
+        for m in merged:
+            try:
+                ages.append((datetime.now(timezone.utc)
+                             - datetime.fromisoformat(m["merged_at"].replace("Z", "+00:00"))).total_seconds())
+            except ValueError:
+                ages.append(0)
+        outcome, info_, deployed = await_deploy(repo, args.workflow, shas, deadline, say, min(ages or [0]))
+        if outcome == "failed":
+            finish("deploy failed", 1, f"The deploy failed: {info_}. Show the human; report it as an Urgent bug "
+                   "if production is affected.")
+        if outcome == "later":
+            finish("deploying", SHIP_NOT_FINISHED, f"Not finished yet: {info_} Run the same command again.")
+        if outcome == "stop":
+            finish("stopped", 1, info_)
+        run_url = info_
     # Close each issue (the deploy is done, or nothing needed deploying)
+    not_closed = []
     for m in merged:
         extra = ["--released-in", run_url] if run_url else (["--live"] if args.live else ["--no-deploy"])
         c, o, e = run(me + ["ship", str(m["ref"]), "--human", "--json"] + extra, cwd=root)
-        say(f"{OK} {m['issue']} is live and Done" if c == 0 else f"{WARN} {m['issue']}: couldn't close it ({(e or o)[:160]})")
+        if c == 0:
+            say(f"{OK} {m['issue']} is live and Done")
+        else:
+            not_closed.append(m["issue"])
+            say(f"{WARN} {m['issue']}: couldn't close it ({(e or o)[:160]})")
+    if deployed:
+        close_released(cfg, repo, deployed, run_url, {m["ref"] for m in merged}, say)
     msg = ", ".join(m["issue"] for m in merged) + " " + ("are" if len(merged) > 1 else "is") + " live."
+    if not_closed:
+        msg += " Couldn't close " + ", ".join(not_closed) + ": run the same command again, or /release them."
     if stopped:
         msg += " Not shipped: " + "; ".join(f"{s['issue']}: {s['why']}" for s in stopped)
-    finish("live", 0 if not stopped else 1, msg)
+    finish("live", 0 if not stopped and not not_closed else 1, msg)
 
 
 def cmd_ship(args):
@@ -2850,7 +2935,8 @@ def cmd_ship(args):
                 head = pr_head(repo, num)
                 if sha and head and head != sha:
                     stop(f"PR #{num} changed after the human tested it. Test it again with /test.")
-                cmd = ["gh", "pr", "merge", num, "-R", repo, "--squash"] + (["--match-head-commit", sha] if sha else [])
+                pin = sha or (head if lane else None)     # the lane: merge exactly the head the checks passed on
+                cmd = ["gh", "pr", "merge", num, "-R", repo, "--squash"] + (["--match-head-commit", pin] if pin else [])
                 code, out, err = run(cmd)
                 if code == 0:
                     say(f"{OK} Merged PR #{num}")
@@ -2888,7 +2974,8 @@ def cmd_ship(args):
         if iss["status"] not in ("Deploying", "Done"):
             board.set_option(iss, "Status", "Deploying")
     if args.merge_only:       # a batch: ship_batch deploys once for all of them, then closes each
-        finish("merged", 0, f"PR #{num} is merged.", sha=sha, docs_only=docs_only, pr=int(num))
+        finish("merged", 0, f"PR #{num} is merged.", sha=sha, docs_only=docs_only, pr=int(num),
+               merged_at=view.get("mergedAt") or "")
 
     # 2. Deploy: approve the production environment and wait
     run_info = None
@@ -2905,49 +2992,21 @@ def cmd_ship(args):
     elif docs_only:
         say(f"{INFO} Docs-only change: nothing to deploy")
     else:
-        while True:
-            code, out, err = run(["gh", "run", "list", "-R", repo, "--workflow", args.workflow, "--commit", sha,
-                                  "--json", "databaseId,status,conclusion,url"])
-            if code != 0:
-                stop(f"Couldn't list the deploy runs: {(err or out)[:200]}")
-            runs = json.loads(out or "[]")
-            run_info = runs[0] if runs else None
-            if run_info and run_info["status"] == "completed":
-                if run_info["conclusion"] == "success":
-                    say(f"{OK} Deployed: {run_info['url']}")
-                    break
-                say(f"{BAD} The deploy failed: {run_info['url']}")
-                finish("deploy failed", 1, "The deploy failed. Show the human the run; report it as an Urgent bug "
-                       "if production is affected.", run=run_info["url"])
-            if run_info and run_info["status"] == "waiting":
-                code, pend, err = gh_api("GET", f"repos/{repo}/actions/runs/{run_info['databaseId']}/pending_deployments")
-                pend = pend if isinstance(pend, list) else []
-                mine = [p["environment"]["id"] for p in pend if p.get("current_user_can_approve", True)]
-                if pend and not mine:
-                    later("waiting for deploy approval", "You can't approve this environment: the approver must "
-                          "approve it in GitHub (Actions → the run → Review deployments).")
-                if mine:
-                    code, _, err = gh_api("POST", f"repos/{repo}/actions/runs/{run_info['databaseId']}/pending_deployments",
-                                          {"environment_ids": mine, "state": "approved",
-                                           "comment": f"Approved by {gh_login() or 'the product owner'} after UAT (HAAM ship)"})
-                    if code != 0:
-                        stop(f"Couldn't approve the deploy ({str(err)[:150]}). Approve it in GitHub: Actions → "
-                             "the run → Review deployments.")
-                    say(f"{OK} Approved the production deploy")
-            if time.time() > deadline:
-                if run_info:
-                    later("deploying", f"Deploy run: {run_info['url']}.")
-                merged_at = view.get("mergedAt") or ""
-                try:
-                    from datetime import datetime, timezone
-                    age = (datetime.now(timezone.utc) - datetime.fromisoformat(merged_at.replace("Z", "+00:00"))).total_seconds()
-                except ValueError:
-                    age = 0
-                if age < 600:
-                    later("waiting for the deploy to start", f"No '{args.workflow}' run for the merge yet.")
-                stop(f"No '{args.workflow}' run started for the merge commit. Ask the human how this project "
-                     "deploys; only if they confirm it's live, run again with --no-deploy.")
-            time.sleep(poll_seconds())
+        merged_at = view.get("mergedAt") or ""
+        try:
+            from datetime import datetime, timezone
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(merged_at.replace("Z", "+00:00"))).total_seconds()
+        except ValueError:
+            age = 0
+        outcome, info_, deployed = await_deploy(repo, args.workflow, [sha], deadline, say, age)
+        if outcome == "failed":
+            finish("deploy failed", 1, "The deploy failed. Show the human the run; report it as an Urgent bug "
+                   "if production is affected.", run=info_)
+        if outcome == "later":
+            later("deploying", info_)
+        if outcome == "stop":
+            stop(info_)
+        run_info = {"url": info_, "headSha": deployed}
 
     # 3. Close the issue(s) (once). A batch PR ('#12 #13: …') closes every issue it names.
     where = f" · deploy run {run_info['url']}" if run_info else ""
@@ -2977,6 +3036,8 @@ def cmd_ship(args):
                     f"issue close {iss['parent']} --human")
     else:
         say(f"{INFO} Now set {show_ref(ref)} to Done in Linear and comment: Released to production{where}")
+    if run_info and run_info.get("headSha") and not args.released_in:
+        close_released(cfg, repo, run_info["headSha"], run_info["url"], {ref, *others}, say)
     tf = tested_file(root)
     if tf.exists():
         data = json.loads(tf.read_text())

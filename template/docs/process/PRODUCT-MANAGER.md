@@ -42,7 +42,7 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
    - **What went wrong** (*"step 3: the export button is still missing on mobile"*) → the agent records it on the issue, labels it `uat-failed` and sends it back to the agents, who fix it first. When it's fixed it comes back to `/test`.
 3. That's all. You don't need to touch branches, labels or the board.
 
-**Changes you can't test yourself** (kit or config updates, dependency bumps, refactors you wouldn't notice, CI): mark them `uat:skip` when you triage them, or say "spec approved, no UAT". They never come to `/test`: their PR merges by itself once CI and both AI reviews pass, and your next `ship` deploys them with everything else. Keep it for changes no user would notice; never for protected areas.
+**Changes you can't test yourself** (kit or config updates, dependency bumps, refactors you wouldn't notice, CI): mark them `uat:skip` when you triage them, or say "spec approved, no UAT". They never come to `/test`: their PR merges by itself once CI and both AI reviews pass (GitHub Projects), and your next `ship` deploys them with everything else and closes them. If you don't ship anything for a while, run `/test` and reply `ship` anyway, or `ship --all`: their deploy waits for your approval. On Linear, ship them by name (`ship APP-12 --human`). Keep it for changes no user would notice; never for protected areas.
 
 ### Weekly (30–45 minutes)
 1. **Group** loose issues into epics (`/triage group`) and shape the top epic with the agent (`/epic #9`).

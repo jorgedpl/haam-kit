@@ -68,23 +68,30 @@ class ToolTestCase(unittest.TestCase):
 
 GATE_HARNESS = r"""
 const scenario = JSON.parse(process.argv[process.argv.length - 1]);
-const calls = { statuses: [], graphql: [], notices: [], warnings: [] };
+const calls = { statuses: [], outputs: {}, warnings: [] };
 const pr = Object.assign({ number: 7, title: '#12: Bump deps', head: { ref: '12-bump', sha: 'abc' }, base: { ref: 'main' },
   draft: false, auto_merge: null, node_id: 'PR_1', labels: [] }, scenario.pr);
+const issue = (n) => scenario.issues[n] === undefined ? null : Object.assign({ state: 'open', labels: [] },
+  Array.isArray(scenario.issues[n]) ? { labels: scenario.issues[n] } : scenario.issues[n]);
 const github = {
-  paginate: async (fn, args) => fn === 'files' ? scenario.files : fn === 'comments' ? [] : [],
+  paginate: async (fn) => fn === 'files' ? scenario.files : fn === 'pulls' ? [pr] : [],
   rest: {
-    pulls: { get: async () => ({ data: pr }), listFiles: 'files' },
-    issues: { get: async ({ issue_number }) => ({ data: { labels: (scenario.issues[issue_number] || []).map(n => ({ name: n })) } }),
+    pulls: { get: async () => ({ data: pr }), listFiles: 'files', list: 'pulls' },
+    issues: { get: async ({ issue_number }) => {
+                const i = issue(issue_number);
+                if (!i) throw new Error('Not Found');
+                return { data: Object.assign({}, i, { labels: i.labels.map(n => ({ name: n })) }) };
+              },
               listComments: 'comments', removeLabel: async () => {}, createComment: async () => {} },
     repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify({ tracker: scenario.tracker })).toString('base64') } }),
              createCommitStatus: async (x) => calls.statuses.push(x), listCommitStatusesForRef: 'statuses' },
   },
 };
-const context = { repo: { owner: 'o', repo: 'r' }, payload: { action: 'labeled', pull_request: { number: 7 } } };
-const core = { info: () => {}, notice: (m) => calls.notices.push(m), warning: (m) => calls.warnings.push(m) };
-const getOctokit = () => ({ graphql: async (q, v) => calls.graphql.push(v) });
-process.env.AUTO_MERGE_TOKEN = scenario.token || '';
+const context = { repo: { owner: 'o', repo: 'r' }, eventName: scenario.event || 'pull_request',
+  payload: scenario.event === 'issues' ? { action: 'unlabeled', issue: { number: 12 } }
+                                       : { action: 'labeled', pull_request: { number: 7 } } };
+const core = { info: () => {}, notice: () => {}, warning: (m) => calls.warnings.push(m),
+               setOutput: (k, v) => { calls.outputs[k] = v; } };
 (async () => {
   await (async function () { BODY })();
   console.log(JSON.stringify(calls));
@@ -97,7 +104,8 @@ class TestRepository(unittest.TestCase):
     def test_gate_no_uat_lane(self):
         """Run gates.yml's script against fake GitHub data: the lane needs the owner's uat:skip on every issue."""
         gates = (KIT / ".github/workflows/gates.yml").read_text()
-        body = "\n".join(l[12:] for l in re.search(r"script: \|\n(.*)", gates, re.S).group(1).splitlines())
+        script = re.search(r"script: \|\n(.*?)\n\s*- name: ", gates, re.S).group(1)
+        body = "\n".join(l[12:] for l in script.splitlines())
         code = GATE_HARNESS.replace("BODY", body)
 
         def gate(**sc):
@@ -111,23 +119,34 @@ class TestRepository(unittest.TestCase):
             calls = json.loads(p.stdout)
             return calls["statuses"][-1]["state"], calls["statuses"][-1]["description"], calls
 
-        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, token="t")
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]})
         self.assertEqual(st, "success")
-        self.assertEqual(calls["graphql"], [{"id": "PR_1"}])                       # auto-merge turned on
+        self.assertEqual(calls["outputs"], {"enable": "7", "disable": ""})           # auto-merge turned on
         st, desc, _ = gate(pr={"labels": ["uat:skip"]}, issues={12: []})          # the owner didn't mark the issue
         self.assertEqual(st, "failure")
-        self.assertIn("isn't marked uat:skip", desc)
+        self.assertIn("marked uat:skip", desc)
         st, desc, _ = gate(pr={"title": "#12 #13: Batch", "labels": ["uat:skip"]}, issues={12: ["uat:skip"], 13: []})
         self.assertEqual(st, "failure")                                             # every issue in a batch
-        st, desc, _ = gate(pr={"labels": ["uat:skip", "human-review"]}, issues={12: ["uat:skip"]})
+        st, desc, _ = gate(pr={"title": "#7: x", "head": {"ref": "x", "sha": "a"}, "labels": ["uat:skip"]},
+                           issues={7: {"labels": ["uat:skip"], "pull_request": {}}})
+        self.assertEqual(st, "failure")                                             # its own label isn't the owner's
+        st, desc, _ = gate(pr={"labels": ["uat:skip"]}, issues={12: {"labels": ["uat:skip"], "state": "closed"}})
+        self.assertEqual(st, "failure")                                             # a closed issue doesn't count
+        st, desc, calls = gate(pr={"labels": ["uat:skip", "human-review"], "auto_merge": {"x": 1}},
+                               issues={12: ["uat:skip"]})
         self.assertEqual(st, "failure")                                             # never for protected areas
+        self.assertEqual(calls["outputs"]["disable"], "7")                          # ...and auto-merge goes off
         st, desc, calls = gate(pr={"labels": ["uat:skip"]}, tracker="linear")
         self.assertEqual(st, "success")
-        self.assertTrue(calls["notices"])                                           # no token: says how to ship it
+        self.assertEqual(calls["outputs"]["enable"], "")                            # Linear: the owner ships it
         st, desc, _ = gate(pr={"labels": []}, issues={12: ["uat:skip"]})
         self.assertEqual(st, "failure")                                             # the PR must carry it too
-        st, desc, calls = gate(pr={"labels": ["uat:skip"], "draft": True}, issues={12: ["uat:skip"]}, token="t")
-        self.assertEqual(calls["graphql"], [])                                      # drafts never auto-merge
+        st, desc, calls = gate(pr={"labels": ["uat:skip"], "draft": True}, issues={12: ["uat:skip"]})
+        self.assertEqual(calls["outputs"]["enable"], "")                            # drafts never auto-merge
+        # The owner takes uat:skip off the issue: its open PR is re-checked and loses auto-merge
+        st, desc, calls = gate(event="issues", pr={"labels": ["uat:skip"], "auto_merge": {"x": 1}}, issues={12: []})
+        self.assertEqual(st, "failure")
+        self.assertEqual(calls["outputs"]["disable"], "7")
 
     def test_override_comment_satisfies_the_gate(self):
         """The comment /override posts must be one gates.yml accepts, and one that starts a gate run."""
@@ -841,6 +860,26 @@ class TestGitHubProjects(ToolTestCase):
                                    "--priority", "High", "--json", env={**self.env, "HAAM_POLL_SECONDS": "0"}).stdout)
         view = json.loads(self.tool("issue", "view", str(res["number"]), "--json").stdout)["issue"]
         self.assertEqual((view["status"], view["priority"]), ("Ready", "High"))
+
+    def test_ship_carries_a_lane_change_waiting_to_deploy(self):
+        self.setup_board()
+        mk = lambda t, status: json.loads(self.tool("issue", "create", "--stream", "bug", "--title", t, "--status",
+                                                    status, "--json").stdout)["number"]
+        lane, a = mk("Bump deps", "Deploying"), mk("Fix A", "UAT")
+        st = self.gh_state()
+        st["prs"] = {"5": {"title": f"#{lane}: bump", "headRefName": f"{lane}-bump", "state": "MERGED",
+                           "labels": [{"name": "uat:skip"}], "url": "https://pr/5", "mergeCommit": {"oid": "merge5"}},
+                     "6": {"title": f"#{a}: fix", "headRefName": f"{a}-fix", "state": "OPEN", "isDraft": False,
+                           "labels": [{"name": "uat-passed"}], "url": "https://pr/6"}}
+        st["runs"] = [{"databaseId": 3, "status": "waiting", "conclusion": "", "url": "https://run/3", "headSha": "merge5"}]
+        self.state.write_text(json.dumps(st))
+        env = {**self.env, "HAAM_POLL_SECONDS": "0"}
+        res = json.loads(self.tool("ship", str(a), "--human", "--json", env=env).stdout)
+        self.assertEqual(res["state"], "live", res)
+        st = self.gh_state()
+        self.assertEqual(st["cancelled"], ["3"])                     # the lane's waiting run: the new one includes it
+        self.assertEqual(len(st["approvals"]), 1)
+        self.assertEqual(st["issues"][str(lane)]["state"], "CLOSED")   # it went out in the same deploy
 
     def test_ship_several_with_one_deploy(self):
         self.setup_board()

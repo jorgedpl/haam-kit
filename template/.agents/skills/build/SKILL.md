@@ -18,9 +18,9 @@ Target: $ARGUMENTS
 - A spec exists (`docs/specs/`) for features, or a fix plan in the issue for bugs.
 
 ## 1. Claim (AGENTS.md §6)
-Re-fetch the issue → if claimed by someone else, stop → assign to current user → status `In Progress` → comment ``🤖 Claimed by <user> via <agent tool> [on <machine>] · branch `<branch>` ``.
+Re-fetch the issue → if it's `In Progress` or labelled `claimed` (another chat is still writing its spec), stop → assign to current user → status `In Progress` → comment ``🤖 Claimed by <user> via <agent tool> [on <machine>] · branch `<branch>` · claim <id>`` → re-read the comments in case another chat claimed it at the same moment (AGENTS.md §6).
 If the issue belongs to an epic that is still in `Backlog`, also move the epic to `In Progress`.
-On GitHub Projects one command does it all and refuses if someone got there first: `python3 tools/haam/haam.py issue claim <number> --tool "<your tool>" --machine "<this computer>"` (bugs not yet in Ready: only with the human's OK, add `--force`).
+On GitHub Projects one command does it all and refuses if someone got there first: `python3 tools/haam/haam.py issue claim <number> --tool "<your tool>" --machine "<this computer>"` (bugs not yet in Ready: only with the human's OK, add `--force`). It prints a claim id. If you have to stop before the PR opens, hand it back: `haam.py issue release <number> --claim <id> --body "<why>"` (back to `Ready`).
 
 ## 2. Workspace and branch
 If other agent chats may be open on this machine, work in your own worktree (`AGENTS.md` §7; `/work` sets one up). In a worktree, first run `python3 tools/haam/haam.py worktree prep` (copies local files like `.env` that `make check` may need; a worktree made with plain `git worktree add` has none) and, if it says the secret hook is off, `make hooks`.

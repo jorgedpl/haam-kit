@@ -18,7 +18,7 @@ If the item you pick will change files (build, spec, assessment), you need your 
 
 ## 1. Build the queue (unassigned or assigned to the current user, not In Progress)
 
-GitHub Projects: `python3 tools/haam/haam.py issue list --status Ready --unassigned --open-only` (and `--status Backlog`, `--status Triage` for steps 4–5). Linear: list the team's issues.
+GitHub Projects: `python3 tools/haam/haam.py issue list --status Ready --unassigned --open-only` (and `--status Backlog --no-label claimed`, `--status Discovery --unassigned --no-label claimed`, `--status Triage --no-label claimed` for steps 4–5). Linear: list the team's issues.
 
 Take the first match, in this order. **Batch an epic's items** (always when the setting `grouping` is `per-epic`; otherwise when it helps): when two or more Ready items of the same epic share a priority (bugs, and small features (XS/S) with approved specs), offer them as one item (one branch, one PR; see `/build`). One PR instead of several means one CI run and one review instead of several, and the human tests them together.
 
@@ -26,8 +26,8 @@ Take the first match, in this order. **Batch an epic's items** (always when the 
 1. **Bugs**: label `stream:bug`, status `Ready`, priority Urgent or High.
 2. **Features**: status `Ready`, label `agent-ready`, by priority (Urgent → Low), then oldest first.
 3. **Bugs**: label `stream:bug`, status `Ready`, priority Medium or Low.
-4. **Specs to write**: status `Backlog`, label `stream:feature`, has a priority, no spec yet → run `/spec`.
-5. **Ideas to assess**: label `stream:idea`, status `Discovery` and unassigned (triaged for assessment, by priority), then status `Triage` → run `/assess`. Epics (label `epic`) that are still ideas are assessed here as a whole. Skip ideas that belong to an epic still being decided: they are decided with their epic.
+4. **Specs to write**: status `Backlog`, label `stream:feature`, has a priority, no spec yet, not `claimed` → run `/spec`.
+5. **Ideas to assess**: label `stream:idea`, status `Discovery`, unassigned and not `claimed` (triaged for assessment, by priority), then status `Triage` → run `/assess`. Epics (label `epic`) that are still ideas are assessed here as a whole. Skip ideas that belong to an epic still being decided: they are decided with their epic.
 
 **Epics:** never build or spec an epic itself (steps 1–4 skip label `epic`); build and spec its sub-issues. Also skip any issue with label `human-only`, any with no priority (except ideas in step 5), and any whose `blocked by` relations are not Done.
 

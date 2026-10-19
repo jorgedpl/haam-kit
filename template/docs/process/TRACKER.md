@@ -19,9 +19,9 @@ Skills say "in the tracker"; this page says how to do each operation in each tra
 | Files for the issue | `docs/specs/GH-123-slug.md` (same for assessments, UAT) | `docs/specs/APP-123-slug.md` |
 | 12 statuses | Board's **Status** field | Team workflow statuses |
 | Priority | Board's **Priority** field (Urgent/High/Medium/Low) | Built-in priority |
-| Streams, `agent-ready`, `human-only`, `override-followup`, `epic`, `uat-failed` | Issue labels | Issue labels |
+| Streams, `agent-ready`, `human-only`, `override-followup`, `epic`, `uat-failed`, `claimed` | Issue labels | Issue labels |
 | Epic (groups the issues of one feature) | Issue labelled `epic`; its issues are GitHub **sub-issues** | Issue labelled `epic`; its issues are **sub-issues** (parent set) |
-| Who is working on it | Issue assignee | Issue assignee |
+| Who is working on it | Status In Progress (building) or label `claimed` (assessing, writing a spec), plus the claim comment. The assignee alone can't tell two chats of the same person apart | Same |
 | Status moves on PR open/merge | `tracker-sync.yml` workflow | Linear's GitHub integration |
 
 ## Operations
@@ -41,7 +41,8 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Rewrite an issue** (title, description) | `haam.py issue edit 14 --title "…" --body-file new.md` | Update issue |
 | **An epic's issues** | `haam.py issue children 9` (with progress) | List the epic's sub-issues |
 | **Issues not in any epic** | `haam.py issue list --open-only --no-parent --no-label epic` | List issues without a parent |
-| **Claim** (before any code) | `haam.py issue claim 123 --tool "Claude Code" --machine laptop` (refuses if already claimed or not Ready; `--force` for bugs being fixed straight from Triage only when the human said so) | Re-fetch; if In Progress or assigned to someone else, stop; else assign to you, set In Progress, comment |
+| **Claim** (before building, assessing or writing a spec) | `haam.py issue claim 123 --tool "Claude Code" --machine laptop` (build: refuses if already claimed or not Ready; `--force` for bugs being fixed straight from Triage only when the human said so). Assessing: add `--for assess`; writing a spec: `--for spec`. It prints a claim id: keep it | Re-fetch; if In Progress, labelled `claimed` or assigned to someone else, stop; else assign to you, set In Progress (build) or add label `claimed` (assess, spec), comment with a claim id, re-read the comments (AGENTS.md §6) |
+| **Release a claim** (assessment or spec pushed; or the chat stops) | `haam.py issue release 123 --claim <id> [--status Decision]` (`--human` instead of the id only in `/triage stale` or `/test`) | Unassign, remove `claimed`, set the status, comment `🔓 Claim released` |
 | **Change status** | `haam.py issue status 123 "UAT"` | Update issue status |
 | **Human-only status** (Done, Parked, Canceled, Decision→Backlog) | Same, plus `--human`, **only** inside `/triage`, `/epic`, `/decide`, `/test`, `/release` or `/override` typed by a human | Same rule |
 | **Priority** | `haam.py issue priority 123 High` | Update priority |
@@ -64,7 +65,7 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 
 - Every piece of work has an issue in the tracker; nothing is tracked anywhere else.
 - If the tracker can't be reached, stop and tell the human.
-- The claim protocol is what stops two agents (or two machines) building the same thing. Never skip it.
+- The claim protocol is what stops two agent chats (or two machines) building, assessing or specifying the same thing. Never skip it.
 - Human-only moves happen only inside the human-only skills, and the tool asks for `--human` on GitHub as a reminder.
 
 ## GitHub Projects setup (admin, once)

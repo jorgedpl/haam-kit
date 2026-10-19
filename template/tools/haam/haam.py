@@ -18,7 +18,7 @@ Admin (first-time adoption and upgrades):
     invite    --github USER [--linear-email EMAIL] [--apply]
 
 Agents, when the tracker is GitHub Projects:
-    issue create|view|list|claim|status|priority|label|comment|close|link|unlink|children|edit ...
+    issue create|view|list|claim|release|status|priority|label|comment|close|link|unlink|children|edit ...
 
 Testing and shipping (inside /test, after the human's verdict):
     checkout-pr ISSUE | --back              Put a change on this machine to test it (its PR, or the agent's branch)
@@ -53,6 +53,7 @@ MIT licence. Copyright (c) 2026 Jorge del Prado. See docs/setup/HAAM-LICENSE.md.
 """
 
 import argparse
+import datetime
 import getpass
 import hashlib
 import json
@@ -67,7 +68,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -1686,7 +1687,11 @@ GH_ISSUE_LABELS = [
     ("epic", "3E4B9E", "Groups the issues that make up one feature (its sub-issues)"),
     ("uat-failed", "D93F0B", "Failed the human test: rework first, then test again"),
     ("uat:skip", "C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
+    ("claimed", "FBCA04", "An agent chat is assessing it or writing its spec: leave it to that chat"),
 ]
+CLAIMED_LABEL = "claimed"
+CLAIM_MARK, RELEASE_MARK = "🤖 Claimed by", "🔓 Claim released"
+CLAIM_RACE_MINUTES = 10
 EPIC_LABEL = "epic"
 # Issue labels only a human's decision adds (agents pass --human only inside the skill where the human decided)
 HUMAN_LABELS = {"agent-ready": "agent-ready is added only after a human approves the spec",
@@ -2068,6 +2073,51 @@ def cmd_issue(args):
         print(result["message"])
 
 
+def issue_comments(repo, number):
+    """The issue's comments, oldest first: [{body, createdAt}]."""
+    code, out, _ = run(["gh", "issue", "view", str(number), "-R", repo, "--json", "comments"])
+    return (json.loads(out).get("comments") or []) if code == 0 and out else []
+
+
+def active_claims(comments):
+    """Claim comments since the last release, oldest first."""
+    last = max((k for k, c in enumerate(comments) if (c.get("body") or "").startswith(RELEASE_MARK)), default=-1)
+    return [c for c in comments[last + 1:] if (c.get("body") or "").startswith(CLAIM_MARK)]
+
+
+def claim_token(body):
+    m = re.search(r"· claim ([0-9a-f]{6,})", body or "")
+    return m.group(1) if m else ""
+
+
+def claim_branch(body):
+    m = re.search(r"branch `([^`]+)`", body or "")
+    return m.group(1) if m else ""
+
+
+def is_claimed(iss):
+    """A chat is working on it: building (In Progress), or assessing / writing its spec (label 'claimed')."""
+    return iss["status"] == "In Progress" or CLAIMED_LABEL in (iss["labels"] or [])
+
+
+def claim_is_mine(repo, number, args, comments=None):
+    """This chat holds the issue's claim: it gives the claim's id (--claim), or it's on the claim's branch."""
+    claims = active_claims(comments if comments is not None else issue_comments(repo, number))
+    if getattr(args, "claim", None) and args.claim in {claim_token(c.get("body")) for c in claims}:
+        return True
+    branch = git_out(Path.cwd(), "branch", "--show-current")
+    if not branch:
+        return False
+    return bool(re.match(rf"^{number}-", branch)) or any(claim_branch(c.get("body")) == branch for c in claims)
+
+
+def parse_when(t):
+    try:
+        return datetime.datetime.fromisoformat((t or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def issue_action(args, cfg, board):
     repo = cfg["github_repo"]
     a = args.action
@@ -2202,15 +2252,10 @@ def issue_action(args, cfg, board):
         canon = next((n for n, _, _ in GH_STATUSES if n.lower() == new.lower()), None)
         if not canon:
             raise RuntimeError(f"Unknown status '{new}'. Valid: {', '.join(n for n, _, _ in GH_STATUSES)}")
-        branch = git_out(Path.cwd(), "branch", "--show-current")
-        mine = bool(re.match(rf"^{number}-", branch or ""))
-        guarded = iss["status"] == "In Progress" and not (args.force or args.human)
-        if guarded and not mine and branch:
-            # A batch PR's branch is named after its first issue; the claim comment names the branch.
-            code, out, _ = run(["gh", "issue", "view", str(number), "-R", repo, "--json", "comments"])
-            bodies = [c.get("body", "") for c in (json.loads(out).get("comments") or [])] if code == 0 and out else []
-            mine = any("Claimed by" in b_ and f"`{branch}`" in b_ for b_ in bodies)
-        if guarded and not mine:
+        guarded = is_claimed(iss) and not (args.force or args.human)
+        # This chat's own claim: its id (--claim), or its branch (a batch PR's branch is named after its first issue;
+        # the claim comment names the branch).
+        if guarded and not claim_is_mine(repo, number, args):
             raise RuntimeError(f"#{number} is claimed (status {iss['status']}, assigned to {', '.join(iss['assignees']) or '-'}) "
                                "and this chat isn't on its branch. Leave it to the chat working on it, or add --force "
                                "only when the human asked (e.g. /triage releasing a stuck claim).")
@@ -2257,29 +2302,116 @@ def issue_action(args, cfg, board):
 
     if a == "claim":
         me = gh_login()
+        phase = args.for_ or "build"
         if iss["state"] != "OPEN":
             raise RuntimeError(f"#{number} is closed")
         others = [x for x in iss["assignees"] if x != me]
-        if iss["status"] == "In Progress" or others:
-            raise RuntimeError(f"#{number} is already claimed (status {iss['status']}, assignees {', '.join(iss['assignees']) or '-'}). "
-                               "Pick another issue.")
-        if iss["status"] not in ("Ready", None) and not args.force:
-            raise RuntimeError(f"#{number} is in {iss['status']}, not Ready. Only Ready issues are built (AGENTS.md §3).")
+        if is_claimed(iss) or others:
+            who = ", ".join(iss["assignees"]) or "-"
+            raise RuntimeError(f"#{number} is already claimed (status {iss['status']}, assignees {who}"
+                               + (", being assessed or specced by another chat" if CLAIMED_LABEL in iss["labels"] else "")
+                               + "). Pick another issue.")
         if "human-only" in iss["labels"]:
             raise RuntimeError(f"#{number} is labelled human-only")
-        if EPIC_LABEL in iss["labels"]:
-            raise RuntimeError(f"#{number} is an epic: build its sub-issues instead (issue children {number})")
-        code, out, err = run(["gh", "issue", "edit", str(number), "-R", repo, "--add-assignee", "@me"])
+        bug = "stream:bug" in iss["labels"]
+        if phase == "build":
+            if iss["status"] not in ("Ready", None) and not args.force:
+                raise RuntimeError(f"#{number} is in {iss['status']}, not Ready. Only Ready issues are built (AGENTS.md §3).")
+            if EPIC_LABEL in iss["labels"]:
+                raise RuntimeError(f"#{number} is an epic: build its sub-issues instead (issue children {number})")
+        elif phase == "assess":
+            if iss["status"] not in ("Triage", "Discovery", None):
+                raise RuntimeError(f"#{number} is in {iss['status']}: only ideas in Triage or Discovery are assessed.")
+        elif phase == "spec":
+            if not (iss["status"] == "Backlog" or (bug and iss["status"] in ("Triage", "Ready"))):
+                raise RuntimeError(f"#{number} is in {iss['status']}: specs are written for Backlog features "
+                                   "(or bugs that need a fix plan).")
+            if EPIC_LABEL in iss["labels"]:
+                raise RuntimeError(f"#{number} is an epic: write a spec for each of its sub-issues instead")
+        token = os.urandom(3).hex()
+        cmd = ["gh", "issue", "edit", str(number), "-R", repo, "--add-assignee", "@me"]
+        if phase != "build":
+            cmd += ["--add-label", CLAIMED_LABEL]
+        code, out, err = run(cmd)
+        if code != 0 and phase != "build" and "not found" in (err or out or "").lower():
+            lab = next(x for x in GH_ISSUE_LABELS if x[0] == CLAIMED_LABEL)
+            run(["gh", "label", "create", lab[0], "-R", repo, "--color", lab[1], "--description", lab[2], "--force"])
+            code, out, err = run(cmd)
         if code != 0:
             raise RuntimeError(err or out)
-        board.set_option(iss, "Status", "In Progress")
+        if phase == "build":
+            board.set_option(iss, "Status", "In Progress")
+        elif phase == "assess" and iss["status"] != "Discovery":
+            board.set_option(iss, "Status", "Discovery")
         tool = args.tool or "an agent"
         where = f" on {args.machine}" if args.machine else ""
-        branch = args.branch or f"{number}-<short-title>"
+        branch = args.branch or (f"{number}-<short-title>" if phase == "build" else "")
+        what = {"build": "", "assess": " to assess it", "spec": " to write its spec"}[phase]
+        body = (f"{CLAIM_MARK} @{me} via {tool}{where}{what}" + (f" · branch `{branch}`" if branch else "")
+                + f" · claim {token}")
+        code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
+        if code != 0:
+            raise RuntimeError(err or out)
+        # Two chats can claim in the same second (they run as the same GitHub user, so the assignee doesn't tell
+        # them apart). The first claim comment wins; a later one withdraws.
+        claims = active_claims(issue_comments(repo, number))
+        mine = next((c for c in claims if claim_token(c.get("body")) == token), None)
+        when = parse_when(mine.get("createdAt")) if mine else None
+        rivals = []
+        for c in claims:
+            if c is mine:
+                break
+            t = parse_when(c.get("createdAt"))
+            if not when or not t or (when - t).total_seconds() <= CLAIM_RACE_MINUTES * 60:
+                rivals.append(c)
+        if mine and rivals:
+            run(["gh", "issue", "comment", str(number), "-R", repo, "--body",
+                 f"↩️ Claim {token} withdrawn: another chat claimed #{number} first (claim "
+                 f"{claim_token(rivals[0].get('body')) or '?'})."])
+            raise RuntimeError(f"#{number} was claimed by another chat a moment earlier. Pick another issue.")
+        release = f"python3 tools/haam/haam.py issue release {number} --claim {token}"
+        nxt = {"build": f"Branch: git fetch origin && git switch -c {number}-<short-title> origin/main",
+               "assess": f"When the assessment is pushed: {release} --status Decision",
+               "spec": f"When the spec is pushed: {release}"}[phase]
+        return {"number": number, "assignee": me, "claim": token, "phase": phase,
+                "message": f"Claimed #{number} for @{me}{what} (claim {token}). {nxt}"}
+
+    if a == "release":
+        comments = issue_comments(repo, number)
+        claims = active_claims(comments)
+        if not claims and not is_claimed(iss):
+            return {"number": number, "message": f"#{number} isn't claimed"}
+        if not (args.human or claim_is_mine(repo, number, args, comments)):
+            raise RuntimeError(f"#{number} is claimed by another chat. Give this chat's claim id (--claim, from your "
+                               "claim's output or comment), or --human when the human asked you to release it "
+                               "(e.g. /triage stale).")
+        asked = (args.status or [None])[-1]
+        new = None
+        if asked:
+            new = next((n for n, _, _ in GH_STATUSES if n.lower() == asked.lower()), None)
+            if not new:
+                raise RuntimeError(f"Unknown status '{asked}'")
+            if (new in HUMAN_STATUSES or (iss["status"] == "Decision" and new == "Backlog")) and not args.human:
+                raise RuntimeError(f"Moving to {new} is a human decision: add --human only inside the human-only skill.")
+        elif iss["status"] == "In Progress":
+            new = "Ready"
+        cmd = ["gh", "issue", "edit", str(number), "-R", repo]
+        for x in iss["assignees"]:
+            cmd += ["--remove-assignee", x]
+        if CLAIMED_LABEL in iss["labels"]:
+            cmd += ["--remove-label", CLAIMED_LABEL]
+        if len(cmd) > 6:
+            code, out, err = run(cmd)
+            if code != 0:
+                raise RuntimeError(err or out)
+        if new and new != iss["status"]:
+            board.set_option(iss, "Status", new)
+        tokens = ", ".join(t for t in (claim_token(c.get("body")) for c in claims) if t)
+        why = f" · {args.body}" if args.body else ""
         run(["gh", "issue", "comment", str(number), "-R", repo, "--body",
-             f"🤖 Claimed by @{me} via {tool}{where} · branch `{branch}`"])
-        return {"number": number, "assignee": me, "message": f"Claimed #{number} for @{me}; status In Progress. "
-                f"Branch: git fetch origin && git switch -c {number}-<short-title> origin/main"}
+             f"{RELEASE_MARK}" + (f" ({tokens})" if tokens else "") + (f" · status {new}" if new else "") + why])
+        return {"number": number, "status": new or iss["status"],
+                "message": f"Released #{number}" + (f"; status {new}" if new else "")}
 
     if a == "close":
         if not args.human:
@@ -4750,8 +4882,8 @@ def main():
     p.set_defaults(func=cmd_github_project)
 
     p = common(sub.add_parser("issue", help="work with issues on the GitHub Projects board (for agents)"))
-    p.add_argument("action", choices=["list", "create", "view", "add", "claim", "status", "priority", "label",
-                                      "comment", "close", "link", "unlink", "children", "edit"])
+    p.add_argument("action", choices=["list", "create", "view", "add", "claim", "release", "status", "priority",
+                                      "label", "comment", "close", "link", "unlink", "children", "edit"])
     p.add_argument("number", nargs="?", help="issue number (#123 or 123)")
     p.add_argument("value", nargs="?", help="new status or priority")
     p.add_argument("--title")
@@ -4772,6 +4904,9 @@ def main():
     p.add_argument("--tool", help="claim: agent tool, e.g. 'Claude Code'")
     p.add_argument("--machine", help="claim: which computer, e.g. 'desktop'")
     p.add_argument("--branch", help="claim: branch name")
+    p.add_argument("--for", dest="for_", choices=["build", "assess", "spec"],
+                   help="claim: what this chat is about to do (default build)")
+    p.add_argument("--claim", help="release/status: this chat's claim id (printed by claim, and in its comment)")
     p.add_argument("--force", action="store_true", help="claim: allow a non-Ready issue (bugs); status: move an issue "
                    "another chat has claimed (only when the human asked)")
     p.add_argument("--human", action="store_true", help="a human ran the human-only skill for this change")

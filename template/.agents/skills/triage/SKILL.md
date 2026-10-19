@@ -20,7 +20,7 @@ This skill runs only when a human types it. You do the reading and propose; **th
 - **group:** open issues that aren't in an epic and aren't epics (GitHub: `issue list --open-only --no-parent --no-label epic --json`), plus the open epics (`--label epic`). Go to step 2a.
 - **inbox:** every open issue in `Triage`, plus any open issue with no priority outside Done, Parked and Canceled. GitHub: `python3 tools/haam/haam.py issue list --status Triage --open-only --json`.
 - **backlog:** every issue in `Ready` and `Backlog`. Look for: priorities that no longer fit the current priorities; too many Highs (more than about one in five); items larger than M that should be split; features in Backlog with no spec; Low items older than two months (suggest Park).
-- **stale:** `In Progress` with no comment or commit for 3+ days; `UAT` waiting 3+ days; `Decision` waiting 7+ days; `Parked` items whose "revisit when" seems to have come true; open `override-followup` items.
+- **stale:** `In Progress` with no comment or commit for 3+ days; label `claimed` (an assessment or spec under way) with no comment or commit for 1+ day; `UAT` waiting 3+ days; `Decision` waiting 7+ days; `Parked` items whose "revisit when" seems to have come true; open `override-followup` items.
 
 Read each item fully (description and comments). For a bug, check whether the steps to reproduce are usable. Look for duplicates among open issues. Take at most 15 items per round; say how many are left.
 
@@ -56,7 +56,7 @@ For each item, in the tracker:
 - Set the priority and fix the stream label. For `UAT: skip`, add the label `uat:skip` (GitHub: `haam.py issue label <n> --add uat:skip --human`, allowed here because the human confirmed it).
 - Status: `Ready` (bugs), `Discovery` (ideas to assess), `Parked` or `Canceled` (on GitHub these two need `--human`, allowed here because the human confirmed them; close Canceled issues as not planned or duplicate). Leave "needs info" items in `Triage`.
 - Comment: `🗂️ Triaged by <user>: <priority> · <next step> · <why>`. For "needs info", comment the question and mention the reporter. For duplicates, link the original. For stale nudges, mention the assignee.
-- "Release the claim": unassign, status back to `Ready` (GitHub: `issue status <n> Ready --force`, allowed here because the human confirmed it), comment why.
+- "Release the claim": unassign, remove `claimed`, status back to `Ready` for a build (an assessment stays in `Discovery`, a spec in `Backlog`), comment why (GitHub: `issue release <n> --human --body "<why>"`, allowed here because the human confirmed it).
 Anything the human didn't confirm stays exactly as it was.
 
 ## 5. Report

@@ -58,7 +58,7 @@ The setup skills drive `tools/haam/haam.py`; run `python3 tools/haam/haam.py doc
 1. **Never push to `main`, never merge a PR, never deploy, never run production commands.** Humans do that. The one exception: inside `/test`, typed by a human, after the human said `pass` (`haam.py publish` opens the PR) and `ship` in this session, `haam.py ship <ID> --human` merges the commit they tested, approves the deploy and closes the issue for them. (`/release` uses `ship --merged-only`, which never merges.) **Only the owner's chat ships:** agent chats in worktrees never run `ship`, and the tool refuses there.
 2. **Never add the PR labels `uat-passed`, `gate-override` or `ai-review-overruled`, never add `uat:skip` to an issue, never post the `uat` commit status, never change the project's settings** (`haam.py settings --human` is only for `/haam-settings`), and never move an issue to Done, Backlog (from Decision), Parked or Canceled. Those are human decisions. The only exception is when a human has typed `/triage`, `/epic`, `/decide`, `/test`, `/uat-result`, `/override`, `/release` or `/haam-settings` in this session; then you carry out exactly what that skill says. (`/spec` adds `agent-ready`, and `uat:skip` when the owner said "no UAT", only on their explicit approval.)
 3. **Only build issues that are in `Ready` and have the `agent-ready` label** (bugs: `Ready` is enough). If something isn't ready, help make it ready (`/spec`) instead of building it. **Never build an epic** (label `epic`) as one piece: build its sub-issues, and read the epic's brief in `docs/epics/` for context.
-4. **Claim before you build** (see §6). Never work on an issue someone else has claimed.
+4. **Claim before you build, assess or write a spec** (see §6). Never work on an issue another chat has claimed: every chat runs as the same person, so the claim, not the assignee, is what tells them apart.
 5. **Never put secrets or real personal data** (names, emails, dates of birth, addresses, document numbers of real people) in code, tests, fixtures, logs, commits, the tracker or docs. Use the synthetic fixtures in the test folder.
 6. **Never read or print `.env*` files or production credentials.** If you need a config value, ask.
 7. **Stay in scope.** Implement the acceptance criteria, nothing else. Note other problems you spot as new `/bug` or `/idea` issues instead of fixing them in the same PR.
@@ -100,13 +100,15 @@ The tracker is either a GitHub Projects board (`"tracker": "github"`) or Linear 
 
 You act as the human who is running this session. If you can't reach the tracker, stop and tell the human; don't track work anywhere else.
 
-**Claim protocol (before any code change):**
-1. Re-fetch the issue. If it's `In Progress` or assigned to someone else, stop and pick another.
-2. Assign it to the current user, set status `In Progress`.
-3. Comment: ``🤖 Claimed by <user> via <agent tool> [on <machine>] · branch `<branch-name>` `` (the branch in backticks: `/test` reads it).
-On GitHub Projects, `haam.py issue claim <number> --tool "<tool>" --machine "<machine>"` does all three and refuses if someone got there first.
+**Claim protocol (before building, assessing or writing a spec):**
+1. Re-fetch the issue. If it's `In Progress`, has label `claimed`, or is assigned to someone else, stop and pick another.
+2. Assign it to the current user. Building: set status `In Progress`. Assessing (`Discovery`) or writing a spec: add label `claimed`.
+3. Comment: ``🤖 Claimed by <user> via <agent tool> [on <machine>] [to assess it | to write its spec] · branch `<branch-name>` · claim <id>`` (the branch in backticks: `/test` reads it; the id is any 6 random hex characters, and tells this chat's claim from another's).
+4. Re-read the comments. If another chat's claim comment landed just before yours (within 10 minutes, with no `🔓 Claim released` after it), you lost the race: comment that yours is withdrawn and pick another.
+5. When an assessment or spec is pushed, release the claim: unassign, remove `claimed`, comment ``🔓 Claim released``. A build's claim ends by itself when its PR opens.
+On GitHub Projects, `haam.py issue claim <number> [--for assess|spec] --tool "<tool>" --machine "<machine>"` does steps 1–4 and prints the claim id; `haam.py issue release <number> --claim <id> [--status Decision]` does step 5.
 
-**Never move an issue another chat has claimed.** On GitHub Projects, `issue status` refuses for a claimed issue unless this chat is on its branch; `--force` is only for when the human asks (e.g. `/triage stale` releasing a stuck claim).
+**Never move an issue another chat has claimed.** On GitHub Projects, `issue status` and `issue release` refuse for a claimed issue unless this chat is on its branch or gives its claim id (`--claim`); `--force` is only for when the human asks (e.g. `/triage stale` releasing a stuck claim).
 
 **While working:** keep the issue updated with short comments at meaningful points (plan posted, PR opened, blocked, handover). Not a running commentary.
 

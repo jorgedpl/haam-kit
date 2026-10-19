@@ -210,15 +210,24 @@ if a[:2] == ["issue", "edit"]:
         i["body"] = opt(a, "--body")
     for x in opts(a, "--add-assignee"):
         i["assignees"].append(st["me"] if x == "@me" else x)
+    for x in opts(a, "--remove-assignee"):
+        i["assignees"] = [y for y in i["assignees"] if y != (st["me"] if x == "@me" else x)]
     for x in opts(a, "--add-label"):
         i["labels"].append(x)
     for x in opts(a, "--remove-label"):
         i["labels"] = [l for l in i["labels"] if l != x]
     save(); sys.exit(0)
 if a[:2] == ["issue", "view"]:
-    out({"comments": [{"body": c["body"]} for c in st["comments"] if c["issue"] == int(a[2])]})
+    out({"comments": [{"body": c["body"], "createdAt": c.get("createdAt", "2026-01-01T00:00:00Z")}
+                      for c in st["comments"] if c["issue"] == int(a[2])]})
 if a[:2] == ["issue", "comment"]:
-    st["comments"].append({"issue": int(a[2]), "body": opt(a, "--body")}); save(); sys.exit(0)
+    import datetime
+    st["comments"].append({"issue": int(a[2]), "body": opt(a, "--body"),
+                           "createdAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    if st.get("race_claim") and opt(a, "--body", "").startswith("🤖 Claimed by"):
+        # another chat's claim lands just before ours
+        st["comments"].insert(len(st["comments"]) - 1, dict(st["comments"][-1], body=st.pop("race_claim")))
+    save(); sys.exit(0)
 if a[:2] == ["issue", "close"]:
     st["issues"][a[2]]["state"] = "CLOSED"; save(); sys.exit(0)
 def origin_head(branch):

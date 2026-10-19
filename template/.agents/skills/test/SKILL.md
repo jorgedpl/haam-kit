@@ -37,7 +37,7 @@ If no ID was given, list what's waiting: issues in `UAT` (GitHub: `python3 tools
 
 ## 3b. It failed
 1. Record it as `/uat-result <ID> fail` does: comment `❌ UAT failed` on the issue with each failure as a checklist item (step, expected, actual), and run `python3 tools/haam/haam.py test-failed <ID> --human` (it withdraws any earlier pass of this commit, removes `uat-passed` from the PR if there is one, and with `grouping: release` takes it out of the next release). In test-first nothing has reached GitHub's checks yet, so a failed test costs no Actions minutes.
-2. Send it back to the agents: add issue label `uat-failed`, set status `Ready`, remove the assignee. Agents take `uat-failed` items before anything else.
+2. Send it back to the agents: add issue label `uat-failed`, set status `Ready`, remove the assignee (GitHub: `haam.py issue label <n> --add uat-failed`, then `haam.py issue release <n> --human --status Ready`). Agents take `uat-failed` items before anything else.
 3. If something the human found is outside this change's scope, offer to log it as a separate `/bug` instead.
 4. Restart the fix straight away if you can: in Claude Code, start a background worker in its own worktree that runs `/build <ID>` (it continues on the same branch). Otherwise tell the human: *"Open a new chat and type `/work bugs`: it takes this one first."*
 5. Reply: *"Sent back with your notes. It'll come back to you for another test."*

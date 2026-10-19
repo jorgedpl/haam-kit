@@ -6,6 +6,19 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-10-19
+
+### Fixed
+- **Two chats no longer assess or specify the same issue.** Only building had a claim. `/assess` just moved the issue to Discovery and `/spec` left it in Backlog, and every agent chat runs as the same GitHub user, so the assignee couldn't tell them apart.
+  - `haam.py issue claim <n> --for assess` (sets Discovery) and `--for spec` claim the issue with the new label `claimed`. Another chat's claim, status move or build is refused until it's released.
+  - Every claim comment carries a claim id. Right after claiming, the tool re-reads the comments: if another chat's claim landed a moment earlier, the later one withdraws. This also closes the same gap for builds.
+  - New `haam.py issue release <n> --claim <id> [--status Decision]`: `/assess` and `/spec` release the claim once their file is pushed, and `/build` hands an issue back if it stops before the PR. Without the id it needs `--human` (`/triage stale`, `/test`).
+  - `/next` skips claimed issues; `/triage stale` lists assessments and specs claimed with no activity for a day.
+  - On Linear, AGENTS.md §6 describes the same protocol by hand (label `claimed`, claim id, re-read).
+
+### Migration
+- `haam.py update`. On GitHub Projects, `haam.py github-project --apply` adds the `claimed` label (the first claim also creates it). On Linear, create a `claimed` label in the team.
+
 ## [1.9.0] - 2026-10-19
 
 The product owner decides how HAAM runs.

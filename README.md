@@ -30,7 +30,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.9.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.9.1 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -64,7 +64,7 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `github [--apply]` | admin | Labels, branch ruleset with required checks, production approval, security features |
 | `github-project [--apply]` | admin | GitHub Projects board: 12 statuses, Priority field, labels, repo link |
 | `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 9 labels |
-| `issue list\|create\|claim\|status\|…` | agents | Work the GitHub Projects board from any agent tool |
+| `issue list\|create\|claim\|release\|status\|…` | agents | Work the GitHub Projects board from any agent tool |
 | `capacity` | agents | Hold new work when too many PRs are open or waiting for your test (limits in `haam.config.json`) |
 | `ci-usage [--days 7]` | admin | Where the GitHub Actions minutes went, by workflow, job, trigger and day |
 | `settings [--explain] [--set key=value] [--apply]` | owner/admin | Your choices: when CI and the AI reviews run, what you test, grouping, shipping, limits (`/haam-settings` walks you through them) |
@@ -87,7 +87,7 @@ Each agent chat gets its own folder, so chats never overwrite each other's work:
 2. Type `/work bugs` (or `/work features`, `/work ideas`, or just `/work`; Codex: `$work`).
 3. The agent moves into its own git worktree, copies local files like `.env`, claims the top item on the board, builds and tests it, opens the PR and hands you a test plan.
 
-Repeat for as many agents as you want, on any computer with the project cloned. The claim on the board stops two agents taking the same issue. Your own chat stays in the main folder for ideas, decisions, testing and releases.
+Repeat for as many agents as you want, on any computer with the project cloned. The claim on the board stops two agents taking the same issue, whether to build it, assess it or write its spec. Your own chat stays in the main folder for ideas, decisions, testing and releases.
 
 ## Choosing a tracker
 

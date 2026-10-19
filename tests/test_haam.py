@@ -852,6 +852,49 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("issue", "close", str(n), "--human")
         self.assertEqual(self.gh_state()["issues"][str(n)]["state"], "CLOSED")
 
+    def test_assess_and_spec_claims_block_other_chats(self):
+        self.setup_board()
+        n = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Bulk invite", "--json").stdout)["number"]
+        # Chat A claims the assessment; chat B (same GitHub user) is refused
+        r = json.loads(self.tool("issue", "claim", str(n), "--for", "assess", "--tool", "Claude Code", "--json").stdout)
+        token = r["claim"]
+        view = json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]
+        self.assertEqual(view["status"], "Discovery")
+        self.assertIn("claimed", view["labels"])
+        p = self.tool("issue", "claim", str(n), "--for", "assess", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("already claimed", p.stderr)
+        # B can't move it or release it; A can, with its claim id
+        self.assertNotEqual(self.tool("issue", "status", str(n), "Decision", check=False).returncode, 0)
+        p = self.tool("issue", "release", str(n), "--status", "Decision", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("another chat", p.stderr)
+        self.tool("issue", "release", str(n), "--claim", token, "--status", "Decision")
+        view = json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]
+        self.assertEqual(view["status"], "Decision")
+        self.assertNotIn("claimed", view["labels"])
+        self.assertEqual(view["assignees"], [])
+        # Spec: only from Backlog; the claim keeps the build away until it's released
+        self.assertNotEqual(self.tool("issue", "claim", str(n), "--for", "spec", check=False).returncode, 0)
+        self.tool("issue", "status", str(n), "Backlog", "--human")
+        token = json.loads(self.tool("issue", "claim", str(n), "--for", "spec", "--json").stdout)["claim"]
+        self.tool("issue", "label", str(n), "--add", "agent-ready", "--human")
+        self.tool("issue", "status", str(n), "Ready", "--claim", token)
+        p = self.tool("issue", "claim", str(n), check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("already claimed", p.stderr)
+        self.tool("issue", "release", str(n), "--claim", token)
+        self.tool("issue", "claim", str(n))                                    # now it can be built
+        # A race: another chat's claim lands just before ours, so ours withdraws
+        m = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Dark mode", "--json").stdout)["number"]
+        st = self.gh_state()
+        st["race_claim"] = "🤖 Claimed by @tester via Cursor to assess it · claim abcdef"
+        self.state.write_text(json.dumps(st))
+        p = self.tool("issue", "claim", str(m), "--for", "assess", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("a moment earlier", p.stderr)
+        self.assertTrue(any("withdrawn" in c["body"] for c in self.gh_state()["comments"]))
+
     def test_epics_group_issues_and_cant_be_built(self):
         self.setup_board()
         mk = lambda *a: json.loads(self.tool("issue", "create", *a, "--json").stdout)

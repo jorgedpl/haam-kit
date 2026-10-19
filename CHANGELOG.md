@@ -34,6 +34,9 @@ The product owner decides how HAAM runs.
 - The no-UAT lane auto-merges only when CI and both AI reviews run on GitHub (`ci: every-pr`, `review: github`). With anything less, the owner ships those PRs.
 - With `grouping: release`, running `ship` again carries on with the same release PR (after exit 2 or 3, `--live` included) rather than building a second one. `ship --all` then also ships the other ready PRs (no-UAT, overrides). A merged change's branch is deleted only if nobody pushed to it since. `release` can't be combined with `flow: checks-first`.
 - `local-ci` runs `make setup` first, with the local files from `.worktreeinclude`.
+- A release that failed its checks, was closed, or whose branch changed no longer blocks the next one. `ship --abandon-release` closes it (or `ship` does it by itself when the PR was closed or moved), keeps every other pass and builds a fresh release next time. `test-failed` takes a change out of the next release. Passing a change again while it's in an open release is kept for the next release, not lost.
+- `config` refuses to change `--flow`, `--deploy`, `--protected`, `--unprotected` or the limits on an existing project without `--human`, or from an agent's worktree. `github --apply` takes `ci` and `deploy_approval` from `main`'s `haam.config.json`, not the working copy, and says when they differ.
+- `settings --apply` reports what it couldn't change (`failed` in `--json`) instead of counting it as applied, so running it again retries.
 
 ### Migration
 - `haam.py update`, then merge the updated workflows (`ci.yml`, `security.yml`, `review.yml`, `gates.yml`).

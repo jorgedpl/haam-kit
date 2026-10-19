@@ -36,7 +36,7 @@ The areas and their settings:
   - `deploy` (github | manual);
   - `deploy_approval` (each | automatic).
 - **Limits:** `max_open_prs`, `max_in_uat`, `max_review_rounds`, `max_pr_lines` (whole numbers).
-- **Protected areas:** `protected_paths`. Show the list. To add: `config --protected "src/auth/**"`. To remove: `config --unprotected "…"`.
+- **Protected areas:** `protected_paths`. Show the list. To add: `config --protected "src/auth/**" --human`. To remove: `config --unprotected "…" --human`.
 - **Housekeeping:** `worktree_cleanup` (after-ship | manual).
 
 Point out combinations that undo each other's safety, in one line each, and let them decide:

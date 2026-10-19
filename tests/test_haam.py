@@ -514,7 +514,7 @@ class TestAgentsDoctorDev(ToolTestCase):
         git(self.proj, "add", "-A")
         git(self.proj, "commit", "-qm", "kit")
         tool = self.installed_tool()
-        self.run_tool("config", "--protected", "src/auth", tool=tool)            # plain folder name: everything inside
+        self.run_tool("config", "--protected", "src/auth", "--human", tool=tool)            # plain folder name: everything inside
         (self.proj / "src/auth").mkdir(parents=True)
         (self.proj / "src/auth/login.py").write_text("x = 1\n")
         git(self.proj, "add", "-A")
@@ -979,7 +979,7 @@ class TestGitHubProjects(ToolTestCase):
         self.assertEqual(res["open_prs"], 10)
         self.assertEqual(len(res["counted_prs"]), 10)                      # it says which PRs it counted
         self.assertIn("PR #3: PR 3", self.tool("capacity").stdout)
-        self.tool("config", "--max-open-prs", "20")
+        self.tool("config", "--max-open-prs", "20", "--human")
         self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
 
     def test_agents_cant_mark_issues_themselves(self):
@@ -1048,7 +1048,7 @@ class TestGitHubProjects(ToolTestCase):
 
     def test_manual_deploy_and_batch_pr(self):
         self.setup_board()
-        self.tool("config", "--deploy", "manual")
+        self.tool("config", "--deploy", "manual", "--human")
         mk = lambda t: json.loads(self.tool("issue", "create", "--stream", "bug", "--title", t, "--status", "UAT",
                                             "--json").stdout)["number"]
         a, b = mk("Export crash"), mk("Export button")
@@ -1488,12 +1488,23 @@ class TestWorktrees(ToolTestCase):
         state.write_text(json.dumps(st))
         res = tool("ship", "--all", "--human", "--wait", "0", check=False)       # checks still running: run again
         self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
-        res = tool("ship", "--all", "--human", check=False)
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertIn("Carrying on with release PR", res.stdout)
         st = json.loads(state.read_text())
-        rel = list(st["prs"].values())
-        self.assertEqual(len(rel), 1)                                          # one release PR
+        st["checks_pending"] = 3
+        state.write_text(json.dumps(st))
+        res = tool("ship", "--all", "--human", "--wait", "0", check=False)       # same release, not a second one
+        self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
+        self.assertIn("Carrying on with release PR", res.stdout)
+        self.assertEqual(len(json.loads(state.read_text())["prs"]), 1)
+        st = json.loads(state.read_text())
+        st["checks_pending"] = 0
+        state.write_text(json.dumps(st))
+        res = tool("ship", "--all", "--human", "--abandon-release", check=False)  # drop it, build a fresh one
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("dropped (you asked to abandon it)", res.stdout)
+        st = json.loads(state.read_text())
+        self.assertEqual(sorted(p["state"] for p in st["prs"].values()), ["CLOSED", "MERGED"])
+        rel = [p for p in st["prs"].values() if p["state"] == "MERGED"]
+        self.assertEqual(len(rel), 1)                                          # one release PR shipped
         self.assertTrue(rel[0]["headRefName"].startswith("release/"))
         self.assertEqual(rel[0]["title"].split(":")[0], f"#{nums[0]} #{nums[1]}")
         self.assertEqual(rel[0]["state"], "MERGED")
@@ -1507,6 +1518,20 @@ class TestWorktrees(ToolTestCase):
         files = subprocess.run(["git", "ls-tree", "--name-only", rel[0]["headRefName"]], cwd=self.origin,
                                capture_output=True, text=True).stdout.split()
         self.assertTrue({"a.txt", "b.txt"} <= set(files))
+
+    def test_config_owner_flags_need_human(self):
+        tool = self.installed_tool()
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
+                      tool=tool)
+        p = self.run_tool("config", "--deploy", "manual", tool=tool, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--human", p.stderr)
+        self.run_tool("config", "--product", "Acme 2", tool=tool)               # ordinary fields are fine
+        self.run_tool("config", "--deploy", "manual", "--human", tool=tool)
+        self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["deploy"], "manual")
+        wt = Path(json.loads(self.wt("new", "w2", "--json").stdout)["path"])
+        p = self.run_tool("config", "--max-in-uat", "50", "--human", tool=tool, cwd=wt, check=False)
+        self.assertNotEqual(p.returncode, 0)
 
     def test_ship_refuses_in_an_agents_worktree(self):
         wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])

@@ -244,6 +244,12 @@ if a[:2] == ["pr", "edit"]:
     p["labels"] += [{"name": l} for l in opts(a, "--add-label") if {"name": l} not in p["labels"]]
     p["labels"] = [l for l in p["labels"] if l["name"] not in opts(a, "--remove-label")]
     save(); sys.exit(0)
+if a[:2] == ["pr", "close"]:
+    p = st["prs"][a[2]]
+    p["state"] = "CLOSED"
+    if "--delete-branch" in a:
+        st.setdefault("deleted_branches", []).append(p.get("headRefName"))
+    save(); sys.exit(0)
 if a[:2] == ["pr", "list"]:
     want = {"open": "OPEN", "merged": "MERGED"}.get(opt(a, "--state", "open"))
     out([dict(p, number=int(k)) for k, p in st["prs"].items() if p.get("state", "OPEN") == want])

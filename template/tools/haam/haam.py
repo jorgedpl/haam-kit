@@ -950,6 +950,16 @@ def cmd_config(args):
     cfg = load_config(root)
     rep = Report()
     rep.section("Project configuration")
+    owner_flags = [f for f, v in (("--flow", args.flow), ("--deploy", args.deploy), ("--protected", args.protected),
+                                  ("--unprotected", args.unprotected), ("--max-open-prs", args.max_open_prs),
+                                  ("--max-in-uat", args.max_in_uat)) if v is not None]
+    if owner_flags and (root / CONFIG_NAME).exists() and not args.human:
+        sys.exit(f"{', '.join(owner_flags)}: these are the owner's settings. Change them inside /haam-settings (or "
+                 "/haam-setup) after the human chose, with --human.")
+    if owner_flags and git_paths(root)[2]:
+        sys.exit("Settings change only from the owner's own chat in the main project folder, never from an agent's worktree.")
+    if (args.flow or setting_value(cfg, "flow")) == "checks-first" and setting_value(cfg, "grouping") == "release":
+        sys.exit("grouping release needs flow test-first: in checks-first every change already has its own PR.")
 
     detected = detect_github_repo(root)
     if args.tracker is not None:
@@ -1305,7 +1315,25 @@ def cmd_github(args):
     current = None
     if code == 0 and isinstance(rulesets, list):
         current = next((r for r in rulesets if r.get("name") == "HAAM main protection"), None)
-    body = ruleset_body(cfg)
+    # The gate settings come from main: a branch's own haam.config.json (an agent's, say) can't lower the rules.
+    gcfg = dict(cfg)
+    base = cfg.get("default_branch") or "main"
+    main_cfg = git_out(root, "show", f"origin/{base}:{CONFIG_NAME}")
+    if main_cfg:
+        try:
+            on_main = json.loads(main_cfg)
+            for k in ("ci", "deploy_approval"):
+                if k in on_main:
+                    gcfg[k] = on_main[k]
+                elif k in gcfg:
+                    gcfg.pop(k)
+            for k in ("ci", "deploy_approval"):
+                if setting_value(gcfg, k) != setting_value(cfg, k):
+                    rep.add("info", f"Using {k}={setting_value(gcfg, k)} from {base}",
+                            f"this copy says {setting_value(cfg, k)}: merge that first for it to count")
+        except json.JSONDecodeError:
+            pass
+    body = ruleset_body(gcfg)
     if code != 0:
         rep.add("fail", "Can't read rulesets", (err or "")[:160])
         rep.action(WHO_BROWSER, "Rulesets on private repos need a paid GitHub plan (Pro/Team). Upgrade, "
@@ -1346,7 +1374,7 @@ def cmd_github(args):
         else:
             rep.add("ok" if current else "warn", "Ruleset 'HAAM main protection'",
                     "exists: --reset replaces it with HAAM defaults" if current else "will create")
-    rep.add("info", "Required checks: " + ", ".join(required_checks(cfg)))
+    rep.add("info", "Required checks: " + ", ".join(required_checks(gcfg)))
     rep.add("info", "Admins can bypass only when merging a pull request (Level 2 emergency override), never by pushing to main")
 
     # Production environment
@@ -1361,7 +1389,7 @@ def cmd_github(args):
         exists = code == 0
         if apply:
             reviewers = []
-            for a in (approvers if setting_value(cfg, "deploy_approval") != "automatic" else []):
+            for a in (approvers if setting_value(gcfg, "deploy_approval") != "automatic" else []):
                 c3, uid, _ = run(["gh", "api", f"users/{a}", "--jq", ".id"])
                 if c3 == 0 and uid:
                     reviewers.append({"type": "User", "id": int(uid)})
@@ -2598,6 +2626,11 @@ def cmd_publish(args):
             labels.append("human-review")
     title = title or re.sub(r"^(?:[^/]+/)?(?:\d+|[a-z]{2,5}-\d+)-", "", branch.lower()).replace("-", " ")
     if not pr and setting_value(cfg, "grouping") == "release":
+        rel_now = (json.loads(tested_file(root).read_text()) if tested_file(root).exists() else {}).get("release") or {}
+        if show_ref(ref) in (rel_now.get("included") or {}):
+            print(f"{WARN} {show_ref(ref)} is already in release PR #{rel_now.get('pr')} with an earlier commit. That "
+                  "release ships the earlier one; to ship this one instead: ship --all --human --abandon-release",
+                  flush=True)
         # Release grouping: no PR per change. The pass is recorded; ship --all puts every passed change into one
         # release PR, so the checks and the AI reviews run once per release.
         f = tested_file(root)
@@ -2703,6 +2736,11 @@ def cmd_test_failed(args):
     if pr and "uat-passed" in [l["name"] for l in pr.get("labels") or []]:
         run(["gh", "pr", "edit", str(pr["number"]), "-R", repo, "--remove-label", "uat-passed"])
         done.append(f"removed uat-passed from PR #{pr['number']}")
+    f = tested_file(root)
+    data = json.loads(f.read_text()) if f.exists() else {}
+    if (data.get("passed") or {}).pop(show_ref(ref), None):
+        f.write_text(json.dumps(data, indent=2) + "\n")
+        done.append("taken out of the next release")
     res = {"issue": show_ref(ref), "commit": sha, "pr": pr["number"] if pr else None, "done": done}
     if args.json:
         print(json.dumps(res, indent=2))
@@ -2903,12 +2941,38 @@ def ship_release(args, root, cfg):
         sys.exit(code)
 
     rel = data.get("release")
+    if rel:
+        c_v, o_v, _ = run(["gh", "pr", "view", str(rel["pr"]), "-R", repo, "--json", "state,headRefOid"])
+        live = json.loads(o_v) if c_v == 0 and o_v else {}
+        if live.get("state") == "MERGED" and args.abandon_release:
+            print(f"{WARN} Release PR #{rel['pr']} is already merged, so it can't be abandoned: carrying on with its "
+                  "deploy.", flush=True)
+        why = ("" if live.get("state") == "MERGED" else
+               "you asked to abandon it" if args.abandon_release else
+               "it was closed" if live.get("state") == "CLOSED" else
+               "someone pushed to it after it was built" if live.get("state") == "OPEN" and live.get("headRefOid")
+               and live["headRefOid"] != rel["head"] else "")
+        if why:
+            if live.get("state") == "OPEN":
+                run(["gh", "pr", "close", str(rel["pr"]), "-R", repo, "--delete-branch", "--comment",
+                     f"Abandoned: {why}. The next ship builds a new release from what has passed."])
+            data.pop("release", None)
+            lead0 = (rel.get("issues") or [None])[0]
+            if lead0:
+                data.pop(lead0, None)
+                (data.get("branches") or {}).pop(lead0, None)
+            tf.write_text(json.dumps(data, indent=2) + "\n")
+            if not args.json:
+                print(f"{INFO} Release PR #{rel['pr']} dropped ({why}); building a new one from what has passed.", flush=True)
+            passed = data.get("passed") or {}
+            rel = None
     if not rel:
         wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
         items = [(k, v) for k, v in sorted(passed.items()) if not wanted or k in wanted]
         if not items:
             if not args.json:
                 print(f"{INFO} Nothing has passed since the last release.", flush=True)
+            args._release_result = {"ok": True, "state": "nothing to ship", "message": "Nothing has passed since the last release."}
             return 0
         run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
         base = cfg.get("default_branch") or "main"
@@ -2982,12 +3046,22 @@ def ship_release(args, root, cfg):
     extra = (["--live"] if args.live else []) + (["--no-deploy"] if args.no_deploy else [])
     c5, o5, e5 = run(me + ["ship", lead.lstrip("#"), "--human", "--release-pr", "--pr-number", str(rel["pr"]),
                            "--wait", str(args.wait)] + extra + (["--json"] if args.json else []), cwd=root)
-    print(o5 + ("" if args.json else (e5 or "")), end="")
+    if args.json:
+        try:
+            args._release_result = json.loads(o5)
+        except (json.JSONDecodeError, TypeError):
+            args._release_result = {"ok": False, "message": (e5 or o5 or "")[:300]}
+    else:
+        print(o5 + (e5 or ""), end="")
+        if c5 == 1:
+            print(f"{INFO} If a release check failed: send the change it's about back (its /test fail), then "
+                  "`ship --all --human --abandon-release` builds a new release without it.", flush=True)
     if c5 == 0:     # released: forget the passes, delete the merged changes' branches (if nobody pushed since)
         data = json.loads(tf.read_text()) if tf.exists() else {}
         rel = data.pop("release", {}) or {}
         for k, v in (rel.get("included") or {}).items():
-            (data.get("passed") or {}).pop(k, None)
+            if ((data.get("passed") or {}).get(k) or {}).get("sha") == v["sha"]:    # not re-passed since
+                data["passed"].pop(k, None)
             c6, ref_, _ = gh_api("GET", f"repos/{repo}/git/ref/heads/{v['branch']}")
             if c6 == 0 and isinstance(ref_, dict) and (ref_.get("object") or {}).get("sha") == v["sha"]:
                 gh_api("DELETE", f"repos/{repo}/git/refs/heads/{v['branch']}")
@@ -3001,12 +3075,18 @@ def ship_batch(args, root, cfg):
     Safe to run again; exit codes as for one issue."""
     if setting_value(cfg, "grouping") == "release" and not getattr(args, "_release_done", False):
         code = ship_release(args, root, cfg)
-        if code != 0 or not args.all:
+        others = []
+        if code == 0 and args.all and cfg.get("tracker") == "github":
+            try:
+                others = ship_candidates(cfg, cfg["github_repo"])
+            except RuntimeError:
+                others = []
+        if not others:
+            if args.json:
+                print(json.dumps(getattr(args, "_release_result", {"ok": code == 0}), indent=2))
             sys.exit(code)
         # --all: then anything else that's ready on its own (no-UAT PRs, overrides) ships the usual way
         args._release_done = True
-        if not [r for r in ship_candidates(cfg, cfg["github_repo"])]:
-            sys.exit(0)
     repo = cfg["github_repo"]
     deadline = time.time() + args.wait * 60
     out_steps, merged, stopped, pending = [], [], [], []
@@ -3019,7 +3099,9 @@ def ship_batch(args, root, cfg):
     def finish(state, code, message):
         if args.json:
             print(json.dumps({"ok": code == 0, "state": state, "message": message, "merged": [m["issue"] for m in merged],
-                              "stopped": stopped, "pending": pending, "steps": out_steps}, indent=2))
+                              "stopped": stopped, "pending": pending, "steps": out_steps,
+                              **({"release": args._release_result} if getattr(args, "_release_result", None) else {})},
+                             indent=2))
         elif message:
             print(message, flush=True)
         sys.exit(code)
@@ -3628,7 +3710,10 @@ def cmd_settings(args):
                     body["rules"] = [{k: v for k, v in r.items() if k in ("type", "parameters")} for r in full["rules"]]
                     c3, _, e3 = gh_api("PUT", f"repos/{repo}/rulesets/{rs['id']}", body)
                     rep.add("ok" if c3 == 0 else "fail", "Required checks: " + ", ".join(want), (e3 or "")[:160])
-                    res["applied"].append("required_checks")
+                    if c3 == 0:
+                        res["applied"].append("required_checks")
+                    else:
+                        res.setdefault("failed", []).append("required_checks")
         else:
             rep.add("warn", "No 'HAAM main protection' ruleset found", "run haam.py github --apply first")
         code, env, _ = gh_api("GET", f"repos/{repo}/environments/production")
@@ -3640,7 +3725,11 @@ def cmd_settings(args):
             if c_e != 0:
                 rep.add("warn", "Couldn't change the production approval", (e_e or "")[:160] + (
                     " (on private repositories, required reviewers need GitHub Team or Enterprise)" if not want_auto else ""))
-            res["applied"].append("production")
+                res.setdefault("failed", []).append("production")
+            else:
+                res["applied"].append("production")
+        elif code != 0:
+            rep.add("warn", "No production environment yet", "run haam.py github --apply first")
         rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged: the gate and the agents read the settings "
                    "from main (it's a protected file, so it needs your review)")
     if args.json:
@@ -4624,6 +4713,7 @@ def main():
     p.set_defaults(func=cmd_version)
 
     p = common(sub.add_parser("config", help="create/update haam.config.json"))
+    p.add_argument("--human", action="store_true", help="the owner chose these settings in this session")
     p.add_argument("--product")
     p.add_argument("--team-key")
     p.add_argument("--linear-team")
@@ -4718,6 +4808,8 @@ def main():
     p.add_argument("--merge-only", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--release-pr", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--pr-number", type=int, help=argparse.SUPPRESS)
+    p.add_argument("--abandon-release", action="store_true",
+                   help="grouping release: close the open release PR and build a new one from what has passed")
     p.add_argument("--released-in", help=argparse.SUPPRESS)
     p.add_argument("--human", action="store_true", help="the human said 'ship' in this session")
     p.add_argument("--wait", type=float, default=1.5, help="minutes to wait before handing back (exit 2: run again)")

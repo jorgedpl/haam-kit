@@ -3487,9 +3487,10 @@ CHAINED_HOOK = f"""#!/usr/bin/env bash
 # {HOOK_MARK}: runs the shared secret scan (.githooks/pre-commit) when this branch has it.
 # Installed by `haam.py hooks --apply` instead of core.hooksPath, so this repository's other hooks keep working.
 top=$(git rev-parse --show-toplevel)
-if [ -x "$top/.githooks/pre-commit" ]; then "$top/.githooks/pre-commit" || exit $?; fi
+if [ -f "$top/.githooks/pre-commit" ]; then bash "$top/.githooks/pre-commit" || exit $?; fi
 """
-CHAIN_LINE = '[ -x "$(git rev-parse --show-toplevel)/.githooks/pre-commit" ] && { "$(git rev-parse --show-toplevel)/.githooks/pre-commit" || exit $?; }'
+CHAIN_LINE = ('t=$(git rev-parse --show-toplevel); '
+              'if [ -f "$t/.githooks/pre-commit" ]; then bash "$t/.githooks/pre-commit" || exit $?; fi')
 
 
 def git_hooks_dir(root):
@@ -3507,53 +3508,73 @@ def own_git_hooks(root):
 
 
 def secret_hook_on(root):
-    if git_out(root, "config", "core.hooksPath") == ".githooks":
-        return True
-    pc = git_hooks_dir(root) / "pre-commit"
+    """Whether a commit here runs the secret scan: via core.hooksPath (.githooks, or another hook manager's folder
+    whose pre-commit calls it) or via the pre-commit in .git/hooks."""
+    hp = git_out(root, "config", "core.hooksPath")
+    if hp == ".githooks":
+        return os.access(Path(root) / ".githooks/pre-commit", os.X_OK)
+    pc = (Path(root) / hp / "pre-commit") if hp else (git_hooks_dir(root) / "pre-commit")
     return pc.is_file() and os.access(pc, os.X_OK) and ".githooks/pre-commit" in pc.read_text(errors="ignore")
 
 
 def setup_secret_hook(root, apply, rep):
     """Turn on the commit secret scan without switching off the repository's own git hooks: core.hooksPath when
     .git/hooks holds nothing of its own, otherwise a small pre-commit in .git/hooks that calls .githooks/pre-commit."""
+    if apply:      # git ignores hooks that aren't executable, whichever way they're switched on
+        for f in list((root / ".githooks").glob("*")) + list((root / "scripts").glob("*.sh")) + \
+                list((root / ".claude/hooks").glob("*.sh")):
+            f.chmod(f.stat().st_mode | 0o111)
     hp = git_out(root, "config", "core.hooksPath")
     mine = own_git_hooks(root)
     if hp and hp != ".githooks":
-        rep.add("ok" if secret_hook_on(root) else "warn", f"Git hooks are managed elsewhere (core.hooksPath = {hp})",
-                f"add the secret scan to that hook manager's pre-commit: {CHAIN_LINE}")
+        on = secret_hook_on(root)
+        rep.add("ok" if on else "warn", f"Git hooks are managed elsewhere (core.hooksPath = {hp})",
+                "the secret scan runs from there" if on else
+                f"add this line to {hp}/pre-commit so the secret scan runs: {CHAIN_LINE}")
         return
-    if hp == ".githooks" and not mine:
-        rep.add("ok", "Secret-scan commit hook on")
-        return
-    if hp == ".githooks":
-        rep.add("warn", "core.hooksPath = .githooks is switching off this repository's own hooks: " + ", ".join(mine),
-                "will chain the secret scan instead, so they run again" if not apply else "")
-        if apply:
-            run(["git", "config", "--unset", "core.hooksPath"], cwd=root)
     pc = git_hooks_dir(root) / "pre-commit"
-    if pc.is_file() and HOOK_MARK not in pc.read_text(errors="ignore"):
-        if ".githooks/pre-commit" in pc.read_text(errors="ignore"):
-            rep.add("ok", "Secret-scan commit hook on (called from your own pre-commit)")
+    own_pc = pc.is_file() and HOOK_MARK not in pc.read_text(errors="ignore")
+    if own_pc and ".githooks/pre-commit" not in pc.read_text(errors="ignore"):
+        # Their own pre-commit: never edited. Leave core.hooksPath as it is, so a scan that's on stays on.
+        if hp == ".githooks":
+            rep.add("warn", "core.hooksPath = .githooks is switching off this repository's own hooks: " + ", ".join(mine),
+                    f"to keep the secret scan and run your hooks again, add this line to .git/hooks/pre-commit: "
+                    f"{CHAIN_LINE}, then run: git config --unset core.hooksPath")
         else:
             rep.add("warn", "You have your own .git/hooks/pre-commit, so the secret scan isn't on",
                     f"add this line to it (it's yours, so the kit doesn't edit it): {CHAIN_LINE}")
         return
+    if hp == ".githooks" and not mine:
+        rep.add("ok" if secret_hook_on(root) else "warn", "Secret-scan commit hook on")
+        return
+    if own_pc:      # their pre-commit already calls the scan
+        if hp == ".githooks":
+            rep.add("warn", "core.hooksPath = .githooks is switching off this repository's own hooks: " + ", ".join(mine),
+                    "will unset it: your pre-commit already runs the scan" if not apply else "")
+            if apply:
+                run(["git", "config", "--unset", "core.hooksPath"], cwd=root)
+        rep.add("ok", "Secret-scan commit hook on (called from your own pre-commit)")
+        return
     if not apply:
-        if not secret_hook_on(root):
+        if hp == ".githooks":
+            rep.add("warn", "core.hooksPath = .githooks is switching off this repository's own hooks: " + ", ".join(mine),
+                    "will chain the secret scan instead, so they run again")
+        elif not secret_hook_on(root):
             rep.add("warn", "Secret-scan commit hook off",
                     "will turn on" + (" (chained: your own hooks keep working)" if mine else " (git config core.hooksPath .githooks)"))
+        else:
+            rep.add("ok", "Secret-scan commit hook on")
         return
-    if mine or hp == ".githooks":
+    if mine or hp == ".githooks" or pc.is_file():
         pc.parent.mkdir(parents=True, exist_ok=True)
         pc.write_text(CHAINED_HOOK)
         pc.chmod(0o755)
+        if hp == ".githooks":
+            run(["git", "config", "--unset", "core.hooksPath"], cwd=root)
         rep.add("ok", "Secret-scan commit hook turned on", "chained from .git/hooks/pre-commit; your own hooks keep working")
     else:
         c2, _, e2 = run(["git", "config", "core.hooksPath", ".githooks"], cwd=root)
         rep.add("ok" if c2 == 0 else "fail", "Secret-scan commit hook turned on" if c2 == 0 else "Couldn't set the hook", e2[:160])
-    for f in list((root / ".githooks").glob("*")) + list((root / "scripts").glob("*.sh")) + \
-            list((root / ".claude/hooks").glob("*.sh")):
-        f.chmod(f.stat().st_mode | 0o111)
 
 
 def cmd_hooks(args):

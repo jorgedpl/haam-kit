@@ -17,7 +17,7 @@ The target is an issue (`<ID>`) or, for a PR with no issue (a kit update, a conf
 
 1. **Require a reason.** If none was given, ask for one sentence and wait.
 2. **Confirm once:** "This will let <ID or PR> merge without UAT. CI is still required. Proceed? (yes/no)". Continue only on an explicit yes.
-3. Find the PR (for an issue: `python3 tools/haam/haam.py checkout-pr` is not needed; use `gh pr list --search "<ID>"` or the issue's PR link). Run, in this order:
+3. Find the PR (for an issue: `gh pr list --search "<ID>"`, or the PR link on the issue). Run, in this order:
    - `gh pr comment <pr> --body "OVERRIDE: <reason> (Level 1, skip UAT, by @<user>)"`. The comment **must start with `OVERRIDE:`**: that's what the `release-gate` check looks for.
    - `gh pr edit <pr> --add-label gate-override` (after the comment, so the gate's run sees both).
 4. **Only when there's an issue:**

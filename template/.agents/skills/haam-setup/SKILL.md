@@ -42,7 +42,7 @@ You are guiding the **project admin** through adopting HAAM. The tool `tools/haa
    - Production URL (or none yet)
    - Which agent tools the team uses (Claude Code, Cursor, Codex, Grok, Gemini, Copilot)
    - How production is deployed: by `deploy.yml` when a PR merges (`github`), or by hand / another platform (`manual`)
-   - Limits for parallel work (defaults are fine to start): at most 5 open PRs and 3 changes waiting for their test
+   - Limits for parallel work (defaults are fine to start): at most 10 open PRs and 10 changes waiting for their test
    - The order of testing: **test-first** (default: they test the agent's branch locally, and the PR and checks come only after their pass, which saves the most CI minutes) or **checks-first** (PR and checks, then their test)
 2. `python3 tools/haam/haam.py config --product "…" --tracker github|linear --team-key … [--linear-team "…"] --github-repo … --owner … [--backup-approvers a,b] [--production-url …] --agents claude,cursor,… --deploy github|manual [--max-open-prs 10] [--max-in-uat 10] [--flow test-first|checks-first]`
 3. `python3 tools/haam/haam.py agents --apply` and report per tool.

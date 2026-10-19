@@ -70,14 +70,17 @@ class TestRepository(unittest.TestCase):
     def test_override_comment_satisfies_the_gate(self):
         """The comment /override posts must be one gates.yml accepts, and one that starts a gate run."""
         gates = (KIT / ".github/workflows/gates.yml").read_text()
-        js = re.search(r"comments\.find\(c => /(.+?)/i\.test\(c\.body\)\)", gates).group(1)
-        accepts = re.compile(js.replace("\\/", "/"), re.I)
-        triggers = re.findall(r"contains\(github\.event\.comment\.body, '([^']+)'\)", gates)
+        js = re.search(r"comments\.find\(c =>\s*/(.+?)/\.test\(c\.body\)\)", gates).group(1)
+        accepts = re.compile(js.replace("\\/", "/"))
+        triggers = re.findall(r"startsWith\(github\.event\.comment\.body, '([^']+)'\)", gates)
         skill = (KIT / ".agents/skills/override/SKILL.md").read_text()
         body = re.search(r'gh pr comment <pr> --body "([^"]+)"', skill).group(1)
         posted = body.replace("<reason>", "Hotfix for login outage").replace("<user>", "octocat")
         self.assertTrue(accepts.search(posted), posted)
-        self.assertTrue(any(t.lower() in posted.lower() for t in triggers), (triggers, posted))
+        self.assertTrue(any(posted.lower().startswith(t.lower()) for t in triggers), (triggers, posted))
+        self.assertTrue(accepts.search("OVERRIDE (Level 1, skip UAT) by octocat: old wording"))
+        self.assertFalse(accepts.search("Override is not justified here: wait for UAT"))
+        self.assertFalse(accepts.search("Override the default timeout: see config.py"))
         self.assertTrue(accepts.search("OVERRIDE: urgent fix"))
         self.assertTrue(accepts.search("EMERGENCY BYPASS: CI broken"))
         self.assertFalse(accepts.search("Please don't OVERRIDE: this"))     # must start the comment
@@ -387,6 +390,19 @@ class TestAgentsDoctorDev(ToolTestCase):
         out = self.run_tool("hooks", "--apply", tool=self.installed_tool()).stdout
         self.assertIn("add this line", out)
         self.assertEqual((hooks / "pre-commit").read_text(), "#!/bin/sh\necho own pre-commit\n")
+        # ...and a scan that's on through core.hooksPath is never switched off on the way
+        git(self.proj, "config", "core.hooksPath", ".githooks")
+        self.run_tool("hooks", "--apply", tool=self.installed_tool())
+        self.assertEqual(hooks_path(), ".githooks")
+        # The line it suggests must not fail commits on a branch without the kit
+        line = re.search(r"add this line to .*?: (t=\$\(.+?fi)", out).group(1)
+        (hooks / "pre-commit").write_text("#!/bin/sh\n" + line + "\n")
+        (hooks / "pre-commit").chmod(0o755)
+        git(self.proj, "config", "--unset", "core.hooksPath")
+        git(self.proj, "switch", "-q", "--orphan", "bare")
+        (self.proj / "x.txt").write_text("x\n")
+        git(self.proj, "add", "x.txt")
+        git(self.proj, "commit", "-qm", "no kit here")                    # succeeds
 
     @unittest.skipUnless(shutil.which("gitleaks"), "gitleaks not installed")
     def test_commit_hook_blocks_a_key(self):

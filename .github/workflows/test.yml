@@ -1,14 +1,24 @@
 # CI for the HAAM kit repository itself (the kit's own workflows live in template/.github
 # and only run in projects that install the kit).
+# Pushes and PRs test on Linux only. macOS runners count 10 minutes for every minute they run, so the
+# macOS jobs run once a week and on demand (Actions → Test → Run workflow), not on every push.
 name: Test
 
 on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"    # Mondays: the full matrix, macOS included
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# A newer push to the same branch or PR replaces a run that's still going.
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   GITLEAKS_VERSION: "8.24.2"
@@ -21,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
         python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v4

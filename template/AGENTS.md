@@ -80,6 +80,8 @@ Changes touching any of these get the `human-review` label and need a human code
 
 `TODO(setup): replace the examples above with the real module paths once ARCHITECTURE.md is filled in.`
 
+The same areas as path patterns live in `haam.config.json` → `"protected_paths"` (add yours with `haam.py config --protected "src/auth/**"`). `python3 tools/haam/haam.py protected` lists the protected files your branch changes; the release gate checks them too, adds `human-review` when they're touched and never lets them through the no-UAT lane.
+
 ## 5. Code review: how your PR gets checked
 
 You never review your own work, and you never decide that a review is wrong on your own.

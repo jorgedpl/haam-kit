@@ -6,6 +6,23 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-19
+
+Two fixes found while updating a real project to 1.8.0.
+
+### Fixed
+- **The no-UAT lane no longer trusts a label to keep protected areas out.**
+  - The gate now checks the files a PR changes against `protected_paths` in `haam.config.json`, read from `main`, not from the PR.
+  - When any of them is touched, it adds `human-review`, explains why on the PR, and keeps the lane closed, whatever the labels say.
+  - The defaults cover agent and CI configuration. Add the project's own areas with `haam.py config --protected "src/auth/**,db/migrations/**"`; `/haam-setup` asks for them.
+  - New `haam.py protected` lists the protected files a branch changes, so agents know before opening the PR.
+  - This means a kit update never takes the lane: it changes agent configuration, so you review and ship it yourself.
+- **The first PR after a kit update no longer fails its reviews.** The reviews read their instructions from `main`, which still had the old wording ("post your comment yourself"), and that's now refused. The workflow now tells the reviewers how to report: write the files, never post. That works with any version of the instructions.
+
+### Migration
+- `haam.py update`, then merge the updated `gates.yml` and `review.yml`.
+- Add your protected areas: `haam.py config --protected "<patterns>"`, then commit `haam.config.json`. Until then the gate uses the defaults.
+
 ## [1.8.0] - 2026-10-19
 
 Fewer merges and deploys for the product owner.
@@ -255,7 +272,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/jorgedpl/haam-kit/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/jorgedpl/haam-kit/compare/v1.7.2...v1.8.0
 [1.7.2]: https://github.com/jorgedpl/haam-kit/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/jorgedpl/haam-kit/compare/v1.7.0...v1.7.1

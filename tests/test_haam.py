@@ -68,7 +68,7 @@ class ToolTestCase(unittest.TestCase):
 
 GATE_HARNESS = r"""
 const scenario = JSON.parse(process.argv[process.argv.length - 1]);
-const calls = { statuses: [], outputs: {}, warnings: [] };
+const calls = { statuses: [], outputs: {}, warnings: [], labels: [] };
 const pr = Object.assign({ number: 7, title: '#12: Bump deps', head: { ref: '12-bump', sha: 'abc' }, base: { ref: 'main' },
   draft: false, auto_merge: null, node_id: 'PR_1', labels: [] }, scenario.pr);
 const issue = (n) => scenario.issues[n] === undefined ? null : Object.assign({ state: 'open', labels: [] },
@@ -82,8 +82,10 @@ const github = {
                 if (!i) throw new Error('Not Found');
                 return { data: Object.assign({}, i, { labels: i.labels.map(n => ({ name: n })) }) };
               },
-              listComments: 'comments', removeLabel: async () => {}, createComment: async () => {} },
-    repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify({ tracker: scenario.tracker })).toString('base64') } }),
+              listComments: 'comments', removeLabel: async () => {}, createComment: async () => {},
+              addLabels: async (x) => calls.labels.push(...x.labels) },
+    repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify(Object.assign({ tracker: scenario.tracker },
+                 scenario.protected ? { protected_paths: scenario.protected } : {}))).toString('base64') } }),
              createCommitStatus: async (x) => calls.statuses.push(x), listCommitStatusesForRef: 'statuses' },
   },
 };
@@ -147,10 +149,46 @@ class TestRepository(unittest.TestCase):
         st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, review="local")
         self.assertEqual(st, "success")
         self.assertEqual(calls["outputs"]["enable"], "")                            # local reviews: the owner ships
+        # Protected areas come from the changed files, whatever the labels say
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]},
+                               files=[{"filename": "src/app.py"}, {"filename": ".github/workflows/deploy.yml"}])
+        self.assertEqual(st, "failure")
+        self.assertIn("protected areas", desc)
+        self.assertEqual(calls["labels"], ["human-review"])                         # labelled for a human review
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, protected=["src/auth/**"],
+                               files=[{"filename": "src/auth/login.py"}])
+        self.assertEqual(st, "failure")                                             # the project's own areas too
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, protected=["src/auth/**"],
+                               files=[{"filename": "src/billing.py"}])
+        self.assertEqual(st, "success")
+        self.assertEqual(calls["labels"], [])
         # The owner takes uat:skip off the issue: its open PR is re-checked and loses auto-merge
         st, desc, calls = gate(event="issues", pr={"labels": ["uat:skip"], "auto_merge": {"x": 1}}, issues={12: []})
         self.assertEqual(st, "failure")
         self.assertEqual(calls["outputs"]["disable"], "7")
+
+    def test_protected_path_patterns(self):
+        """haam.py's patterns match exactly what the gate's do (the gate decides; the tool tells agents early)."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("haam_mod", TOOL)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        pats = mod.DEFAULT_CONFIG["protected_paths"] + ["src/**/auth/*.py", "db/migrations/**"]
+        files = [".github/workflows/ci.yml", "AGENTS.md", "docs/AGENTS.md", "src/app/auth/login.py", "src/auth/login.py",
+                 "src/app/auth/deep/x.py", "db/migrations/0001.sql", "Makefile", "src/Makefile", "tools/haam/haam.py",
+                 ".gitleaks.toml", "README.md"]
+        py = mod.protected_matches(pats, files)
+        self.assertEqual(py, [".github/workflows/ci.yml", "AGENTS.md", "src/app/auth/login.py", "src/auth/login.py",
+                              "db/migrations/0001.sql", "Makefile", "tools/haam/haam.py", ".gitleaks.toml"])
+        gates = (KIT / ".github/workflows/gates.yml").read_text()
+        js_defaults = re.search(r"let protectedPaths = (\[.*?\]);", gates, re.S).group(1)
+        self.assertEqual(json.loads(js_defaults.replace("'", '"')), mod.DEFAULT_CONFIG["protected_paths"])
+        if shutil.which("node"):
+            fn = re.search(r"(const globRe = .*?\n\s*\};)", gates, re.S).group(1)
+            js = fn + "\nconst pats = " + json.dumps(pats) + ", files = " + json.dumps(files) + ";\n" \
+                "console.log(JSON.stringify(files.filter(f => pats.map(globRe).some(r => r.test(f)))));"
+            p = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+            self.assertEqual(json.loads(p.stdout), py, p.stderr)
 
     def test_override_comment_satisfies_the_gate(self):
         """The comment /override posts must be one gates.yml accepts, and one that starts a gate run."""

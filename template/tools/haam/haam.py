@@ -67,7 +67,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -99,6 +99,11 @@ DEFAULT_CONFIG = {
     "max_in_uat": 10,            # ...or when this many changes are waiting for the owner to test
     "review": "github",          # github: AI reviews run in Actions; local: `haam.py review` on the owner's computer
     "flow": "test-first",        # test-first: the owner tests locally before any PR exists; checks-first: PR + checks, then test
+    # Protected areas (AGENTS.md §4) as path patterns: the gate never lets these through the no-UAT lane and labels the
+    # PR human-review. ** = any folders, * = within one folder. Add the project's own (auth, payments, migrations…).
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", ".agents/**", ".claude/**", ".cursor/**", ".codex/**", ".grok/**",
+                        ".gemini/**", ".github/**", "tools/haam/**", "haam.config.json", ".mcp.json", "Makefile",
+                        "scripts/**", ".githooks/**", ".gitleaks.toml", ".gitleaksignore"],
     "_applied": {"team_key": PLACEHOLDER_KEY, "product_name": ""},
 }
 
@@ -895,6 +900,13 @@ def cmd_config(args):
         cfg["backup_approvers_github"] = [x.strip() for x in args.backup_approvers.split(",") if x.strip()]
     if args.agents is not None:
         cfg["agents"] = [x.strip().lower() for x in args.agents.split(",") if x.strip()]
+    if args.protected or args.unprotected:
+        cur = list(cfg.get("protected_paths") or [])
+        for x in (args.protected or "").split(","):
+            if x.strip() and x.strip() not in cur:
+                cur.append(x.strip())
+        drop = {x.strip() for x in (args.unprotected or "").split(",") if x.strip()}
+        cfg["protected_paths"] = [x for x in cur if x not in drop]
     if args.flow is not None:
         if args.flow not in ("test-first", "checks-first"):
             sys.exit("--flow must be test-first (owner tests before the PR) or checks-first (PR and checks, then test)")
@@ -925,7 +937,7 @@ def cmd_config(args):
 
     missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
     for k in ("product_name", "tracker", "team_key", "github_repo", "product_owner_github",
-              "production_url", "agents", "deploy", "flow", "max_open_prs", "max_in_uat") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
+              "production_url", "agents", "deploy", "flow", "max_open_prs", "max_in_uat", "protected_paths") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
         v = cfg.get(k)
         rep.add("ok" if v else "warn", f"{k}: {v if v else '(not set)'}")
     if missing:
@@ -3836,6 +3848,49 @@ def setup_secret_hook(root, apply, rep):
         rep.add("ok" if c2 == 0 else "fail", "Secret-scan commit hook turned on" if c2 == 0 else "Couldn't set the hook", e2[:160])
 
 
+def glob_regex(pattern):
+    """A path pattern as a regex: ** any folders, * within one folder, ? one character (same rules as gates.yml)."""
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out += "(?:.*/)?"
+            i += 3
+        elif pattern.startswith("**", i):
+            out += ".*"
+            i += 2
+        elif pattern[i] == "*":
+            out += "[^/]*"
+            i += 1
+        elif pattern[i] == "?":
+            out += "[^/]"
+            i += 1
+        else:
+            out += re.escape(pattern[i])
+            i += 1
+    return re.compile("^" + out + "$")
+
+
+def protected_matches(patterns, files):
+    regs = [glob_regex(p) for p in patterns or []]
+    return [f for f in files if any(r.match(f) for r in regs)]
+
+
+def cmd_protected(args):
+    """Which changed files are in a protected area (haam.config.json "protected_paths"), compared with the base."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    base = args.base or default_base(root)
+    files = git_out(root, "diff", "--name-only", f"{base}...HEAD").splitlines()
+    hits = protected_matches(cfg.get("protected_paths"), files)
+    if args.json:
+        print(json.dumps({"base": base, "protected": hits}, indent=2))
+    elif hits:
+        print(f"{WARN} Protected areas changed (add the PR label human-review; no uat:skip lane): " + ", ".join(hits))
+    else:
+        print(f"{OK} No protected areas changed (compared with {base})")
+    sys.exit(1 if hits and args.check else 0)
+
+
 def cmd_hooks(args):
     root = find_repo_root(Path.cwd())
     rep = Report()
@@ -4110,6 +4165,8 @@ def main():
     p.add_argument("--project-owner", help="GitHub user/org that owns the board (default: repo owner)")
     p.add_argument("--deploy", help="github (deploy.yml on merge, default) or manual (you deploy by hand)")
     p.add_argument("--flow", help="test-first (default: owner tests before the PR) or checks-first")
+    p.add_argument("--protected", help="add protected path patterns, comma-separated (e.g. 'src/auth/**,db/migrations/**')")
+    p.add_argument("--unprotected", help="remove protected path patterns, comma-separated")
     p.add_argument("--max-open-prs", type=int, help="agents hold new work at this many open PRs (default 10)")
     p.add_argument("--max-in-uat", type=int, help="...or at this many changes waiting for you to test (default 10)")
     p.add_argument("--dry-run", action="store_true")
@@ -4195,6 +4252,11 @@ def main():
     p.add_argument("--live", action="store_true", help="the human confirmed it's live (manual deploys)")
     p.add_argument("--no-deploy", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_ship)
+
+    p = common(sub.add_parser("protected", help="list changed files in protected areas (human-review, never the no-UAT lane)"))
+    p.add_argument("--base", help="compare with this ref (default: origin/main)")
+    p.add_argument("--check", action="store_true", help="exit 1 if any protected file changed")
+    p.set_defaults(func=cmd_protected)
 
     p = common(sub.add_parser("hooks", help="turn on the commit secret scan without switching off your own git hooks"))
     p.add_argument("--apply", action="store_true")

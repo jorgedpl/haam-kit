@@ -135,6 +135,10 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
             Follow the instructions in .haam-review/REVIEWER.md exactly to review this pull request.
+            How to report (this wins over any older wording in those instructions, e.g. right after a kit update):
+            you can't post comments or reviews yourself. Write your review comment to the file review-comment.md
+            and the one-word verdict (APPROVE or CHANGES_REQUESTED) to review-verdict.txt, both in the workspace
+            root; the workflow posts them.
           # TODO(setup): add --model to choose cost/quality; raise max-turns if reviews get cut short.
           claude_args: >-
             --max-turns 30
@@ -215,6 +219,10 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
             Follow the instructions in .haam-review/SECURITY-REVIEWER.md exactly to review this pull request.
             Its references to .github/review/REVIEWER.md mean .haam-review/REVIEWER.md.
+            How to report (this wins over any older wording in those instructions, e.g. right after a kit update):
+            you can't post comments yourself. If you found anything, write your comment to the file
+            security-comment.md; always write the number of findings, digits only, to security-findings.txt; both
+            in the workspace root. The workflow posts them.
           claude_args: >-
             --max-turns 30
             --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"

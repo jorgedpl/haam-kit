@@ -81,6 +81,8 @@ Review is layered so that **no agent ever reviews its own work** and **secrets a
 
 In the default test-first flow, G4 comes before G3: the owner tests the agent's pushed branch before a PR exists, and G3 then checks exactly the commit they passed (`haam.py publish`, then `ship`, which refuses anything else).
 
+**No-UAT lane:** G4 is decided up front instead. When the owner marks an issue `uat:skip` (in `/triage`, or "spec approved, no UAT"), the agent opens the PR with the same label and `release-gate` passes once every issue the PR is for carries it (GitHub Projects: the gate reads the issues; Linear: it trusts the PR label). Not for PRs labelled `human-review`. G3 still applies in full, and auto-merge (needs `HAAM_PROJECT_TOKEN`) merges only when every required check passes.
+
 - [ ] UAT plan exists in `docs/uat/` with numbered steps and expected results
 - [ ] Human ran it locally on the branch (test-first: the agent's pushed branch, before any PR; checks-first: the PR branch)
 - [ ] All steps pass, or failures are recorded and accepted as follow-up issues

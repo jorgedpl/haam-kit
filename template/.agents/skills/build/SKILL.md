@@ -53,7 +53,14 @@ Run `make check` until it passes. Also run any project-specific test skills list
 Do a security self-review of your diff and fix anything you find (Claude Code: `/security-review`; other tools: check `git diff origin/main...` against section D of `.github/review/REVIEWER.md`). Re-read your own diff (`git diff origin/main...`) against each acceptance criterion.
 
 ## 7. Hand it over
-Check `"flow"` in `haam.config.json` (default `test-first`).
+First check the issue's labels. **`uat:skip`** (the owner decided this change needs no test of theirs): use the no-UAT lane below, whatever the flow. Otherwise check `"flow"` in `haam.config.json` (default `test-first`).
+
+### No-UAT lane (`uat:skip` on the issue, every issue of a batch)
+- If your change turned out to touch a protected area (`AGENTS.md` §4), the lane doesn't apply: add `human-review`, tell the owner, and hand it over through your flow as usual.
+- Commits as usual; rebase on `origin/main`, `make check` green, the release note `docs/changes/<FILE-ID>.md`. No UAT plan.
+- `git push -u origin <branch>`, then open the PR **ready, not draft**: `gh pr create` with the title `<ID>: <summary>`, the body from the template, and `--label uat:skip`. The checks and both AI reviews run once. The gate checks that the owner marked the issue (on Linear it trusts the PR label, so copy it only when the Linear issue has it), and the PR merges by itself when everything is green (auto-merge). Then the owner's next `ship --all` deploys it with everything else.
+- If `"review"` is `"local"`, run `python3 tools/haam/haam.py review <ID>`.
+- Fix review findings in one push per round, as usual. Don't run `/uat`: the issue goes from `In Review` to `Deploying` by itself.
 
 ### Test-first (default): the owner tests before any PR exists
 Pushing a branch costs nothing; pull requests are what start CI and the reviews. So the owner tests your work first, and the PR is only opened once they've passed it.

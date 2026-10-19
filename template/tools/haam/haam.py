@@ -23,7 +23,7 @@ Agents, when the tracker is GitHub Projects:
 Testing and shipping (inside /test, after the human's verdict):
     checkout-pr ISSUE | --back              Put a change on this machine to test it (its PR, or the agent's branch)
     publish ISSUE --human                   Test-first: push the tested commit and open its PR (uat-passed)
-    ship ISSUE --human [--merged-only]      Merge, approve the production deploy, wait, close (exit 2: run again)
+    ship ISSUE... | --all --human           Merge, approve the production deploy (one for several), wait, close (exit 2: run again)
 
 CI cost:
     ci-usage [--days 7]                     Where the Actions minutes went (by workflow, job, trigger, day)
@@ -37,6 +37,7 @@ Everyone:
     version   [--check]                           Kit version here, in the project, and the latest release
     doctor    [--role admin|developer] [--json]   Check what's done and what's missing
     dev       [--apply] [--run-checks]            Developer onboarding on this machine
+    hooks     [--apply]                           Commit secret scan on, without switching off your own git hooks
 
 Safety rules built into the tool:
   * Without --apply nothing is changed: you see the plan first.
@@ -66,7 +67,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.7.2"
+VERSION = "1.8.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -108,6 +109,7 @@ GITHUB_LABELS = [
     ("gate-override", "B60205", "Human override of G4; needs OVERRIDE: comment"),
     ("human-review", "FBCA04", "Touches protected area; human code review required"),
     ("ai-review-overruled", "5319E7", "Human overrules the AI reviews on this PR"),
+    ("uat:skip", "C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
 ]
 
 # (name, Linear state type, colour)
@@ -136,6 +138,7 @@ LINEAR_LABELS = [
     ("override-followup", "#FC7840", "Created after a gate override"),
     ("epic", "#3E4B9E", "Groups the issues that make up one feature (its sub-issues)"),
     ("uat-failed", "#D93F0B", "Failed the human test: rework first, then test again"),
+    ("uat:skip", "#C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
 ]
 
 # Files the rename step rewrites (team key / product name)
@@ -1182,6 +1185,17 @@ def cmd_github(args):
         else:
             rep.add("warn", f"{name} missing", "will create")
 
+    # Auto-merge (the no-UAT lane: PRs whose issues the owner marked uat:skip merge once everything is green)
+    rep.section("Auto-merge")
+    if info.get("allow_auto_merge"):
+        rep.add("ok", "Auto-merge allowed", "for the no-UAT lane (uat:skip)")
+    elif apply:
+        c2, _, e2 = gh_api("PATCH", f"repos/{repo}", {"allow_auto_merge": True})
+        rep.add("ok" if c2 == 0 else "warn", "Auto-merge allowed" if c2 == 0 else "Couldn't allow auto-merge",
+                "for the no-UAT lane (uat:skip)" if c2 == 0 else (e2 or "")[:160])
+    else:
+        rep.add("warn", "Auto-merge not allowed", "will allow it (used only by the no-UAT lane, uat:skip)")
+
     # Ruleset
     rep.section("Branch rules on the default branch")
     code, rulesets, err = gh_api("GET", f"repos/{repo}/rulesets")
@@ -1538,6 +1552,7 @@ GH_ISSUE_LABELS = [
     ("override-followup", "FC7840", "Created after a gate override"),
     ("epic", "3E4B9E", "Groups the issues that make up one feature (its sub-issues)"),
     ("uat-failed", "D93F0B", "Failed the human test: rework first, then test again"),
+    ("uat:skip", "C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
 ]
 EPIC_LABEL = "epic"
 # Moving into these needs a human decision (they're done through human-only skills)
@@ -2068,10 +2083,11 @@ def issue_action(args, cfg, board):
 
     if a == "label":
         cmd = ["gh", "issue", "edit", str(number), "-R", repo]
-        human_labels = {"agent-ready"}
+        human_labels = {"agent-ready": "agent-ready is added only after a human approves the spec",
+                        "uat:skip": "uat:skip (no UAT, merges by itself) is the owner's decision"}
         for lab in args.add or []:
             if lab in human_labels and not args.human:
-                raise RuntimeError("agent-ready is added only after a human approves the spec; add --human when that happened")
+                raise RuntimeError(f"{human_labels[lab]}; add --human only when they decided it in this session")
             cmd += ["--add-label", lab]
         for lab in args.remove or []:
             cmd += ["--remove-label", lab]
@@ -2581,6 +2597,147 @@ def pr_head(repo, num):
     return (json.loads(out).get("headRefOid") if code == 0 and out else "") or ""
 
 
+def ship_candidates(cfg, repo):
+    """`ship --all`: open PRs that passed UAT or are in the no-UAT lane, plus merged ones still waiting to deploy."""
+    refs = []
+    code, out, _ = run(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "200",
+                        "--json", "number,title,headRefName,labels,isDraft"])
+    for p in json.loads(out or "[]") if code == 0 else []:
+        names = [l["name"] for l in p.get("labels") or []]
+        ready = "uat-passed" in names or "gate-override" in names or ("uat:skip" in names and "human-review" not in names)
+        if p.get("isDraft") or not ready:
+            continue
+        ids = pr_title_issues(p) or [i for i in [branch_issue(p.get("headRefName"), 1 if cfg.get("tracker") == "github" else "X-1")]
+                                     if i is not None]
+        if ids:
+            refs.append(ids[0])
+    if cfg.get("tracker") == "github":
+        board = GHProject(cfg)
+        board.load()
+        refs += [i["number"] for i in board.items() if i["status"] == "Deploying" and i["state"] == "OPEN"
+                 and i["number"] not in refs]
+    return refs
+
+
+def ship_batch(args, root, cfg):
+    """Ship several changes with one production deploy: merge each (when its checks pass), approve only the newest
+    deploy run (it carries all of them; older waiting runs are cancelled), then close every issue.
+    Safe to run again; exit codes as for one issue."""
+    repo = cfg["github_repo"]
+    deadline = time.time() + args.wait * 60
+    out_steps, merged, stopped, pending = [], [], [], []
+
+    def say(msg):
+        out_steps.append(msg)
+        if not args.json:
+            print(msg, flush=True)
+
+    def finish(state, code, message):
+        if args.json:
+            print(json.dumps({"ok": code == 0, "state": state, "message": message, "merged": [m["issue"] for m in merged],
+                              "stopped": stopped, "pending": pending, "steps": out_steps}, indent=2))
+        elif message:
+            print(message, flush=True)
+        sys.exit(code)
+
+    refs = [issue_ref(cfg, x) for x in (args.issue or [])]
+    if args.all:
+        try:
+            refs += [r for r in ship_candidates(cfg, repo) if r not in refs]
+        except RuntimeError as e:
+            finish("stopped", 1, f"Couldn't list what's ready: {e}")
+    if not refs:
+        finish("nothing to ship", 0, "Nothing is ready to ship: no PR has passed UAT or is in the no-UAT lane.")
+    say(f"{INFO} Shipping together: " + ", ".join(show_ref(r) for r in refs))
+    me = [sys.executable, str(Path(__file__).resolve())]
+    for r in refs:
+        left = max(0.0, (deadline - time.time()) / 60)
+        c, o, e = run(me + ["ship", str(r), "--human", "--merge-only", "--json",
+                            "--wait", f"{left:.2f}"], cwd=root)
+        try:
+            res = json.loads(o)
+        except (json.JSONDecodeError, TypeError):
+            res = {"message": (e or o or "")[:300]}
+        if c == 0:
+            merged.append({"issue": show_ref(r), "ref": r, "sha": res.get("sha"), "docs_only": res.get("docs_only")})
+            say(f"{OK} {show_ref(r)}: merged")
+        elif c == SHIP_NOT_FINISHED:
+            pending.append(show_ref(r))
+            say(f"{INFO} {show_ref(r)}: checks still running")
+        else:
+            stopped.append({"issue": show_ref(r), "why": res.get("message", "")})
+            say(f"{BAD} {show_ref(r)}: {res.get('message', '')}")
+    if pending:
+        finish("waiting for checks", SHIP_NOT_FINISHED, "Not finished yet: " + ", ".join(pending) + " still have checks "
+               "running. Nothing is deployed until they're merged too, so it's one deploy. Run the same command again.")
+    if not merged:
+        finish("stopped", 1, "Nothing was merged. " + " ".join(f"{s['issue']}: {s['why']}" for s in stopped))
+
+    # One deploy for all of them: the newest deploy run among the merges carries every change.
+    shas = [m["sha"] for m in merged if m.get("sha") and not m.get("docs_only")]   # in merge order
+    run_url = None
+    if cfg.get("deploy") == "manual" and not args.live:
+        finish("deploy by hand", SHIP_WAITING_HUMAN, "Merged " + ", ".join(m["issue"] for m in merged) + ". Waiting for "
+               "the human: deploy it your usual way, then say it's live (run this again with --live).")
+    if shas and not args.live and not args.no_deploy:
+        # The newest of the merges on the default branch (the batch may include changes merged earlier).
+        cm, commits, _ = gh_api("GET", f"repos/{repo}/commits?sha={cfg.get('default_branch') or 'main'}&per_page=100")
+        order = [x.get("sha") for x in commits] if cm == 0 and isinstance(commits, list) else []
+        last = next((x for x in order if x in shas), shas[-1])
+        shas = [x for x in shas if x != last] + [last]
+        cancelled = set()
+        while True:
+            c, o, e = run(["gh", "run", "list", "-R", repo, "--workflow", args.workflow, "--limit", "30",
+                           "--json", "databaseId,status,conclusion,url,headSha"])
+            if c != 0:
+                finish("stopped", 1, f"Couldn't list the deploy runs: {(e or o)[:200]}")
+            runs = [x for x in json.loads(o or "[]") if x.get("headSha") in shas]
+            # The run for the last merge carries every change; wait for it rather than approve an older one.
+            newest = next((x for x in runs if x.get("headSha") == shas[-1]), None)
+            if newest:
+                for old in runs:
+                    if old is not newest and old["status"] in ("waiting", "pending", "queued", "requested") \
+                            and old["databaseId"] not in cancelled:
+                        cancelled.add(old["databaseId"])
+                        run(["gh", "run", "cancel", str(old["databaseId"]), "-R", repo])
+                        say(f"{INFO} Cancelled an older deploy run (the newest one carries it): {old['url']}")
+            if newest and newest["status"] == "completed":
+                if newest["conclusion"] == "success":
+                    run_url = newest["url"]
+                    say(f"{OK} Deployed: {run_url}")
+                    break
+                finish("deploy failed", 1, f"The deploy failed: {newest['url']}. Show the human; report it as an "
+                       "Urgent bug if production is affected.")
+            if newest and newest["status"] == "waiting":
+                cp, pend, ep = gh_api("GET", f"repos/{repo}/actions/runs/{newest['databaseId']}/pending_deployments")
+                pend = pend if isinstance(pend, list) else []
+                mine = [x["environment"]["id"] for x in pend if x.get("current_user_can_approve", True)]
+                if pend and not mine:
+                    finish("waiting for deploy approval", SHIP_NOT_FINISHED, "You can't approve this environment: the "
+                           "approver must approve it in GitHub (Actions → the run → Review deployments). Run again after.")
+                if mine:
+                    ca, _, ea = gh_api("POST", f"repos/{repo}/actions/runs/{newest['databaseId']}/pending_deployments",
+                                       {"environment_ids": mine, "state": "approved",
+                                        "comment": f"Approved by {gh_login() or 'the product owner'} for "
+                                                   + ", ".join(m['issue'] for m in merged) + " (HAAM ship)"})
+                    if ca != 0:
+                        finish("stopped", 1, f"Couldn't approve the deploy ({str(ea)[:150]}). Approve it in GitHub.")
+                    say(f"{OK} Approved one production deploy for " + ", ".join(m["issue"] for m in merged))
+            if time.time() > deadline:
+                finish("deploying", SHIP_NOT_FINISHED, "Not finished yet: the deploy is "
+                       + (f"running ({newest['url']})" if newest else "starting") + ". Run the same command again.")
+            time.sleep(poll_seconds())
+    # Close each issue (the deploy is done, or nothing needed deploying)
+    for m in merged:
+        extra = ["--released-in", run_url] if run_url else (["--live"] if args.live else ["--no-deploy"])
+        c, o, e = run(me + ["ship", str(m["ref"]), "--human", "--json"] + extra, cwd=root)
+        say(f"{OK} {m['issue']} is live and Done" if c == 0 else f"{WARN} {m['issue']}: couldn't close it ({(e or o)[:160]})")
+    msg = ", ".join(m["issue"] for m in merged) + " " + ("are" if len(merged) > 1 else "is") + " live."
+    if stopped:
+        msg += " Not shipped: " + "; ".join(f"{s['issue']}: {s['why']}" for s in stopped)
+    finish("live", 0 if not stopped else 1, msg)
+
+
 def cmd_ship(args):
     """After the human passed UAT and said 'ship': merge, approve the production deploy, wait, close the issue.
     Safe to run again: it carries on from wherever the last run stopped.
@@ -2592,6 +2749,12 @@ def cmd_ship(args):
                  "'ship') or /release (with --merged-only), and add --human.")
     if git_paths(root)[2]:
         sys.exit("ship runs only from the owner's own chat in the main project folder, never from an agent's worktree.")
+    issues = args.issue or []
+    if args.all or len(issues) > 1:
+        return ship_batch(args, root, cfg)
+    if not issues:
+        sys.exit("Give the issue (ship 12), several (ship 12 13 14), or --all")
+    args.issue = issues[0]
     ref = issue_ref(cfg, args.issue)
     repo = cfg["github_repo"]
     deadline = time.time() + args.wait * 60
@@ -2633,14 +2796,18 @@ def cmd_ship(args):
         if pr.get("isDraft"):
             stop(f"PR #{num} is still a draft.")
         sha = tested_sha(root, ref)
-        if "uat-passed" not in labels and "gate-override" not in labels:
+        lane = "uat:skip" in labels and "human-review" not in labels and "uat-passed" not in labels
+        if lane:
+            say(f"{INFO} No-UAT lane (uat:skip): merging once the checks, the reviews and the gate pass")
+            sha = None      # nothing was tested by hand: the checks decide, on whatever the head is
+        elif "uat-passed" not in labels and "gate-override" not in labels:
             # The gate drops the label when a push races it; the `uat` status on the tested head is the owner's pass.
             if not (sha and pr_head(repo, num) == sha and uat_status_ok(repo, sha)):
                 stop(f"PR #{num} hasn't passed UAT (no 'uat-passed' label). Record the human's test result first.")
             run(["gh", "pr", "edit", num, "-R", repo, "--add-label", "uat-passed"])
             labels.append("uat-passed")
             say(f"{INFO} Put back 'uat-passed': the owner's pass is recorded on this exact commit")
-        if not sha:
+        if not sha and not lane:
             say(f"{WARN} No record of which commit the human tested (they didn't use checkout-pr); merging the current head")
         said_waiting = False
         started = time.time()
@@ -2654,7 +2821,7 @@ def cmd_ship(args):
             # change. Measured from the PR's last update, so running ship again doesn't restart the clock.
             age = pr_quiet_seconds(repo, num)
             settling = (time.time() - started if age is None else age) < checks_grace_seconds()
-            if settling and "release-gate" in failed and "uat-passed" in labels:
+            if settling and "release-gate" in failed and ("uat-passed" in labels or lane):
                 failed = [c for c in failed if c != "release-gate"]
                 pending = pending + ["release-gate (re-checking)"]
             if failed:
@@ -2707,11 +2874,16 @@ def cmd_ship(args):
         iss = board.issue(ref)
         if iss["status"] not in ("Deploying", "Done"):
             board.set_option(iss, "Status", "Deploying")
+    if args.merge_only:       # a batch: ship_batch deploys once for all of them, then closes each
+        finish("merged", 0, f"PR #{num} is merged.", sha=sha, docs_only=docs_only, pr=int(num))
 
     # 2. Deploy: approve the production environment and wait
     run_info = None
     manual = cfg.get("deploy") == "manual"
-    if args.no_deploy or args.live:
+    if args.released_in:
+        run_info = {"url": args.released_in}
+        say(f"{OK} Deployed with the batch: {args.released_in}")
+    elif args.no_deploy or args.live:
         say(f"{INFO} The human confirmed it's live")
     elif manual:
         say(f"{INFO} Merged. This project deploys by hand")
@@ -3924,7 +4096,11 @@ def main():
     p.set_defaults(func=cmd_test_failed)
 
     p = common(sub.add_parser("ship", help="after UAT passed and the human said ship: merge, deploy, close"))
-    p.add_argument("issue", help="issue number (#12) or Linear ID (APP-12)")
+    p.add_argument("issue", nargs="*", help="issue number(s) (#12) or Linear ID(s) (APP-12); several: one deploy for all")
+    p.add_argument("--all", action="store_true",
+                   help="everything ready: PRs that passed UAT or are in the no-UAT lane, and merged ones waiting to deploy")
+    p.add_argument("--merge-only", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--released-in", help=argparse.SUPPRESS)
     p.add_argument("--human", action="store_true", help="the human said 'ship' in this session")
     p.add_argument("--wait", type=float, default=1.5, help="minutes to wait before handing back (exit 2: run again)")
     p.add_argument("--merged-only", action="store_true", help="/release: never merge, only finish an already-merged PR")

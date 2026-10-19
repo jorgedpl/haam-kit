@@ -6,6 +6,31 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-19
+
+Fewer merges and deploys for the product owner.
+
+### Added
+- **No-UAT lane** for changes the owner can't meaningfully test, such as a kit or config update, a dependency bump, an invisible refactor or CI. The owner marks the issue `uat:skip`, once, in `/triage` (new *UAT* column) or by saying "spec approved, no UAT".
+  - The agent skips `/uat` and opens the PR straight away, labelled `uat:skip`.
+  - `release-gate` passes once every issue the PR is for carries the owner's label. GitHub Projects: the gate reads the issues; Linear: it trusts the PR label.
+  - The gate turns on auto-merge, so the PR merges by itself when CI and both AI reviews pass. This uses `HAAM_PROJECT_TOKEN`, because a merge by the workflow's own token wouldn't start the deploy.
+  - Never for PRs labelled `human-review`.
+  - Agents can't add `uat:skip` to an issue (`issue label` refuses without `--human`).
+- **`/test all`**: tests everything waiting in UAT in one sitting, then asks once to ship what passed.
+- **`ship --all --human`** (or `ship 12 13 14 --human`): one production deploy for many changes.
+  - It merges every PR that passed UAT or is in the lane, and includes merged ones still waiting to deploy.
+  - It waits for the deploy run of the newest merge, cancels the older waiting runs, approves that one deploy, then closes every issue.
+  - If any PR's checks are still running, it deploys nothing yet (exit 2) so it stays one deploy.
+- `github --apply` allows auto-merge on the repository.
+
+### Migration
+- `haam.py update`, then:
+  - `haam.py github --apply` (allows auto-merge and adds the `uat:skip` label);
+  - `haam.py github-project --apply` (GitHub Projects) or `haam.py linear --apply` (Linear) for the issue label.
+- Merge the updated `gates.yml`.
+- For auto-merge, the repository needs the `HAAM_PROJECT_TOKEN` secret (`docs/process/TRACKER.md`; Linear projects too). Without it, lane PRs wait for your `ship --all`.
+
 ## [1.7.2] - 2026-10-19
 
 Fixes found while updating a real project from 1.2.0 to 1.7.x.
@@ -223,7 +248,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.7.2...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/jorgedpl/haam-kit/compare/v1.7.2...v1.8.0
 [1.7.2]: https://github.com/jorgedpl/haam-kit/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/jorgedpl/haam-kit/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/jorgedpl/haam-kit/compare/v1.6.0...v1.7.0

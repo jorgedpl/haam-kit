@@ -1,6 +1,11 @@
 # Gate G4 enforcement: a PR can only merge to main when a human has passed UAT
 # (label `uat-passed`) or a human has overridden the gate (label `gate-override`
 # plus a PR comment starting with "OVERRIDE:").
+# The no-UAT lane: when the owner marked every issue a PR covers `uat:skip` (their decision, made when
+# triaging or approving the spec) and the PR carries `uat:skip` too, the gate passes without a test, and
+# auto-merge is turned on, so the PR merges by itself once CI and both AI reviews pass. Never for PRs
+# labelled `human-review` (protected areas). Auto-merge needs the HAAM_PROJECT_TOKEN secret (a merge by
+# the workflow's own token wouldn't start the deploy).
 # A pass belongs to the code that was tested: a push after it removes `uat-passed`,
 # unless the new head carries the owner's `uat` commit status (`haam.py publish`
 # posts it on exactly the commit they tested). Drafts included.
@@ -40,7 +45,8 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'uat-passed')) ||
       (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
         ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-         github.event.label.name == 'uat-passed' || github.event.label.name == 'gate-override')) ||
+         github.event.label.name == 'uat-passed' || github.event.label.name == 'gate-override' ||
+         github.event.label.name == 'uat:skip' || github.event.label.name == 'human-review')) ||
       (github.event.issue.pull_request &&
         (startsWith(github.event.comment.body, 'OVERRIDE') || startsWith(github.event.comment.body, 'EMERGENCY BYPASS')))
     runs-on: ${{ vars.HAAM_RUNNER || 'ubuntu-24.04' }}
@@ -48,6 +54,8 @@ jobs:
     steps:
       - name: Check UAT / override
         uses: actions/github-script@v7
+        env:
+          AUTO_MERGE_TOKEN: ${{ secrets.HAAM_PROJECT_TOKEN }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -81,8 +89,41 @@ jobs:
             const docsOnly = files.length > 0 && files.every(f =>
               f.filename.startsWith('docs/') || f.filename.endsWith('.md'));
 
+            // The no-UAT lane: every issue the PR is for (title "#12 #13: …", branch "12-…") is marked uat:skip.
+            let lane = false;
+            let laneWhy = '';
+            if (!docsOnly && labels.includes('uat:skip')) {
+              if (labels.includes('human-review')) {
+                laneWhy = 'uat:skip never applies to protected areas (human-review): needs UAT';
+              } else {
+                let tracker = '';
+                try {
+                  const { data } = await github.rest.repos.getContent({ owner, repo, path: 'haam.config.json', ref: pr.base.ref });
+                  tracker = JSON.parse(Buffer.from(data.content, 'base64').toString()).tracker || '';
+                } catch (e) { core.warning(`Couldn't read haam.config.json: ${e.message}`); }
+                if (tracker === 'github') {
+                  const ids = new Set();
+                  const title = (pr.title.match(/^\s*((?:#\d+[\s,]*)+):/) || [])[1] || '';
+                  for (const m of title.matchAll(/#(\d+)/g)) ids.add(Number(m[1]));
+                  const b = pr.head.ref.match(/^(\d+)-/);
+                  if (b) ids.add(Number(b[1]));
+                  lane = ids.size > 0;
+                  if (!lane) laneWhy = 'uat:skip: no issue found in the title or branch';
+                  for (const n of ids) {
+                    const { data: iss } = await github.rest.issues.get({ owner, repo, issue_number: n });
+                    if (!iss.labels.map(l => typeof l === 'string' ? l : l.name).includes('uat:skip')) {
+                      lane = false;
+                      laneWhy = `uat:skip on the PR, but issue #${n} isn't marked uat:skip by the owner`;
+                    }
+                  }
+                } else {
+                  lane = true;   // Linear: the agent copies uat:skip from the Linear issue (the gate can't read Linear)
+                }
+              }
+            }
+
             let state = 'failure';
-            let description = 'Waiting for UAT: needs label uat-passed (or gate-override with reason)';
+            let description = laneWhy || 'Waiting for UAT: needs label uat-passed (or gate-override with reason)';
 
             if (docsOnly) {
               state = 'success';
@@ -90,6 +131,9 @@ jobs:
             } else if (labels.includes('uat-passed')) {
               state = 'success';
               description = 'UAT passed';
+            } else if (lane) {
+              state = 'success';
+              description = 'No UAT needed (uat:skip): merges once the checks and reviews pass';
             } else if (labels.includes('gate-override')) {
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number });
               // "OVERRIDE: <reason>", in capitals (also "OVERRIDE (Level 1, skip UAT) by @user: <reason>")
@@ -110,3 +154,20 @@ jobs:
             });
 
             core.info(`release-gate → ${state}: ${description}`);
+
+            // The lane merges by itself: auto-merge waits for every required check (CI, both AI reviews, this gate).
+            if (lane && state === 'success' && !pr.draft && !pr.auto_merge) {
+              const token = process.env.AUTO_MERGE_TOKEN;
+              if (!token) {
+                core.notice('No HAAM_PROJECT_TOKEN secret, so auto-merge is off: ship it from /test (ship --all).');
+              } else {
+                try {
+                  await getOctokit(token).graphql(
+                    'mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) { clientMutationId } }',
+                    { id: pr.node_id });
+                  core.info('Auto-merge is on: it merges once every required check passes.');
+                } catch (e) {
+                  core.warning(`Couldn't turn on auto-merge (allow it with haam.py github --apply): ${e.message}`);
+                }
+              }
+            }

@@ -37,8 +37,8 @@ plus a short list of issues that stay on their own, and of likely duplicates. At
 Then apply exactly what was confirmed: create each new epic (GitHub: `issue create --epic --stream idea --title "<outcome-focused title>" --body-file <short summary and member list>`, status Triage; if none of its members is an idea, i.e. only bugs and approved features, use `--stream feature --status Backlog` instead, since there's nothing to decide), link each member (`issue link <n> --parent <epic>`), and comment on each member `🧩 Grouped into epic <ID>: <title>`. Finish by listing the epics in suggested order and offering `/epic <ID>` for the first: that's where the questions about each feature get asked. Skip steps 3–4 in group mode.
 
 ## 3. Propose, as one table
-| # | ID | Title | Stream | Priority | Next step | Why (≤ 12 words) |
-|---|---|---|---|---|---|---|
+| # | ID | Title | Stream | Priority | Next step | UAT | Why (≤ 12 words) |
+|---|---|---|---|---|---|---|---|
 
 - **Stream:** confirm or correct (`bug` = doesn't work as intended; `idea` = new or changed behaviour).
 - **Priority:** Urgent / High / Medium / Low, using the levels and the bug matrix; say which current priority it serves, if any.
@@ -46,13 +46,14 @@ Then apply exactly what was confirmed: create each new epic (GitHub: `issue crea
   - inbox: `Ready` (bug with usable repro) · `needs info: <question>` · `assess` (idea → Discovery; for an idea inside an undecided epic, propose `decided with epic <ID>` and leave it in Triage) · `park until <trigger>` · `reject: <reason>` · `duplicate of <ID>`
   - backlog: `keep` · `priority → X` · `split` · `needs spec` · `park until <trigger>`
   - stale: `nudge` (comment asking for status) · `release the claim` · `remind the human to test/decide` · `revisit now`
+- **UAT:** `test` (the default) or `skip`. Propose `skip` only for changes the owner can't meaningfully test by using the product: a kit or config update, a dependency bump, a refactor with no visible change, CI or internal tooling. With `skip` (label `uat:skip`), the agent opens the PR straight away and it merges by itself once CI and both AI reviews pass: no test, no merge by the owner. Never propose `skip` for anything in a protected area (`AGENTS.md` §4) or anything a user would notice.
 - Never propose approving an idea (G1) or approving a spec (G2); those are `/decide` and the owner's "spec approved". If an idea looks obviously right, propose `assess` and say "quick assessment".
 
 Then ask: *"Reply `ok` to apply all of this, or tell me what to change (e.g. `#14 Low, #9 park until Q3`)."* Wait for the answer.
 
 ## 4. Apply exactly what was confirmed
 For each item, in the tracker:
-- Set the priority and fix the stream label.
+- Set the priority and fix the stream label. For `UAT: skip`, add the label `uat:skip` (GitHub: `haam.py issue label <n> --add uat:skip --human`, allowed here because the human confirmed it).
 - Status: `Ready` (bugs), `Discovery` (ideas to assess), `Parked` or `Canceled` (on GitHub these two need `--human`, allowed here because the human confirmed them; close Canceled issues as not planned or duplicate). Leave "needs info" items in `Triage`.
 - Comment: `🗂️ Triaged by <user>: <priority> · <next step> · <why>`. For "needs info", comment the question and mention the reporter. For duplicates, link the original. For stale nudges, mention the assignee.
 - "Release the claim": unassign, status back to `Ready` (GitHub: `issue status <n> Ready --force`, allowed here because the human confirmed it), comment why.

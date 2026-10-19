@@ -28,7 +28,7 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
 ## 2. Your rhythm
 
 ### Daily (10–15 minutes)
-1. **Test first.** Type `/test`: the agent sets up the oldest change waiting for you and walks you through it (§2a). Agents can't finish until you do, and their context goes stale.
+1. **Test first.** Type `/test all`: the agent walks you through every change waiting for you, one after another (§2a), then ships everything that passed with one deploy. Agents can't finish until you do, and their context goes stale.
 2. **Empty the Triage inbox** (`/triage`, or the Triage view). Nothing should sit there for more than two working days.
 3. **Urgent bugs:** if one exists, start an agent on it now: new chat window, `/work bugs`.
 4. Skim the handover and "blocked" comments from agents and answer their questions.
@@ -41,6 +41,8 @@ Everything you decide goes into the tracker or Git, never only into a chat. If i
    - If the checks or reviews then find a problem, it goes back to the agents like a failed test, and comes back to you once fixed.
    - **What went wrong** (*"step 3: the export button is still missing on mobile"*) → the agent records it on the issue, labels it `uat-failed` and sends it back to the agents, who fix it first. When it's fixed it comes back to `/test`.
 3. That's all. You don't need to touch branches, labels or the board.
+
+**Changes you can't test yourself** (kit or config updates, dependency bumps, refactors you wouldn't notice, CI): mark them `uat:skip` when you triage them, or say "spec approved, no UAT". They never come to `/test`: their PR merges by itself once CI and both AI reviews pass, and your next `ship` deploys them with everything else. Keep it for changes no user would notice; never for protected areas.
 
 ### Weekly (30–45 minutes)
 1. **Group** loose issues into epics (`/triage group`) and shape the top epic with the agent (`/epic #9`).

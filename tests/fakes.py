@@ -259,13 +259,21 @@ if a[:2] == ["pr", "merge"]:
     m = opt(a, "--match-head-commit")
     if m and m != p.get("headRefOid"):
         print("Head branch was modified", file=sys.stderr); sys.exit(1)
-    p["state"] = "MERGED"; p["mergeCommit"] = {"oid": "abc123"}; p["mergedAt"] = "2026-01-01T00:00:00Z"
+    p["state"] = "MERGED"; p["mergeCommit"] = {"oid": f"merge{a[2]}"}; p["mergedAt"] = "2026-01-01T00:00:00Z"
     p.setdefault("files", [{"path": "src/export.py"}])
-    st.setdefault("runs", []).append({"databaseId": 7, "status": "waiting", "conclusion": "", "url": "https://run/7",
-                                      "headSha": "abc123"})
+    rid = 7 + len(st.get("runs", []))
+    st.setdefault("runs", []).append({"databaseId": rid, "status": "waiting", "conclusion": "",
+                                      "url": f"https://run/{rid}", "headSha": f"merge{a[2]}"})
     save(); sys.exit(0)
 if a[:2] == ["run", "list"]:
-    out([r for r in st.get("runs", []) if r["headSha"] == opt(a, "--commit")])
+    runs = st.get("runs", [])
+    out([r for r in runs if r["headSha"] == opt(a, "--commit")] if "--commit" in a else list(reversed(runs)))
+if a[:2] == ["run", "cancel"]:
+    st.setdefault("cancelled", []).append(a[2])
+    for r in st.get("runs", []):
+        if str(r["databaseId"]) == a[2]:
+            r["status"], r["conclusion"] = "completed", "cancelled"
+    save(); sys.exit(0)
 if a[:2] == ["variable", "list"]:
     out([{"name": k, "value": v} for k, v in st.get("variables", {}).items()])
 if a[:2] == ["variable", "set"]:
@@ -289,9 +297,12 @@ if a and a[0] == "api" and len(a) > 3 and "/commits/" in a[3] and a[3].split("?"
 if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/pending_deployments"):
     if a[2] == "GET":
         out([{"environment": {"id": 1, "name": "production"}}])
+    rid = a[3].split("/actions/runs/")[1].split("/")[0]
     for r in st.get("runs", []):
-        r["status"], r["conclusion"] = "completed", "success"
+        if str(r["databaseId"]) == rid:
+            r["status"], r["conclusion"] = "completed", "success"
     st["approved"] = json.loads(stdin) if stdin else True
+    st.setdefault("approvals", []).append(rid)
     out([])
 if a and a[0] == "api" and a[2:3] == ["DELETE"]:
     st.setdefault("deleted_refs", []).append(a[3]); out({})

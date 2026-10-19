@@ -25,6 +25,8 @@ Settings → **Rules → Rulesets** → New branch ruleset (or classic Branch pr
 - ✅ Require linear history (optional, keeps history clean)
 - **Bypass list:** repository admins only, **for pull requests only** (never "always": agents work under a human's login, often an admin's, and could otherwise push straight to `main`). This is the Level 2 emergency bypass in `docs/process/GATES.md`.
 
+**Auto-merge** (Settings → General → Pull Requests → *Allow auto-merge*; `haam.py github --apply` turns it on): used only by the no-UAT lane, for PRs whose issues you marked `uat:skip`. The gate turns it on for such a PR with the `HAAM_PROJECT_TOKEN` secret (`docs/process/TRACKER.md`), and GitHub merges only once every required check passes. If you require approvals, the lane waits for one too.
+
 ## 3. Code review and security
 
 ### 3a. A Claude secret for the reviewer agents

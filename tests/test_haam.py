@@ -66,7 +66,69 @@ class ToolTestCase(unittest.TestCase):
         return json.loads((self.proj / "haam.lock.json").read_text())
 
 
+GATE_HARNESS = r"""
+const scenario = JSON.parse(process.argv[process.argv.length - 1]);
+const calls = { statuses: [], graphql: [], notices: [], warnings: [] };
+const pr = Object.assign({ number: 7, title: '#12: Bump deps', head: { ref: '12-bump', sha: 'abc' }, base: { ref: 'main' },
+  draft: false, auto_merge: null, node_id: 'PR_1', labels: [] }, scenario.pr);
+const github = {
+  paginate: async (fn, args) => fn === 'files' ? scenario.files : fn === 'comments' ? [] : [],
+  rest: {
+    pulls: { get: async () => ({ data: pr }), listFiles: 'files' },
+    issues: { get: async ({ issue_number }) => ({ data: { labels: (scenario.issues[issue_number] || []).map(n => ({ name: n })) } }),
+              listComments: 'comments', removeLabel: async () => {}, createComment: async () => {} },
+    repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify({ tracker: scenario.tracker })).toString('base64') } }),
+             createCommitStatus: async (x) => calls.statuses.push(x), listCommitStatusesForRef: 'statuses' },
+  },
+};
+const context = { repo: { owner: 'o', repo: 'r' }, payload: { action: 'labeled', pull_request: { number: 7 } } };
+const core = { info: () => {}, notice: (m) => calls.notices.push(m), warning: (m) => calls.warnings.push(m) };
+const getOctokit = () => ({ graphql: async (q, v) => calls.graphql.push(v) });
+process.env.AUTO_MERGE_TOKEN = scenario.token || '';
+(async () => {
+  await (async function () { BODY })();
+  console.log(JSON.stringify(calls));
+})();
+"""
+
+
 class TestRepository(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_gate_no_uat_lane(self):
+        """Run gates.yml's script against fake GitHub data: the lane needs the owner's uat:skip on every issue."""
+        gates = (KIT / ".github/workflows/gates.yml").read_text()
+        body = "\n".join(l[12:] for l in re.search(r"script: \|\n(.*)", gates, re.S).group(1).splitlines())
+        code = GATE_HARNESS.replace("BODY", body)
+
+        def gate(**sc):
+            sc.setdefault("files", [{"filename": "src/app.py"}])
+            sc.setdefault("tracker", "github")
+            sc.setdefault("issues", {})
+            sc.setdefault("pr", {})
+            sc["pr"]["labels"] = [{"name": n} for n in sc["pr"].get("labels", [])]
+            p = subprocess.run(["node", "-e", code, json.dumps(sc)], capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            calls = json.loads(p.stdout)
+            return calls["statuses"][-1]["state"], calls["statuses"][-1]["description"], calls
+
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, token="t")
+        self.assertEqual(st, "success")
+        self.assertEqual(calls["graphql"], [{"id": "PR_1"}])                       # auto-merge turned on
+        st, desc, _ = gate(pr={"labels": ["uat:skip"]}, issues={12: []})          # the owner didn't mark the issue
+        self.assertEqual(st, "failure")
+        self.assertIn("isn't marked uat:skip", desc)
+        st, desc, _ = gate(pr={"title": "#12 #13: Batch", "labels": ["uat:skip"]}, issues={12: ["uat:skip"], 13: []})
+        self.assertEqual(st, "failure")                                             # every issue in a batch
+        st, desc, _ = gate(pr={"labels": ["uat:skip", "human-review"]}, issues={12: ["uat:skip"]})
+        self.assertEqual(st, "failure")                                             # never for protected areas
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, tracker="linear")
+        self.assertEqual(st, "success")
+        self.assertTrue(calls["notices"])                                           # no token: says how to ship it
+        st, desc, _ = gate(pr={"labels": []}, issues={12: ["uat:skip"]})
+        self.assertEqual(st, "failure")                                             # the PR must carry it too
+        st, desc, calls = gate(pr={"labels": ["uat:skip"], "draft": True}, issues={12: ["uat:skip"]}, token="t")
+        self.assertEqual(calls["graphql"], [])                                      # drafts never auto-merge
+
     def test_override_comment_satisfies_the_gate(self):
         """The comment /override posts must be one gates.yml accepts, and one that starts a gate run."""
         gates = (KIT / ".github/workflows/gates.yml").read_text()
@@ -467,7 +529,9 @@ class TestGitHub(ToolTestCase):
         env = next(json.loads(r["body"]) for r in writes if any(x.endswith("environments/production") for x in r["args"]))
         self.assertEqual(env["reviewers"], [{"type": "User", "id": 583231}])
         created = [r["args"][2] for r in writes if r["args"][:2] == ["label", "create"]]
-        self.assertEqual(sorted(created), ["ai-review-overruled", "gate-override", "human-review"])
+        self.assertEqual(sorted(created), ["ai-review-overruled", "gate-override", "human-review", "uat:skip"])
+        patch = [json.loads(r["body"]) for r in writes if "PATCH" in r["args"] and r["body"] and "allow_auto_merge" in r["body"]]
+        self.assertEqual(patch, [{"allow_auto_merge": True}])           # the no-UAT lane's auto-merge
         # Secrets are never set by the tool
         self.assertFalse([r for r in self.requests() if r["args"][:2] == ["secret", "set"]])
 
@@ -767,6 +831,33 @@ class TestGitHubProjects(ToolTestCase):
         self.assertIn("PR #3: PR 3", self.tool("capacity").stdout)
         self.tool("config", "--max-open-prs", "20")
         self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
+
+    def test_ship_several_with_one_deploy(self):
+        self.setup_board()
+        mk = lambda t: json.loads(self.tool("issue", "create", "--stream", "bug", "--title", t, "--status", "UAT",
+                                            "--json").stdout)["number"]
+        a, b, c = mk("Fix A"), mk("Fix B"), mk("Bump deps")
+        st = self.gh_state()
+        pr = lambda n, labels: {"title": f"#{n}: x", "body": f"Refs #{n}", "headRefName": f"{n}-x", "isDraft": False,
+                                "state": "OPEN", "labels": [{"name": l} for l in labels], "url": f"https://pr/{n}"}
+        st["prs"] = {"5": pr(a, ["uat-passed"]), "6": pr(b, ["uat-passed"]), "7": pr(c, ["uat:skip"]),
+                     "8": {**pr(99, []), "title": "Untested"}}
+        self.state.write_text(json.dumps(st))
+        env = {**self.env, "HAAM_POLL_SECONDS": "0"}
+        res = json.loads(self.tool("ship", "--all", "--human", "--json", env=env).stdout)
+        self.assertEqual(res["state"], "live", res)
+        self.assertEqual(sorted(res["merged"]), sorted([f"#{a}", f"#{b}", f"#{c}"]))   # passed + the no-UAT lane
+        st = self.gh_state()
+        self.assertEqual(st["prs"]["8"]["state"], "OPEN")                              # untested stays
+        self.assertEqual(len(st["approvals"]), 1)                                      # one deploy for all three
+        self.assertEqual(len(st["cancelled"]), 2)                                      # the older runs
+        for n in (a, b, c):
+            self.assertEqual(st["issues"][str(n)]["state"], "CLOSED")
+        # A lane PR is refused by plain ship while it's labelled human-review (protected areas)
+        st["prs"]["9"] = pr(77, ["uat:skip", "human-review"])
+        self.state.write_text(json.dumps(st))
+        p = self.tool("ship", "77", "--human", env=env, check=False)
+        self.assertIn("hasn't passed UAT", p.stdout + p.stderr)
 
     def test_manual_deploy_and_batch_pr(self):
         self.setup_board()

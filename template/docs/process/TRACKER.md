@@ -52,6 +52,8 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Open the PR after a pass** (test-first, human said `pass`) | `haam.py publish 123 --human`: pushes the tested commit, opens the PR labelled `uat-passed`, moves the issue to In Review | `haam.py publish APP-123 --human` (`--label human-review` if the issue has it), then move the issue to In Review and comment, as it prints |
 | **Record a failed test** (human said it failed) | `haam.py test-failed 123 --human`, then label `uat-failed`, status Ready, no assignee | `haam.py test-failed APP-123 --human`, then the same in Linear |
 | **Ship after a pass** (human said `ship`) | `haam.py ship 123 --human`: merge, approve deploy, wait, close | `haam.py ship APP-123 --human`, then set Done in Linear |
+| **Ship everything ready, one deploy** | `haam.py ship --all --human` (or `ship 12 13 14 --human`): merges each, approves the newest deploy only, closes all | `haam.py ship APP-12 APP-13 --human` (list them: `--all` can't read Linear) |
+| **No UAT for this issue** (owner's decision) | `haam.py issue label 123 --add uat:skip --human` | Label `uat:skip` |
 | **Room for new work?** (`/next` checks first) | `haam.py capacity` (open PRs and UAT queue vs `max_open_prs`, `max_in_uat`) | Same command (counts PRs; the UAT count needs GitHub Projects) |
 | **Batch PR** (an epic's bugs) | Title `#12 #13 #14: …`, a `Refs #n` line per issue; `ship` closes them all | Title `APP-12 APP-13: …` |
 | **Close after release** | `haam.py issue close 123 --human` (sets Done and closes; `/release` only) | Status Done |
@@ -68,7 +70,7 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 1. `gh auth refresh -s project` (lets your GitHub login use Projects).
 2. `python3 tools/haam/haam.py config --tracker github`
 3. `python3 tools/haam/haam.py github-project` (plan), then `--apply`: creates the board named after the product, links the repo, sets the 12 statuses and the Priority field, creates the labels.
-4. **Automation token** (for `tracker-sync.yml`): create a classic token at github.com/settings/tokens with the `project` scope (plus `repo` if the repository is private), then `gh secret set HAAM_PROJECT_TOKEN -R owner/repo`. Without it everything works, but cards don't move by themselves when PRs open or merge.
+4. **Automation token** (for `tracker-sync.yml`): create a classic token at github.com/settings/tokens with the `project` scope (plus `repo` if the repository is private), then `gh secret set HAAM_PROJECT_TOKEN -R owner/repo`. Without it everything works, but cards don't move by themselves when PRs open or merge, and the no-UAT lane can't turn on auto-merge (the gate uses this token, because a merge by the workflow's own token wouldn't start the deploy). On Linear projects, add it too if you use the no-UAT lane.
 5. **In the browser**, on the board: create the saved views the setup lists (Board grouped by Status, Triage, Agent queue, Waiting on me, Ideas inbox, Bugs, Epics), and turn on the board's built-in **Auto-add to project** workflow for this repository (board → Workflows). It puts issues created on GitHub's website on the board for free; `haam.py issue create` adds its own.
 6. Each developer runs `gh auth refresh -s project` once; `/haam-onboard` checks it.
 

@@ -82,6 +82,10 @@ jobs:
 
             // Path patterns (same rules as haam.py protected): ** any folders, * within one folder, ? one character.
             const globRe = (p) => {
+              // A leading ./ or / is ignored; a trailing / means everything inside; a plain name is that file or folder.
+              p = p.trim().replace(/^(\.\/|\/)+/, '');
+              if (p.endsWith('/')) p += '**';
+              if (!/[*?]/.test(p)) return new RegExp('^' + p.replace(/[.+^${}()|[\]\\]/g, '\\$&') + '(?:/.*)?$');
               let out = '';
               for (let i = 0; i < p.length;) {
                 if (p.startsWith('**/', i)) { out += '(?:.*/)?'; i += 3; }
@@ -138,11 +142,15 @@ jobs:
 
               // Docs-only PRs are exempt.
               const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: number });
-              const docsOnly = files.length > 0 && files.every(f =>
-                f.filename.startsWith('docs/') || f.filename.endsWith('.md'));
+              const docsOnly = files.length > 0 && files.length < 3000 && files.every(f =>
+                [f.filename, f.previous_filename].filter(Boolean).every(n => n.startsWith('docs/') || n.endsWith('.md')));
 
               // Protected areas are decided by the files the PR changes, not by a label anyone could leave off.
-              const touched = files.map(f => f.filename).filter(f => protectedRes.some(r => r.test(f)));
+              // A renamed file counts by its old path too, so moving something out of a protected folder is caught.
+              // GitHub lists at most 3000 files: a PR that big is treated as touching protected areas.
+              const paths = files.flatMap(f => [f.filename, f.previous_filename].filter(Boolean));
+              const touched = files.length >= 3000 ? ['(more than 3000 files)']
+                : paths.filter(f => protectedRes.some(r => r.test(f)));
               if (touched.length && !labels.includes('human-review')) {
                 try {
                   await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: ['human-review'] });

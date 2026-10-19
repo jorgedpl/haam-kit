@@ -15,7 +15,9 @@ Two fixes found while updating a real project to 1.8.0.
   - The gate now checks the files a PR changes against `protected_paths` in `haam.config.json`, read from `main`, not from the PR.
   - When any of them is touched, it adds `human-review`, explains why on the PR, and keeps the lane closed, whatever the labels say.
   - The defaults cover agent and CI configuration. Add the project's own areas with `haam.py config --protected "src/auth/**,db/migrations/**"`; `/haam-setup` asks for them.
-  - New `haam.py protected` lists the protected files a branch changes, so agents know before opening the PR.
+  - A file moved out of a protected folder counts by its old path too. A PR with more than 3,000 files (GitHub lists no more) counts as protected.
+  - Patterns: `**` any folders, `*` within one folder; a plain name (`src/auth`) or a trailing `/` means the whole folder, and a leading `./` is ignored. `config --protected` warns about a pattern that matches no file.
+  - New `haam.py protected` lists the protected files a branch changes, so agents know before opening the PR. It fails rather than reporting "clean" when it can't compare with the base.
   - This means a kit update never takes the lane: it changes agent configuration, so you review and ship it yourself.
 - **The first PR after a kit update no longer fails its reviews.** The reviews read their instructions from `main`, which still had the old wording ("post your comment yourself"), and that's now refused. The workflow now tells the reviewers how to report: write the files, never post. That works with any version of the instructions.
 

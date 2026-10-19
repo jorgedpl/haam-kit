@@ -907,6 +907,11 @@ def cmd_config(args):
                 cur.append(x.strip())
         drop = {x.strip() for x in (args.unprotected or "").split(",") if x.strip()}
         cfg["protected_paths"] = [x for x in cur if x not in drop]
+        tracked = git_out(root, "ls-files").splitlines()
+        for x in (args.protected or "").split(","):
+            if x.strip() and tracked and not protected_matches([x.strip()], tracked):
+                rep.add("warn", f"Protected pattern '{x.strip()}' matches no file in the repository",
+                        "check the spelling (e.g. src/auth/** for everything in src/auth)")
     if args.flow is not None:
         if args.flow not in ("test-first", "checks-first"):
             sys.exit("--flow must be test-first (owner tests before the PR) or checks-first (PR and checks, then test)")
@@ -3849,7 +3854,14 @@ def setup_secret_hook(root, apply, rep):
 
 
 def glob_regex(pattern):
-    """A path pattern as a regex: ** any folders, * within one folder, ? one character (same rules as gates.yml)."""
+    """A path pattern as a regex: ** any folders, * within one folder, ? one character (same rules as gates.yml).
+    A leading ./ or / is ignored; a trailing / means everything inside; a plain name (no * or ?) is that file or
+    everything inside that folder."""
+    pattern = re.sub(r"^(\./|/)+", "", pattern.strip())
+    if pattern.endswith("/"):
+        pattern += "**"
+    if not re.search(r"[*?]", pattern):
+        return re.compile("^" + re.escape(pattern) + "(?:/.*)?$")
     out, i = "", 0
     while i < len(pattern):
         if pattern.startswith("**/", i):
@@ -3880,7 +3892,10 @@ def cmd_protected(args):
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     base = args.base or default_base(root)
-    files = git_out(root, "diff", "--name-only", f"{base}...HEAD").splitlines()
+    code, out, err = run(["git", "diff", "--name-only", "--no-renames", f"{base}...HEAD"], cwd=root)
+    if code != 0 or base == "HEAD":
+        sys.exit(f"Couldn't compare with {base} ({(err or 'no base branch').strip()[:160]}). Fetch first, or pass --base.")
+    files = out.splitlines()     # --no-renames: a file moved out of a protected folder counts by its old path too
     hits = protected_matches(cfg.get("protected_paths"), files)
     if args.json:
         print(json.dumps({"base": base, "protected": hits}, indent=2))

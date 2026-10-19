@@ -159,6 +159,9 @@ class TestRepository(unittest.TestCase):
                                files=[{"filename": "src/auth/login.py"}])
         self.assertEqual(st, "failure")                                             # the project's own areas too
         st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, protected=["src/auth/**"],
+                               files=[{"filename": "src/login.py", "previous_filename": "src/auth/login.py"}])
+        self.assertEqual(st, "failure")                                             # moved out of a protected folder
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, protected=["src/auth/**"],
                                files=[{"filename": "src/billing.py"}])
         self.assertEqual(st, "success")
         self.assertEqual(calls["labels"], [])
@@ -173,13 +176,15 @@ class TestRepository(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("haam_mod", TOOL)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        pats = mod.DEFAULT_CONFIG["protected_paths"] + ["src/**/auth/*.py", "db/migrations/**"]
+        pats = mod.DEFAULT_CONFIG["protected_paths"] + ["src/**/auth/*.py", "db/migrations/**", "./payments/",
+                                                         "billing", "/infra/"]
         files = [".github/workflows/ci.yml", "AGENTS.md", "docs/AGENTS.md", "src/app/auth/login.py", "src/auth/login.py",
                  "src/app/auth/deep/x.py", "db/migrations/0001.sql", "Makefile", "src/Makefile", "tools/haam/haam.py",
-                 ".gitleaks.toml", "README.md"]
+                 ".gitleaks.toml", "README.md", "payments/charge.py", "billing/invoice.py", "billing.md", "infra/a/b.tf"]
         py = mod.protected_matches(pats, files)
         self.assertEqual(py, [".github/workflows/ci.yml", "AGENTS.md", "src/app/auth/login.py", "src/auth/login.py",
-                              "db/migrations/0001.sql", "Makefile", "tools/haam/haam.py", ".gitleaks.toml"])
+                              "db/migrations/0001.sql", "Makefile", "tools/haam/haam.py", ".gitleaks.toml",
+                              "payments/charge.py", "billing/invoice.py", "infra/a/b.tf"])
         gates = (KIT / ".github/workflows/gates.yml").read_text()
         js_defaults = re.search(r"let protectedPaths = (\[.*?\]);", gates, re.S).group(1)
         self.assertEqual(json.loads(js_defaults.replace("'", '"')), mod.DEFAULT_CONFIG["protected_paths"])
@@ -488,6 +493,26 @@ class TestAgentsDoctorDev(ToolTestCase):
         hooks = subprocess.run(["git", "config", "core.hooksPath"], cwd=self.proj, capture_output=True, text=True).stdout.strip()
         self.assertEqual(hooks, ".githooks")
         self.assertTrue((self.proj / ".env").exists())
+
+    def test_protected_lists_changed_protected_files(self):
+        self.install()
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "kit")
+        tool = self.installed_tool()
+        self.run_tool("config", "--protected", "src/auth", tool=tool)            # plain folder name: everything inside
+        (self.proj / "src/auth").mkdir(parents=True)
+        (self.proj / "src/auth/login.py").write_text("x = 1\n")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "auth")
+        git(self.proj, "switch", "-q", "-c", "12-move")
+        git(self.proj, "mv", "src/auth/login.py", "src/login.py")             # moving it out still counts
+        git(self.proj, "commit", "-qm", "move")
+        res = json.loads(self.run_tool("protected", "--base", "main", "--json", tool=tool).stdout)
+        self.assertIn("src/auth/login.py", res["protected"])
+        self.assertEqual(self.run_tool("protected", "--base", "main", "--check", tool=tool, check=False).returncode, 1)
+        p = self.run_tool("protected", "--base", "nosuch", "--check", tool=tool, check=False)
+        self.assertNotEqual(p.returncode, 0)                                     # a failed comparison isn't "clean"
+        self.assertIn("Couldn't compare", p.stderr)
 
     def test_dev_keeps_the_repositorys_own_git_hooks(self):
         self.install()

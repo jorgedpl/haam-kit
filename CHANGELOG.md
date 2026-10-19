@@ -12,7 +12,9 @@ The product owner decides how HAAM runs.
 
 ### Added
 - **`/haam-settings`** (human-only). It walks the owner through every setting: what it does, each option's trade-off, a recommendation based on the project's own numbers (Actions minutes, the UAT queue), and combinations that undo each other's safety. It applies what they choose and syncs GitHub.
-- **`haam.py settings`**: `[--explain]` shows the settings, `--set key=value` changes one (validated, saved in `haam.config.json`), and `--apply` syncs GitHub: repository variables, required checks, production approval. `ci-settings` still works and maps onto it.
+- **`haam.py settings`**: `[--explain]` shows the settings, `--set key=value` changes one (validated, saved in `haam.config.json`), and `--apply` syncs GitHub: repository variables, required checks, production approval.
+  - Changing settings needs `--human` and refuses in an agent's worktree, as `ship` does: they're the owner's choice. `AGENTS.md` says so.
+  - `ci-settings` still works and maps onto it. An existing own runner (set up before 1.9.0) is adopted, label included.
 - New settings, defaults first:
   - **`ci`**:
     - `every-pr`;
@@ -20,7 +22,7 @@ The product owner decides how HAAM runs.
     - `off`: the secret scan still runs on every PR.
   - **`nightly`**: `on` | `off` (the full check and dependency audit on main).
   - **`review`**: `github` | `local` | `protected-only` (only PRs changing protected areas get the AI reviews, decided from the files and the base branch's `protected_paths`) | `off`.
-  - **`uat`**: `owner-decides` (the `uat:skip` lane) | `always` (no lane) | `bugs-skip` (bugs take the lane; protected areas never do).
+  - **`uat`**: `owner-decides` (the `uat:skip` lane) | `always` (no lane) | `bugs-skip` (`/triage` marks bugs `uat:skip` by default; the gate still only trusts the owner's mark, and protected areas never take the lane).
   - **`grouping`**:
     - `per-issue`;
     - `per-epic`: agents always batch an epic's items;
@@ -29,7 +31,9 @@ The product owner decides how HAAM runs.
   - **`runner`**: `github` | `self-hosted` (now stored in the config too).
   - **`worktree_cleanup`**: `after-ship` (each ship tidies agents' worktrees that are merged or abandoned with nothing unsaved) | `manual`.
   - Limits: **`max_review_rounds`** (2) and **`max_pr_lines`** (400) join `max_open_prs` and `max_in_uat`. Agents follow them (`AGENTS.md`, `/build`).
-- No auto-merge in the no-UAT lane with `ci: local`. The owner's `ship` runs the check, then merges.
+- The no-UAT lane auto-merges only when CI and both AI reviews run on GitHub (`ci: every-pr`, `review: github`). With anything less, the owner ships those PRs.
+- With `grouping: release`, running `ship` again carries on with the same release PR (after exit 2 or 3, `--live` included) rather than building a second one. `ship --all` then also ships the other ready PRs (no-UAT, overrides). A merged change's branch is deleted only if nobody pushed to it since. `release` can't be combined with `flow: checks-first`.
+- `local-ci` runs `make setup` first, with the local files from `.worktreeinclude`.
 
 ### Migration
 - `haam.py update`, then merge the updated workflows (`ci.yml`, `security.yml`, `review.yml`, `gates.yml`).

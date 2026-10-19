@@ -182,9 +182,10 @@ jobs:
                     let iss = null;
                     try { iss = (await github.rest.issues.get({ owner, repo, issue_number: n })).data; } catch (e) { }
                     const names = iss ? iss.labels.map(l => typeof l === 'string' ? l : l.name) : [];
-                    // The owner's mark, or (setting uat: bugs-skip) a bug: those skip UAT by the owner's choice.
+                    // Only the owner's mark counts (with uat: bugs-skip, /triage adds it to bugs by default): a
+                    // stream label is set by whoever files the issue, agents included.
                     const marked = iss && !iss.pull_request && iss.state === 'open' && n !== number &&
-                      (names.includes('uat:skip') || (uatMode === 'bugs-skip' && names.includes('stream:bug')));
+                      names.includes('uat:skip');
                     if (!marked) {
                       lane = false;
                       laneWhy = `uat:skip on the PR, but #${n} isn't an open issue the owner marked uat:skip`;
@@ -232,9 +233,10 @@ jobs:
               // The lane merges by itself (GitHub Projects only). Not when the AI reviews run on the owner's computer
               // (HAAM_REVIEW=local): those results aren't tamper-proof, so the owner ships lane PRs themselves.
               // Anything else that had auto-merge on loses it.
-              // Nor with local CI (HAAM_CI=local): the owner's ship runs the check there, then merges.
+              // Only when CI and both AI reviews really ran on GitHub (HAAM_CI every-pr, HAAM_REVIEW github): with
+              // local, reduced or no checks the owner ships lane PRs themselves.
               const autoLane = lane && state === 'success' && tracker === 'github' && !pr.draft &&
-                process.env.REVIEW_MODE !== 'local' && process.env.CI_MODE !== 'local';
+                ['', 'github'].includes(process.env.REVIEW_MODE || '') && ['', 'every-pr'].includes(process.env.CI_MODE || '');
               if (autoLane && !pr.auto_merge) enable.push(number);
               if (!autoLane && pr.auto_merge && !labels.includes('uat-passed') && !labels.includes('gate-override')) disable.push(number);
             }

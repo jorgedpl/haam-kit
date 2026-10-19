@@ -229,6 +229,7 @@ def origin_head(branch):
     return r.stdout.strip() or None
 if a[:2] == ["pr", "view"]:
     p = st["prs"][a[2]]
+    p.setdefault("number", int(a[2]))
     if os.environ.get("FAKE_GH_ORIGIN") and not p.get("pinned_head"):
         p["headRefOid"] = origin_head(p.get("headRefName"))
     out(p)
@@ -304,6 +305,9 @@ if a and a[0] == "api" and len(a) > 3 and a[3].endswith("/pending_deployments"):
     st["approved"] = json.loads(stdin) if stdin else True
     st.setdefault("approvals", []).append(rid)
     out([])
+if a and a[0] == "api" and len(a) > 3 and "/git/ref/heads/" in a[3]:
+    h = origin_head(a[3].split("/git/ref/heads/", 1)[1])
+    out({"object": {"sha": h}}) if h else (print("Not Found", file=sys.stderr), sys.exit(1))
 if a and a[0] == "api" and len(a) > 3 and "/compare/" in a[3]:
     out({"status": st.get("compare_status", "ahead")})
 if a and a[0] == "api" and a[2:3] == ["DELETE"]:

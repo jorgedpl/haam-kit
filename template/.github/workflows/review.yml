@@ -117,7 +117,7 @@ jobs:
               pats = json.loads((d / "config.json").read_text()).get("protected_paths")
           except Exception:
               pats = None
-          files = (d / "files").read_text().split()
+          files = (d / "files").read_text().splitlines()
           hits = mod.protected_matches(pats or mod.DEFAULT_CONFIG["protected_paths"], files)
           print(len(hits) if len(files) < 3000 else "unknown")
           PY

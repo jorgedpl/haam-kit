@@ -94,6 +94,7 @@ const context = { repo: { owner: 'o', repo: 'r' }, eventName: scenario.event || 
   payload: scenario.event === 'issues' ? { action: 'unlabeled', issue: { number: 12 } }
                                        : { action: 'labeled', pull_request: { number: 7 } } };
 process.env.REVIEW_MODE = scenario.review || '';
+process.env.CI_MODE = scenario.ci || '';
 const core = { info: () => {}, notice: () => {}, warning: (m) => calls.warnings.push(m),
                setOutput: (k, v) => { calls.outputs[k] = v; } };
 (async () => {
@@ -171,11 +172,13 @@ class TestRepository(unittest.TestCase):
         self.assertEqual(st, "failure")
         self.assertIn("every change", desc)
         st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["stream:bug"]}, uat="bugs-skip")
+        self.assertEqual(st, "failure")                 # a stream label isn't the owner's mark (anyone sets it)
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["stream:bug", "uat:skip"]}, uat="bugs-skip")
         self.assertEqual(st, "success")
-        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["stream:bug"]})
-        self.assertEqual(st, "failure")                                             # not by default
-        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["stream:feature"]}, uat="bugs-skip")
-        self.assertEqual(st, "failure")
+        # Auto-merge only when CI and both AI reviews really run on GitHub
+        for review, ci in (("protected-only", ""), ("off", ""), ("", "off"), ("", "local")):
+            st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, review=review, ci=ci)
+            self.assertEqual((st, calls["outputs"]["enable"]), ("success", ""), (review, ci))
         # The owner takes uat:skip off the issue: its open PR is re-checked and loses auto-merge
         st, desc, calls = gate(event="issues", pr={"labels": ["uat:skip"], "auto_merge": {"x": 1}}, issues={12: []})
         self.assertEqual(st, "failure")
@@ -539,19 +542,22 @@ class TestAgentsDoctorDev(ToolTestCase):
                 self.assertTrue(keys[k]["options_help"].get(o), f"{k}={o} has no explanation")
         self.assertEqual(res["required_checks"], ["ci", "secrets", "dependencies", "ai-review", "security-review",
                                                   "release-gate"])
+        self.assertNotEqual(self.run_tool("settings", "--set", "ci=off", tool=tool, check=False).returncode, 0)  # owner only
         res = json.loads(self.run_tool("settings", "--set", "ci=local", "--set", "review=protected-only",
-                                       "--set", "max-in-uat=4", "--json", tool=tool).stdout)
+                                       "--set", "max-in-uat=4", "--human", "--json", tool=tool).stdout)
         self.assertEqual(res["required_checks"][0], "ci-local")
         self.assertEqual(res["github_variables"]["HAAM_CI"], "local")
         self.assertEqual(res["github_variables"]["HAAM_REVIEW"], "protected-only")
         cfg = json.loads((self.proj / "haam.config.json").read_text())
         self.assertEqual((cfg["ci"], cfg["max_in_uat"]), ("local", 4))
-        res = json.loads(self.run_tool("settings", "--set", "ci=off", "--json", tool=tool).stdout)
+        res = json.loads(self.run_tool("settings", "--set", "ci=off", "--human", "--json", tool=tool).stdout)
         self.assertNotIn("ci", res["required_checks"])
         for bad in ("ci=sometimes", "max_in_uat=0", "nosuch=1"):
-            self.assertNotEqual(self.run_tool("settings", "--set", bad, tool=tool, check=False).returncode, 0, bad)
+            self.assertNotEqual(self.run_tool("settings", "--set", bad, "--human", tool=tool, check=False).returncode, 0, bad)
+        self.assertNotEqual(self.run_tool("settings", "--set", "grouping=release", "--set", "flow=checks-first",
+                                          "--human", tool=tool, check=False).returncode, 0)
         # The older ci-settings command still works
-        self.run_tool("ci-settings", "--review", "github", tool=tool)
+        self.run_tool("ci-settings", "--review", "github", "--human", tool=tool)
         self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["review"], "github")
 
     def test_dev_keeps_the_repositorys_own_git_hooks(self):
@@ -669,7 +675,7 @@ class TestGitHub(ToolTestCase):
                                       "required_status_checks": [{"context": c} for c in
                                                                  ["ci", "secrets", "my-check", "release-gate"]]}}]}))
         self.env = {**self.env, "FAKE_GH_RULESET": str(rs)}
-        self.run_tool("settings", "--set", "ci=local", "--set", "nightly=off", "--apply", tool=self.installed_tool())
+        self.run_tool("settings", "--set", "ci=local", "--set", "nightly=off", "--apply", "--human", tool=self.installed_tool())
         put = next(json.loads(r["body"]) for r in self.writes() if "rulesets/1" in " ".join(r["args"]))
         checks = [c["context"] for c in put["rules"][0]["parameters"]["required_status_checks"]]
         self.assertIn("my-check", checks)                                     # the project's own check stays
@@ -1084,16 +1090,30 @@ class TestGitHubProjects(ToolTestCase):
         self.assertEqual(res["own_runner_minutes"], 30)
         self.assertEqual(res["pull_requests"], 1)
 
+    def test_settings_keep_an_existing_own_runner(self):
+        self.setup_board()
+        st = self.gh_state()
+        st["variables"] = {"HAAM_RUNNER": "my-mac"}
+        self.state.write_text(json.dumps(st))
+        cfg_file = self.proj / "haam.config.json"
+        cfg = json.loads(cfg_file.read_text())
+        cfg.pop("runner", None)
+        cfg_file.write_text(json.dumps(cfg))
+        self.tool("settings", "--set", "nightly=off", "--apply", "--human")
+        self.assertEqual(self.gh_state()["variables"], {"HAAM_RUNNER": "my-mac", "HAAM_NIGHTLY": "off"})
+        cfg = json.loads(cfg_file.read_text())
+        self.assertEqual((cfg["runner"], cfg["runner_label"]), ("self-hosted", "my-mac"))
+
     def test_ci_settings_and_local_review(self):
         self.setup_board()
-        self.tool("ci-settings", "--review", "local", "--runner", "self-hosted")             # plan only
+        self.tool("ci-settings", "--review", "local", "--runner", "self-hosted", "--human")             # plan only
         self.assertEqual(self.gh_state().get("variables", {}), {})
-        self.tool("ci-settings", "--review", "local", "--runner", "self-hosted", "--apply")
+        self.tool("ci-settings", "--review", "local", "--runner", "self-hosted", "--apply", "--human")
         self.assertEqual(self.gh_state()["variables"], {"HAAM_REVIEW": "local"})     # no own runner on a public repo
         self.env = {**self.env, "FAKE_GH_PRIVATE": "1"}
-        self.tool("ci-settings", "--runner", "self-hosted", "--apply")
+        self.tool("ci-settings", "--runner", "self-hosted", "--apply", "--human")
         self.assertEqual(self.gh_state()["variables"], {"HAAM_REVIEW": "local", "HAAM_RUNNER": "self-hosted"})
-        self.tool("ci-settings", "--runner", "github", "--apply")
+        self.tool("ci-settings", "--runner", "github", "--apply", "--human")
         self.assertEqual(self.gh_state()["variables"], {"HAAM_REVIEW": "local"})
         # A fake reviewer agent: approves the code, finds nothing in security
         bin_dir = self.tmp / "bin"
@@ -1442,7 +1462,7 @@ class TestWorktrees(ToolTestCase):
                "FAKE_GH_ORIGIN": str(self.origin), "HAAM_POLL_SECONDS": "0"}
         tool = lambda *a, **kw: self.run_tool(*a, tool=self.installed_tool(), env=env, **kw)
         tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM")
-        tool("settings", "--set", "grouping=release", "--set", "worktree_cleanup=manual")
+        tool("settings", "--set", "grouping=release", "--set", "worktree_cleanup=manual", "--human")
         tool("github-project", "--apply")
         git(self.proj, "add", "-A")
         git(self.proj, "commit", "-qm", "config")
@@ -1463,8 +1483,14 @@ class TestWorktrees(ToolTestCase):
             res = json.loads(tool("publish", str(n), "--human", "--json").stdout)
             self.assertTrue(res["release"])                                    # no PR per change
         self.assertFalse(json.loads(state.read_text()).get("prs"))
+        st = json.loads(state.read_text())
+        st["checks_pending"] = 3
+        state.write_text(json.dumps(st))
+        res = tool("ship", "--all", "--human", "--wait", "0", check=False)       # checks still running: run again
+        self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
         res = tool("ship", "--all", "--human", check=False)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Carrying on with release PR", res.stdout)
         st = json.loads(state.read_text())
         rel = list(st["prs"].values())
         self.assertEqual(len(rel), 1)                                          # one release PR

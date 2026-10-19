@@ -42,13 +42,13 @@ The areas and their settings:
 Point out combinations that undo each other's safety, in one line each, and let them decide:
 - `ci off` with `review off`: nothing checks the code before your test;
 - `deploy_approval automatic` with `uat bugs-skip`: an agent's bug fix can reach production with no human looking at it;
-- `review local` or `ci local`: those results aren't tamper-proof, so the no-UAT lane stops merging by itself;
+- anything but `ci every-pr` with `review github`: the no-UAT lane stops merging by itself, and you ship those PRs (local results aren't tamper-proof; reduced checks aren't enough on their own);
 - `grouping release`: one failing release check holds every change in it.
 
 ## 3. Apply
-1. For each change: `python3 tools/haam/haam.py settings --set key=value` (repeat `--set` for several). It saves `haam.config.json` and refuses invalid values.
+1. For each change: `python3 tools/haam/haam.py settings --set key=value --human` (repeat `--set` for several). It saves `haam.config.json` and refuses invalid values. `--human` means the owner chose it in this session: never use it otherwise.
 2. Show the summary: `python3 tools/haam/haam.py settings`.
-3. On their OK, sync GitHub with `python3 tools/haam/haam.py settings --apply`. This needs repository admin. It sets:
+3. On their OK, sync GitHub with `python3 tools/haam/haam.py settings --apply --human`. This needs repository admin. It sets:
    - the repository variables the workflows read;
    - the required checks (for example `ci-local` instead of `ci`);
    - the production approval.

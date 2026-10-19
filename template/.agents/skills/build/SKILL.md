@@ -53,7 +53,7 @@ Run `make check` until it passes. Also run any project-specific test skills list
 Do a security self-review of your diff and fix anything you find (Claude Code: `/security-review`; other tools: check `git diff origin/main...` against section D of `.github/review/REVIEWER.md`). Re-read your own diff (`git diff origin/main...`) against each acceptance criterion.
 
 ## 7. Hand it over
-First check the issue's labels and the settings (`python3 tools/haam/haam.py settings`). **`uat:skip`** (the owner decided this change needs no test of theirs), or a bug when the setting `uat` is `bugs-skip`: use the no-UAT lane below, whatever the flow. With `uat: always`, never use the lane. Otherwise check `"flow"` in `haam.config.json` (default `test-first`).
+First check the issue's labels and the settings (`python3 tools/haam/haam.py settings`). **`uat:skip`** (the owner decided this change needs no test of theirs; with the setting `uat: bugs-skip`, `/triage` marks bugs that way by default): use the no-UAT lane below, whatever the flow. With `uat: always`, never use the lane. Otherwise check `"flow"` in `haam.config.json` (default `test-first`).
 
 ### No-UAT lane (`uat:skip` on the issue, every issue of a batch)
 - Run `python3 tools/haam/haam.py protected`: it lists changed files in protected areas (`protected_paths` in `haam.config.json`). If it lists any, the lane doesn't apply (the gate checks the same files and won't let it through): if a PR is open, first `gh pr merge <pr> --disable-auto`, then add `human-review`, tell the owner, and hand it over through your flow as usual.

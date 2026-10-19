@@ -142,9 +142,9 @@ SETTINGS = [
         "owner-decides": "You test everything, except issues you mark uat:skip (config, dependency bumps, invisible "
                          "refactors): those merge once the checks and reviews pass. (Recommended)",
         "always": "You test every change. Most control, most of your time.",
-        "bugs-skip": "Bugs merge once the checks and reviews pass, without your test; features still come to you. "
-                     "Protected areas always need you. Fast for bug fixes, but agents also file bugs, so you rely on "
-                     "the tests and the reviews to catch a wrong fix."}),
+        "bugs-skip": "When you triage a bug, it's marked uat:skip unless you say test: it then merges once the checks "
+                     "and reviews pass, without your test. Features still come to you; protected areas always do. "
+                     "Fast for bug fixes; you rely on the tests and the reviews to catch a wrong fix."}),
     ("Grouping", "grouping", ["per-issue", "per-epic", "release"], "How changes become pull requests.", {
         "per-issue": "One PR per issue: easy to follow and to revert. The checks run once per issue. (Recommended "
                      "to start)",
@@ -2603,7 +2603,8 @@ def cmd_publish(args):
         f = tested_file(root)
         data = json.loads(f.read_text()) if f.exists() else {}
         data.setdefault("passed", {})[show_ref(ref)] = {"sha": sha, "branch": branch, "title": title,
-                                                         "issues": [show_ref(n) for n in issues], "by": who, "on": when}
+                                                         "issues": [show_ref(n) for n in issues], "by": who, "on": when,
+                                                         "labels": [l for l in labels if l != "uat-passed"]}
         f.write_text(json.dumps(data, indent=2) + "\n")
         steps = []
         for n in issues:
@@ -2886,28 +2887,29 @@ def tidy_worktrees(root, cfg, say):
 
 def ship_release(args, root, cfg):
     """grouping = release: everything the owner passed goes into ONE release PR (merged together on a fresh branch
-    from main), which gets the checks and the AI reviews once, then merges and deploys once."""
+    from main), which gets the checks and the AI reviews once, then merges and deploys once.
+    Returns the exit code (0 also when nothing had passed); exits itself only when it can't go on."""
     repo = cfg["github_repo"]
     me = [sys.executable, str(Path(__file__).resolve())]
     tf = tested_file(root)
     data = json.loads(tf.read_text()) if tf.exists() else {}
     passed = data.get("passed") or {}
 
-    def out(state, code, message, **extra):
+    def out(state, code, message):
         if args.json:
-            print(json.dumps({"ok": code == 0, "state": state, "message": message, **extra}, indent=2))
+            print(json.dumps({"ok": code == 0, "state": state, "message": message}, indent=2))
         else:
             print(message, flush=True)
         sys.exit(code)
 
-    # A release PR that's already open (an earlier run is waiting for its checks): carry on with it.
-    c, o, _ = run(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "50", "--json", "number,headRefName,title"])
-    open_rel = [p for p in (json.loads(o or "[]") if c == 0 else []) if (p.get("headRefName") or "").startswith("release/")]
-    if not open_rel:
+    rel = data.get("release")
+    if not rel:
         wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
         items = [(k, v) for k, v in sorted(passed.items()) if not wanted or k in wanted]
         if not items:
-            out("nothing to ship", 0, "Nothing has passed since the last release.")
+            if not args.json:
+                print(f"{INFO} Nothing has passed since the last release.", flush=True)
+            return 0
         run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
         base = cfg.get("default_branch") or "main"
         _, main, _ = git_paths(root)
@@ -2923,8 +2925,8 @@ def ship_release(args, root, cfg):
                 if tip and tip != v["sha"]:
                     skipped.append(f"{key}: changed after your test ({v['sha'][:8]} → {tip[:8]}): test it again")
                     continue
-                c2, _, e2 = run(["git", "merge", "--no-ff", "--no-edit", "-m", f"{' '.join(v['issues'])}: {v['title']}",
-                                 v["sha"]], cwd=wt)
+                c2, _, _ = run(["git", "merge", "--no-ff", "--no-edit", "-m", f"{' '.join(v['issues'])}: {v['title']}",
+                                v["sha"]], cwd=wt)
                 if c2 != 0:
                     run(["git", "merge", "--abort"], cwd=wt)
                     skipped.append(f"{key}: conflicts with the rest of the release: send it back to an agent to "
@@ -2934,15 +2936,16 @@ def ship_release(args, root, cfg):
             if not included:
                 out("stopped", 1, "Nothing could go into the release. " + " ".join(skipped))
             head = git_out(wt, "rev-parse", "HEAD")
-            name = f"release/{time.strftime('%Y%m%d-%H%M')}"
+            name = f"release/{time.strftime('%Y%m%d-%H%M%S')}"
             c3, _, e3 = run(["git", "push", "--quiet", "origin", f"HEAD:refs/heads/{name}"], cwd=wt)
             if c3 != 0:
                 out("stopped", 1, f"Couldn't push the release branch: {e3[:200]}")
         finally:
             run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
-        ids = []
+        ids, labels = [], ["uat-passed"]
         for _, v in included:
             ids += [i for i in v["issues"] if i not in ids]
+            labels += [l for l in v.get("labels") or [] if l not in labels]
         who = gh_login() or "the owner"
         gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "success", "context": "uat",
                "description": f"Release of changes each passed by @{who}"[:140]})
@@ -2953,51 +2956,57 @@ def ship_release(args, root, cfg):
                           for _, v in included))
         f = main / ".haam" / "pr-release.md"
         f.write_text(body)
-        c4, o4, e4 = run(["gh", "pr", "create", "-R", repo, "--head", name, "--base", base, "--title",
-                          f"{' '.join(ids)}: Release {time.strftime('%Y-%m-%d')}", "--body-file", str(f),
-                          "--label", "uat-passed"])
+        cmd = ["gh", "pr", "create", "-R", repo, "--head", name, "--base", base, "--title",
+               f"{' '.join(ids)}: Release {time.strftime('%Y-%m-%d')}", "--body-file", str(f)]
+        for lab in labels:
+            cmd += ["--label", lab]
+        c4, o4, e4 = run(cmd)
         f.unlink()
         if c4 != 0:
             out("stopped", 1, f"Couldn't open the release PR: {(e4 or o4)[:200]}")
-        lead = ids[0]
+        url = o4.strip().splitlines()[-1] if o4 else ""
+        rel = {"pr": int(url.rstrip("/").rsplit("/", 1)[-1]), "branch": name, "head": head, "issues": ids,
+               "included": {k: v for k, v in included}}
         data = json.loads(tf.read_text()) if tf.exists() else {}
-        data[lead] = head                                 # ship merges exactly this combination
-        data.setdefault("branches", {})[lead] = name
-        data["release"] = {"branch": name, "issues": ids, "included": [k for k, _ in included],
-                           "branches": [v["branch"] for _, v in included]}
+        data[ids[0]] = head                              # ship merges exactly this combination
+        data.setdefault("branches", {})[ids[0]] = name
+        data["release"] = rel
         tf.write_text(json.dumps(data, indent=2) + "\n")
         if not args.json:
-            print(f"{OK} Release PR opened with {', '.join(ids)}: {o4.strip().splitlines()[-1] if o4 else ''}", flush=True)
+            print(f"{OK} Release PR opened with {', '.join(ids)}: {url}", flush=True)
             for sk in skipped:
                 print(f"{WARN} Not in this release: {sk}", flush=True)
-    else:
-        lead = pr_title_issues(open_rel[0])[0] if pr_title_issues(open_rel[0]) else None
-        if lead is None:
-            out("stopped", 1, f"The open release PR #{open_rel[0]['number']} names no issue in its title.")
-        lead = show_ref(lead)
-    c5, o5, e5 = run(me + ["ship", lead.lstrip("#") if lead.startswith("#") else lead, "--human", "--release-pr",
-                           "--wait", str(args.wait)] + (["--json"] if args.json else []), cwd=root)
-    if not args.json:
-        print(o5 + (e5 or ""), end="")
-    if c5 == 0:     # released: forget the passes, delete the merged changes' branches
+    elif not args.json:
+        print(f"{INFO} Carrying on with release PR #{rel['pr']} ({', '.join(rel['issues'])})", flush=True)
+    lead = rel["issues"][0]
+    extra = (["--live"] if args.live else []) + (["--no-deploy"] if args.no_deploy else [])
+    c5, o5, e5 = run(me + ["ship", lead.lstrip("#"), "--human", "--release-pr", "--pr-number", str(rel["pr"]),
+                           "--wait", str(args.wait)] + extra + (["--json"] if args.json else []), cwd=root)
+    print(o5 + ("" if args.json else (e5 or "")), end="")
+    if c5 == 0:     # released: forget the passes, delete the merged changes' branches (if nobody pushed since)
         data = json.loads(tf.read_text()) if tf.exists() else {}
         rel = data.pop("release", {}) or {}
-        for k in rel.get("included", []):
+        for k, v in (rel.get("included") or {}).items():
             (data.get("passed") or {}).pop(k, None)
-        for b_ in rel.get("branches", []):
-            gh_api("DELETE", f"repos/{repo}/git/refs/heads/{b_}")
+            c6, ref_, _ = gh_api("GET", f"repos/{repo}/git/ref/heads/{v['branch']}")
+            if c6 == 0 and isinstance(ref_, dict) and (ref_.get("object") or {}).get("sha") == v["sha"]:
+                gh_api("DELETE", f"repos/{repo}/git/refs/heads/{v['branch']}")
         tf.write_text(json.dumps(data, indent=2) + "\n")
-    if args.json:
-        print(o5, end="")
-    sys.exit(c5)
+    return c5
 
 
 def ship_batch(args, root, cfg):
     """Ship several changes with one production deploy: merge each (when its checks pass), approve only the newest
     deploy run (it carries all of them; older waiting runs are cancelled), then close every issue.
     Safe to run again; exit codes as for one issue."""
-    if setting_value(cfg, "grouping") == "release":
-        return ship_release(args, root, cfg)
+    if setting_value(cfg, "grouping") == "release" and not getattr(args, "_release_done", False):
+        code = ship_release(args, root, cfg)
+        if code != 0 or not args.all:
+            sys.exit(code)
+        # --all: then anything else that's ready on its own (no-UAT PRs, overrides) ships the usual way
+        args._release_done = True
+        if not [r for r in ship_candidates(cfg, cfg["github_repo"])]:
+            sys.exit(0)
     repo = cfg["github_repo"]
     deadline = time.time() + args.wait * 60
     out_steps, merged, stopped, pending = [], [], [], []
@@ -3149,7 +3158,12 @@ def cmd_ship(args):
         finish(state, SHIP_NOT_FINISHED, f"Not finished yet ({state}). {message} Run the same command again.")
 
     try:
-        pr = find_pr(cfg, ref)
+        if args.pr_number:            # the release PR, by number (its title names issues that have older PRs too)
+            c_p, o_p, _ = run(["gh", "pr", "view", str(args.pr_number), "-R", repo,
+                               "--json", "number,title,headRefName,state,labels,url,isDraft"])
+            pr = json.loads(o_p) if c_p == 0 and o_p else None
+        else:
+            pr = find_pr(cfg, ref)
     except RuntimeError as e:
         stop(str(e))
     if not pr:
@@ -3472,6 +3486,8 @@ def cmd_ci_settings(args):
     sets = []
     if args.runner is not None:
         sets.append(f"runner={'github' if args.runner in ('github', '') else 'self-hosted'}")
+        if args.runner not in ("github", "", "self-hosted"):
+            sets.append(f"runner_label={args.runner}")
     if args.review is not None:
         sets.append(f"review={args.review}")
     args.set, args.explain = sets, False
@@ -3486,7 +3502,7 @@ def setting_value(cfg, key):
 def github_variables(cfg):
     """Repository variables the workflows read (they can't read haam.config.json before they start)."""
     return {
-        "HAAM_RUNNER": "" if setting_value(cfg, "runner") == "github" else "self-hosted",
+        "HAAM_RUNNER": "" if setting_value(cfg, "runner") == "github" else (cfg.get("runner_label") or "self-hosted"),
         "HAAM_REVIEW": "" if setting_value(cfg, "review") == "github" else setting_value(cfg, "review"),
         "HAAM_CI": "" if setting_value(cfg, "ci") == "every-pr" else setting_value(cfg, "ci"),
         "HAAM_NIGHTLY": "" if setting_value(cfg, "nightly") == "on" else "off",
@@ -3524,10 +3540,24 @@ def cmd_settings(args):
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     rep = Report()
+    if (args.set or args.apply) and not args.human:
+        sys.exit("Settings are the owner's decision. Change them only inside /haam-settings, after the human chose, "
+                 "with --human.")
+    if (args.set or args.apply) and git_paths(root)[2]:
+        sys.exit("settings changes run only from the owner's own chat in the main project folder, never from an "
+                 "agent's worktree.")
+    raw = {}
+    try:
+        raw = json.loads((root / CONFIG_NAME).read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
     changed = {}
     for item in args.set or []:
         k, _, v = item.partition("=")
         k, v = k.strip().replace("-", "_"), v.strip()
+        if k == "runner_label" and re.fullmatch(r"[\w.-]+", v):
+            changed[k] = v
+            continue
         if k not in SETTING_KEYS:
             sys.exit(f"Unknown setting '{k}'. Settings: {', '.join(SETTING_KEYS)} (protected areas: config --protected)")
         opts = SETTING_KEYS[k][1]
@@ -3545,6 +3575,9 @@ def cmd_settings(args):
             changed.pop("runner")
             refused.append("runner=self-hosted: own runners only on private repositories (couldn't confirm this one "
                            "is private); on a public repository anyone's pull request could run code on your machine")
+    if (changed.get("grouping") or setting_value(cfg, "grouping")) == "release" and \
+            (changed.get("flow") or setting_value(cfg, "flow")) == "checks-first":
+        sys.exit("grouping release needs flow test-first: in checks-first every change already has its own PR.")
     if changed:
         cfg.update(changed)
         save_config(root, cfg)
@@ -3566,6 +3599,11 @@ def cmd_settings(args):
         repo = cfg["github_repo"]
         code, out, _ = run(["gh", "variable", "list", "-R", repo, "--json", "name,value"])
         current = {v["name"]: v["value"] for v in json.loads(out or "[]")} if code == 0 else {}
+        if "runner" not in raw and "runner" not in changed and current.get("HAAM_RUNNER"):
+            # Set up before 1.9.0 (a variable only): adopt it rather than move the jobs back to GitHub's runners.
+            cfg["runner"], cfg["runner_label"] = "self-hosted", current["HAAM_RUNNER"]
+            save_config(root, cfg)
+            rep.add("info", f"Kept your own runner ({current['HAAM_RUNNER']}) and recorded it in {CONFIG_NAME}")
         for name, value in github_variables(cfg).items():
             if (current.get(name) or "") == value:
                 continue
@@ -3597,11 +3635,11 @@ def cmd_settings(args):
         now_auto = code == 0 and isinstance(env, dict) and not any(
             r.get("type") == "required_reviewers" and (r.get("reviewers") or []) for r in env.get("protection_rules") or [])
         want_auto = setting_value(cfg, "deploy_approval") == "automatic"
-        # Turning approval back on is only tried when the owner just chose it (some GitHub plans can't have it).
-        if code == 0 and ((want_auto and not now_auto) or (not want_auto and now_auto and "deploy_approval" in changed)):
+        if code == 0 and want_auto != now_auto:
             c_e, e_e, _ = set_production_env(cfg, repo, rep)
             if c_e != 0:
-                rep.add("warn", "Couldn't change the production approval", (e_e or "")[:160])
+                rep.add("warn", "Couldn't change the production approval", (e_e or "")[:160] + (
+                    " (on private repositories, required reviewers need GitHub Team or Enterprise)" if not want_auto else ""))
             res["applied"].append("production")
         rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged: the gate and the agents read the settings "
                    "from main (it's a protected file, so it needs your review)")
@@ -3659,8 +3697,12 @@ def cmd_local_ci(args):
         sys.exit(f"Couldn't check out {sha[:8]}: {err[:200]}")
     gh_api("POST", f"repos/{repo}/statuses/{sha}", {"state": "pending", "context": "ci-local",
                                                      "description": f"make check running on {gh_login() or 'the owner'}'s computer"})
-    print(f"{INFO} make check on PR #{num} at {sha[:8]} (a clean copy in {wt.relative_to(main)})…", flush=True)
+    print(f"{INFO} make setup && make check on PR #{num} at {sha[:8]} (a clean copy in {wt.relative_to(main)})…", flush=True)
     try:
+        copy_includes(main, wt)       # local-only files the build needs (.worktreeinclude), as for an agent's worktree
+        mk = (wt / "Makefile").read_text(errors="ignore") if (wt / "Makefile").exists() else ""
+        if re.search(r"^setup:", mk, re.M):
+            subprocess.run(["make", "setup"], cwd=wt, timeout=args.timeout * 60, check=True)
         p = subprocess.run(["make", "check"], cwd=wt, timeout=args.timeout * 60)
         ok = p.returncode == 0
         desc = "make check passed on the owner's computer" if ok else "make check failed on the owner's computer"
@@ -3672,6 +3714,8 @@ def cmd_local_ci(args):
                 desc = "make check and make audit passed on the owner's computer"
     except subprocess.TimeoutExpired:
         ok, desc = False, f"make check didn't finish within {args.timeout} minutes"
+    except subprocess.CalledProcessError:
+        ok, desc = False, "make setup failed on the owner's computer"
     finally:
         run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
     if pr_head(repo, num) != sha:
@@ -4673,6 +4717,7 @@ def main():
                    help="everything ready: PRs that passed UAT or are in the no-UAT lane, and merged ones waiting to deploy")
     p.add_argument("--merge-only", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--release-pr", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--pr-number", type=int, help=argparse.SUPPRESS)
     p.add_argument("--released-in", help=argparse.SUPPRESS)
     p.add_argument("--human", action="store_true", help="the human said 'ship' in this session")
     p.add_argument("--wait", type=float, default=1.5, help="minutes to wait before handing back (exit 2: run again)")
@@ -4706,6 +4751,7 @@ def main():
     p.add_argument("--set", action="append", help="change one: key=value (repeat for more)")
     p.add_argument("--explain", action="store_true", help="show every option and its trade-off")
     p.add_argument("--apply", action="store_true", help="sync GitHub: variables, required checks, production approval")
+    p.add_argument("--human", action="store_true", help="the owner chose these settings in this session (/haam-settings)")
     p.set_defaults(func=cmd_settings)
 
     p = common(sub.add_parser("local-ci", help="ci = local: run make check on the PR's commit here and post ci-local"))
@@ -4718,6 +4764,7 @@ def main():
     p.add_argument("--runner", help="github (default) or a self-hosted runner label, e.g. self-hosted")
     p.add_argument("--review", help="github (default) or local (haam.py review on this computer)")
     p.add_argument("--apply", action="store_true")
+    p.add_argument("--human", action="store_true", help="the owner chose this in this session")
     p.set_defaults(func=cmd_ci_settings)
 
     p = common(sub.add_parser("review", help="run the AI reviews locally in fresh sessions and post the statuses"))

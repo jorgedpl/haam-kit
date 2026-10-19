@@ -357,6 +357,8 @@ if a[:2] == ["api", "graphql"]:
         n = next(int(k) for k, i in st["issues"].items() if i["id"] == v["c"])
         it = {"id": nid("PVTI"), "project": v["p"], "issue": n, "values": {}}
         st["items"].append(it)
+        if st.get("auto_add_races"):          # the board's auto-add workflow added it first
+            out({"errors": [{"message": "Content already exists in this project"}]})
         out({"data": {"addProjectV2ItemById": {"item": {"id": it["id"]}}}})
     if "updateProjectV2ItemFieldValue" in q:
         it = next(i for i in st["items"] if i["id"] == v["i"])

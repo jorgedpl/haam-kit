@@ -1671,10 +1671,23 @@ class GHProject:
         if iss.get("item_id"):
             return iss["item_id"]
         proj = self.data or self.load()
-        d = gql("mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p, contentId:$c}){ item{ id } } }",
-                {"p": proj["id"], "c": iss["node_id"]})
-        iss["item_id"] = d["addProjectV2ItemById"]["item"]["id"]
-        return iss["item_id"]
+        try:
+            d = gql("mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p, contentId:$c}){ item{ id } } }",
+                    {"p": proj["id"], "c": iss["node_id"]})
+            iss["item_id"] = d["addProjectV2ItemById"]["item"]["id"]
+            return iss["item_id"]
+        except RuntimeError as e:
+            if "already exists" not in str(e).lower():
+                raise
+        # The board's own "Auto-add to project" workflow got there first: use its card (it can take a moment to show).
+        for attempt in range(6):
+            found = self.issue(iss["number"]).get("item_id")
+            if found:
+                iss["item_id"] = found
+                return found
+            time.sleep(min(poll_seconds(), 2.0))
+        raise RuntimeError(f"#{iss['number']} is on the board already, but its card couldn't be read yet. "
+                           "Set its fields again in a moment (issue status / priority).")
 
     def set_option(self, iss, field_name, option):
         field_id, opt_id = self.option_id(field_name, option)

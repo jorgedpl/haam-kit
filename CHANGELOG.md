@@ -24,6 +24,9 @@ Fewer merges and deploys for the product owner.
   - If any PR's checks are still running, it deploys nothing yet (exit 2) so it stays one deploy.
 - `github --apply` allows auto-merge on the repository.
 
+### Fixed
+- `issue create` (and any first status or priority change) no longer fails with "Content already exists in this project" when the board's own Auto-add workflow puts the issue on the board first. It uses that card and sets the fields.
+
 ### Migration
 - `haam.py update`, then:
   - `haam.py github --apply` (allows auto-merge and adds the `uat:skip` label);

@@ -832,6 +832,16 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("config", "--max-open-prs", "20")
         self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
 
+    def test_issue_create_survives_the_boards_auto_add(self):
+        self.setup_board()
+        st = self.gh_state()
+        st["auto_add_races"] = True
+        self.state.write_text(json.dumps(st))
+        res = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "Raced", "--status", "Ready",
+                                   "--priority", "High", "--json", env={**self.env, "HAAM_POLL_SECONDS": "0"}).stdout)
+        view = json.loads(self.tool("issue", "view", str(res["number"]), "--json").stdout)["issue"]
+        self.assertEqual((view["status"], view["priority"]), ("Ready", "High"))
+
     def test_ship_several_with_one_deploy(self):
         self.setup_board()
         mk = lambda t: json.loads(self.tool("issue", "create", "--stream", "bug", "--title", t, "--status", "UAT",

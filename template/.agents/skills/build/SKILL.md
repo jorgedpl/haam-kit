@@ -59,7 +59,7 @@ First check the issue's labels. **`uat:skip`** (the owner decided this change ne
 - If your change turned out to touch a protected area (`AGENTS.md` §4), the lane doesn't apply: if a PR is open, first `gh pr merge <pr> --disable-auto`, then add `human-review`, tell the owner, and hand it over through your flow as usual.
 - Commits as usual; rebase on `origin/main`, `make check` green, the release note `docs/changes/<FILE-ID>.md`. No UAT plan.
 - `git push -u origin <branch>`, then open the PR **ready, not draft**: `gh pr create` with the title `<ID>: <summary>`, the body from the template, and `--label uat:skip`. The checks and both AI reviews run once. The gate checks that the owner marked the issue, and on GitHub Projects the PR merges by itself when everything is green (auto-merge); the owner's next `ship` deploys it with everything else. On Linear the gate can't read the issue, so copy the label only when the Linear issue has it; the owner then ships it (`ship APP-12 --human`).
-- If `"review"` is `"local"`, run `python3 tools/haam/haam.py review <ID>`.
+- If `"review"` is `"local"`, run `python3 tools/haam/haam.py review <ID>`. The lane then never merges by itself (local review results aren't tamper-proof): tell the owner it's ready for their `ship`.
 - Fix review findings in one push per round, as usual. Don't run `/uat`: the issue goes from `In Review` to `Deploying` by itself.
 
 ### Test-first (default): the owner tests before any PR exists

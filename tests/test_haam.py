@@ -90,6 +90,7 @@ const github = {
 const context = { repo: { owner: 'o', repo: 'r' }, eventName: scenario.event || 'pull_request',
   payload: scenario.event === 'issues' ? { action: 'unlabeled', issue: { number: 12 } }
                                        : { action: 'labeled', pull_request: { number: 7 } } };
+process.env.REVIEW_MODE = scenario.review || '';
 const core = { info: () => {}, notice: () => {}, warning: (m) => calls.warnings.push(m),
                setOutput: (k, v) => { calls.outputs[k] = v; } };
 (async () => {
@@ -143,6 +144,9 @@ class TestRepository(unittest.TestCase):
         self.assertEqual(st, "failure")                                             # the PR must carry it too
         st, desc, calls = gate(pr={"labels": ["uat:skip"], "draft": True}, issues={12: ["uat:skip"]})
         self.assertEqual(calls["outputs"]["enable"], "")                            # drafts never auto-merge
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, review="local")
+        self.assertEqual(st, "success")
+        self.assertEqual(calls["outputs"]["enable"], "")                            # local reviews: the owner ships
         # The owner takes uat:skip off the issue: its open PR is re-checked and loses auto-merge
         st, desc, calls = gate(event="issues", pr={"labels": ["uat:skip"], "auto_merge": {"x": 1}}, issues={12: []})
         self.assertEqual(st, "failure")
@@ -850,6 +854,13 @@ class TestGitHubProjects(ToolTestCase):
         self.assertIn("PR #3: PR 3", self.tool("capacity").stdout)
         self.tool("config", "--max-open-prs", "20")
         self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
+
+    def test_agents_cant_mark_issues_themselves(self):
+        self.setup_board()
+        for lab in ("uat:skip", "agent-ready"):
+            p = self.tool("issue", "create", "--stream", "bug", "--title", "x", "--label", lab, check=False)
+            self.assertNotEqual(p.returncode, 0, lab)
+            self.assertIn("decided", p.stdout + p.stderr)
 
     def test_issue_create_survives_the_boards_auto_add(self):
         self.setup_board()

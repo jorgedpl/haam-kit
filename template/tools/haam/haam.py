@@ -1555,6 +1555,9 @@ GH_ISSUE_LABELS = [
     ("uat:skip", "C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
 ]
 EPIC_LABEL = "epic"
+# Issue labels only a human's decision adds (agents pass --human only inside the skill where the human decided)
+HUMAN_LABELS = {"agent-ready": "agent-ready is added only after a human approves the spec",
+                "uat:skip": "uat:skip (no UAT, merges by itself) is the owner's decision"}
 # Moving into these needs a human decision (they're done through human-only skills)
 HUMAN_STATUSES = {"Done", "Parked", "Canceled"}
 PROJECT_TOKEN_SECRET = "HAAM_PROJECT_TOKEN"
@@ -1966,6 +1969,9 @@ def issue_action(args, cfg, board):
             sys.exit("--title is required")
         body = Path(args.body_file).read_text() if args.body_file else (args.body or "")
         labels = [f"stream:{args.stream}"] + (args.label or []) + ([EPIC_LABEL] if args.epic else [])
+        for lab in labels:
+            if lab in HUMAN_LABELS and not args.human:
+                raise RuntimeError(f"{HUMAN_LABELS[lab]}; add --human only when they decided it in this session")
         parent = None
         if args.parent and args.epic:
             raise RuntimeError("Epics don't nest in HAAM: an epic can't have a parent epic")
@@ -2096,11 +2102,9 @@ def issue_action(args, cfg, board):
 
     if a == "label":
         cmd = ["gh", "issue", "edit", str(number), "-R", repo]
-        human_labels = {"agent-ready": "agent-ready is added only after a human approves the spec",
-                        "uat:skip": "uat:skip (no UAT, merges by itself) is the owner's decision"}
         for lab in args.add or []:
-            if lab in human_labels and not args.human:
-                raise RuntimeError(f"{human_labels[lab]}; add --human only when they decided it in this session")
+            if lab in HUMAN_LABELS and not args.human:
+                raise RuntimeError(f"{HUMAN_LABELS[lab]}; add --human only when they decided it in this session")
             cmd += ["--add-label", lab]
         for lab in args.remove or []:
             cmd += ["--remove-label", lab]
@@ -2626,19 +2630,25 @@ def commit_contains(repo, older, newer, cache=None):
     return res
 
 
-def await_deploy(repo, workflow, shas, deadline, say, merged_age=0):
+def await_deploy(repo, workflow, shas, deadline, say, merged_age=0, branch="main"):
     """Approve and wait for ONE production deploy that carries every commit in `shas` (the newest last).
     A waiting older deploy run is cancelled (the newer one includes its change), and a run that GitHub cancelled
     because a newer merge replaced it just means waiting for that newer one.
     Returns (outcome, url or message, deployed sha): outcome is live, later, stop or failed."""
     last, cache, cancelled = shas[-1], {}, set()
     while True:
-        code, out, err = run(["gh", "run", "list", "-R", repo, "--workflow", workflow, "--limit", "30",
+        code, out, err = run(["gh", "run", "list", "-R", repo, "--workflow", workflow, "--branch", branch, "--limit", "30",
                               "--json", "databaseId,status,conclusion,url,headSha"])
         if code != 0:
             return "stop", f"Couldn't list the deploy runs: {(err or out)[:200]}", None
         runs = json.loads(out or "[]")                      # newest first
-        idx = next((i for i, r in enumerate(runs) if commit_contains(repo, last, r.get("headSha"), cache)), None)
+        containing = [i for i, r in enumerate(runs) if commit_contains(repo, last, r.get("headSha"), cache)]
+        done = next((runs[i] for i in containing if runs[i]["status"] == "completed"
+                     and runs[i]["conclusion"] == "success"), None)
+        if done:          # some deploy that includes these changes went out (even if a later one didn't)
+            say(f"{OK} Deployed: {done['url']}")
+            return "live", done["url"], done.get("headSha")
+        idx = containing[0] if containing else None
         target = runs[idx] if idx is not None else None
         if target:
             for old in runs[idx + 1:]:
@@ -2648,12 +2658,13 @@ def await_deploy(repo, workflow, shas, deadline, say, merged_age=0):
                     run(["gh", "run", "cancel", str(old["databaseId"]), "-R", repo])
                     say(f"{INFO} Cancelled an older waiting deploy run (this one includes its change): {old['url']}")
             if target["status"] == "completed":
-                if target["conclusion"] == "success":
-                    say(f"{OK} Deployed: {target['url']}")
-                    return "live", target["url"], target.get("headSha")
-                if target["conclusion"] != "cancelled":       # cancelled = replaced by a newer merge's run
-                    say(f"{BAD} The deploy failed: {target['url']}")
-                    return "failed", target["url"], None
+                if target["conclusion"] == "cancelled":
+                    # Replaced by a newer merge's run, it would be listed (and newer). There's none, so someone
+                    # cancelled it: don't wait for a deploy that isn't coming.
+                    return "stop", (f"The deploy run was cancelled: {target['url']}. Ask the human whether to "
+                                    "re-run it (Actions → the run → Re-run) before running this again."), None
+                say(f"{BAD} The deploy failed: {target['url']}")
+                return "failed", target["url"], None
             if target["status"] == "waiting":
                 c2, pend, _ = gh_api("GET", f"repos/{repo}/actions/runs/{target['databaseId']}/pending_deployments")
                 pend = pend if isinstance(pend, list) else []
@@ -2807,7 +2818,8 @@ def ship_batch(args, root, cfg):
                              - datetime.fromisoformat(m["merged_at"].replace("Z", "+00:00"))).total_seconds())
             except ValueError:
                 ages.append(0)
-        outcome, info_, deployed = await_deploy(repo, args.workflow, shas, deadline, say, min(ages or [0]))
+        outcome, info_, deployed = await_deploy(repo, args.workflow, shas, deadline, say, min(ages or [0]),
+                                                cfg.get("default_branch") or "main")
         if outcome == "failed":
             finish("deploy failed", 1, f"The deploy failed: {info_}. Show the human; report it as an Urgent bug "
                    "if production is affected.")
@@ -2998,7 +3010,8 @@ def cmd_ship(args):
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(merged_at.replace("Z", "+00:00"))).total_seconds()
         except ValueError:
             age = 0
-        outcome, info_, deployed = await_deploy(repo, args.workflow, [sha], deadline, say, age)
+        outcome, info_, deployed = await_deploy(repo, args.workflow, [sha], deadline, say, age,
+                                                cfg.get("default_branch") or "main")
         if outcome == "failed":
             finish("deploy failed", 1, "The deploy failed. Show the human the run; report it as an Urgent bug "
                    "if production is affected.", run=info_)

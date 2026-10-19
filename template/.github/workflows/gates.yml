@@ -8,6 +8,7 @@
 # added, the title names another issue). Never for PRs labelled `human-review` (protected areas). Auto-merge
 # needs the HAAM_PROJECT_TOKEN secret (a merge by the workflow's own token wouldn't start the deploy). On
 # Linear the gate can't read the issue, so it trusts the PR label but never auto-merges: the owner ships it.
+# Nor with local AI reviews (HAAM_REVIEW=local): the owner ships those lane PRs too.
 # A pass belongs to the code that was tested: a push after it removes `uat-passed`,
 # unless the new head carries the owner's `uat` commit status (`haam.py publish`
 # posts it on exactly the commit they tested). Drafts included.
@@ -29,13 +30,13 @@ permissions:
   issues: read
   statuses: write
 
-# One evaluation per PR at a time, so two quick pushes don't race each other.
-concurrency:
-  group: gates-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: false
-
 jobs:
   evaluate:
+    # One evaluation per PR (or issue) at a time, so two quick pushes don't race. At job level, so events the
+    # `if` below skips never join the group and can't push a pending re-check out of it.
+    concurrency:
+      group: gates-${{ github.event_name == 'issues' && 'issue-' || '' }}${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     # The job itself always succeeds; the result is published as the commit
     # status "release-gate", which branch protection requires. This keeps it
     # correct for comment events too (which don't run against the PR commit).
@@ -61,6 +62,8 @@ jobs:
       - name: Check UAT / override
         id: gate
         uses: actions/github-script@v7
+        env:
+          REVIEW_MODE: ${{ vars.HAAM_REVIEW }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -177,8 +180,11 @@ jobs:
               });
               core.info(`#${number} release-gate → ${state}: ${description}`);
 
-              // The lane merges by itself (GitHub Projects only); anything else that had auto-merge on loses it.
-              const autoLane = lane && state === 'success' && tracker === 'github' && !pr.draft;
+              // The lane merges by itself (GitHub Projects only). Not when the AI reviews run on the owner's computer
+              // (HAAM_REVIEW=local): those results aren't tamper-proof, so the owner ships lane PRs themselves.
+              // Anything else that had auto-merge on loses it.
+              const autoLane = lane && state === 'success' && tracker === 'github' && !pr.draft &&
+                process.env.REVIEW_MODE !== 'local';
               if (autoLane && !pr.auto_merge) enable.push(number);
               if (!autoLane && pr.auto_merge && !labels.includes('uat-passed') && !labels.includes('gate-override')) disable.push(number);
             }

@@ -16,16 +16,16 @@ Fewer merges and deploys for the product owner.
   - `release-gate` passes once every issue the PR is for (title and branch, never the description) is an open issue, not a PR, carrying the owner's label.
   - On GitHub Projects the gate turns on auto-merge, so the PR merges by itself when CI and both AI reviews pass. This uses `HAAM_PROJECT_TOKEN` (now with the `repo` scope), because a merge by the workflow's own token wouldn't start the deploy.
   - The gate re-checks when the owner adds or removes `uat:skip` on an issue, or the PR's title changes, and turns auto-merge off again when the lane no longer applies.
-  - On Linear the gate can't read the issue: it trusts the PR label but never auto-merges, so the owner ships it.
+  - On Linear the gate can't read the issue: it trusts the PR label but never auto-merges, so the owner ships it. No auto-merge either when the AI reviews run on the owner's computer (`HAAM_REVIEW=local`), since those results aren't tamper-proof.
   - Never for PRs labelled `human-review`.
-  - Agents can't add `uat:skip` to an issue (`issue label` refuses without `--human`).
+  - Agents can't add `uat:skip` to an issue: `issue label` and `issue create --label` refuse it without `--human` (and now refuse `agent-ready` in `create` too, which they didn't before).
 - **`/test all`**: tests everything waiting in UAT in one sitting, then asks once to ship what passed.
 - **`ship --all --human`** (or `ship 12 13 14 --human`): one production deploy for many changes.
   - It merges every PR that passed UAT or is in the lane, and includes merged ones still waiting to deploy.
   - It waits for the deploy run of the newest merge, cancels the older waiting runs, approves that one deploy, then closes every issue.
   - If any PR's checks are still running, it deploys nothing yet (exit 2) so it stays one deploy.
   - `--all` needs GitHub Projects; on Linear, list the issues.
-- **Every `ship` deploys what's waiting.** A merged change whose deploy run is waiting for approval (a lane merge, or one approved nowhere) no longer blocks the next deploy: `ship` cancels that older waiting run, approves the newest (it contains both), and closes every issue in Deploying that went out with it. A run that GitHub cancelled because a newer merge replaced it means waiting for the newer one, not a failed deploy.
+- **Every `ship` deploys what's waiting.** A merged change whose deploy run is waiting for approval (a lane merge, or one approved nowhere) no longer blocks the next deploy: `ship` cancels that older waiting run, approves the newest (it contains both), and closes every issue in Deploying that went out with it. If any deploy that includes the change succeeded, it's live, even if a later one failed. A deploy run someone cancelled stops `ship` with a clear message instead of waiting. Only deploy runs on the default branch count.
 - `github --apply` allows auto-merge on the repository.
 
 ### Fixed

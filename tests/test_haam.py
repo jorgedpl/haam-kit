@@ -897,6 +897,51 @@ class TestGitHubProjects(ToolTestCase):
         self.assertIn("a moment earlier", p.stderr)
         self.assertTrue(any("withdrawn" in c["body"] for c in self.gh_state()["comments"]))
 
+    def test_custom_board_fields(self):
+        self.setup_board()
+        st = self.gh_state()
+        today = __import__("datetime").date.today()
+        st["projects"][0]["fields"] += [
+            {"id": "F_area", "name": "Area", "options": [{"id": "O_b", "name": "Billing"}, {"id": "O_w", "name": "Wallet"}]},
+            {"id": "F_est", "name": "Estimate", "type": "NUMBER"},
+            {"id": "F_due", "name": "Due", "type": "DATE"},
+            {"id": "F_note", "name": "Customer", "type": "TEXT"},
+            {"id": "F_spr", "name": "Sprint", "type": "ITERATION", "iterations": [
+                {"id": "I1", "title": "Sprint 1", "startDate": str(today - __import__("datetime").timedelta(days=3)), "duration": 14},
+                {"id": "I2", "title": "Sprint 2", "startDate": str(today + __import__("datetime").timedelta(days=11)), "duration": 14}]},
+            {"id": "F_rev", "name": "Reviewers", "type": "REVIEWERS"}]
+        self.state.write_text(json.dumps(st))
+        fields = json.loads(self.tool("issue", "fields", "--json").stdout)["fields"]
+        self.assertEqual([f["name"] for f in fields], ["Area", "Estimate", "Due", "Customer", "Sprint"])
+        self.assertEqual(fields[0]["options"], ["Billing", "Wallet"])
+        r = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "Refund rounding", "--field", "area=billing",
+                                 "--field", "Estimate=3", "--field", "Due=2026-11-30", "--field", "Customer=Acme Ltd",
+                                 "--field", "Sprint=@current", "--json").stdout)
+        self.assertEqual(r["fields"], {"Area": "Billing", "Estimate": "3", "Due": "2026-11-30", "Customer": "Acme Ltd",
+                                       "Sprint": "Sprint 1"})
+        view = json.loads(self.tool("issue", "view", str(r["number"]), "--json").stdout)["issue"]
+        self.assertEqual(view["fields"], {"Area": "Billing", "Estimate": 3, "Due": "2026-11-30", "Customer": "Acme Ltd",
+                                          "Sprint": "Sprint 1"})
+        self.assertEqual(view["status"], "Triage")
+        # A wrong value is refused before anything is created
+        before = len(self.gh_state()["issues"])
+        for bad, msg in (("Area=Payments", "options: Billing, Wallet"), ("Estimate=lots", "takes a number"),
+                         ("Due=30/11", "YYYY-MM-DD"), ("Colour=red", "no field 'Colour'"), ("Status=Done", "issue status"),
+                         ("Reviewers=me", "filled in by GitHub"), ("Area", "NAME=VALUE"), ("Sprint=Sprint 9", "Sprint 1, Sprint 2")):
+            p = self.tool("issue", "create", "--title", "x", "--field", bad, check=False)
+            self.assertNotEqual(p.returncode, 0, bad)
+            self.assertIn(msg, p.stderr, bad)
+        self.assertEqual(len(self.gh_state()["issues"]), before)
+        # Edit and clear; list filters by a field
+        self.tool("issue", "edit", str(r["number"]), "--field", "Area=Wallet", "--field", "Customer=")
+        view = json.loads(self.tool("issue", "view", str(r["number"]), "--json").stdout)["issue"]
+        self.assertEqual(view["fields"].get("Area"), "Wallet")
+        self.assertNotIn("Customer", view["fields"])
+        other = json.loads(self.tool("issue", "create", "--title", "Other", "--json").stdout)["number"]
+        listed = json.loads(self.tool("issue", "list", "--field", "Area=wallet", "--json").stdout)["items"]
+        self.assertEqual([i["number"] for i in listed], [r["number"]])
+        self.assertNotIn(other, [i["number"] for i in listed])
+
     def test_epics_group_issues_and_cant_be_built(self):
         self.setup_board()
         mk = lambda *a: json.loads(self.tool("issue", "create", *a, "--json").stdout)

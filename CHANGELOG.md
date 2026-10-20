@@ -6,6 +6,16 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-21
+
+### Added
+- **The board's own fields from any agent.** `haam.py issue create … --field NAME=VALUE` and `issue edit <n> --field NAME=VALUE` set the fields a project adds to its GitHub Projects board, such as Area, Team, Estimate, Due date or Sprint. Before, only Status and Priority could be set.
+  - It works for every kind of field you can add yourself: single select (by option name, in any case), text, number, date (`YYYY-MM-DD`) and iteration (by title, or `@current` for the one running today). An empty value clears the field.
+  - The field and value are checked against the board first, so a typo is refused, with the valid options, before the issue is created.
+  - `issue fields` lists the board's own fields and their options. `issue view` shows their values, and `issue list --field Area=Billing` filters by one.
+  - Status and Priority stay with their own commands and rules. Fields GitHub fills itself (reviewers, linked PRs…) are refused.
+  - `/idea` and `/bug` set the fields the report clearly answers, and `/triage` sets those the owner gives.
+
 ## [1.10.0] - 2026-10-20
 
 ### Added

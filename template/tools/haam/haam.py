@@ -18,7 +18,7 @@ Admin (first-time adoption and upgrades):
     invite    --github USER [--linear-email EMAIL] [--apply]
 
 Agents, when the tracker is GitHub Projects:
-    issue create|view|list|claim|release|status|priority|label|comment|close|link|unlink|children|edit ...
+    issue create|view|list|claim|release|status|priority|label|comment|close|link|unlink|children|edit|fields ...
 
 Testing and shipping (inside /test, after the human's verdict):
     checkout-pr ISSUE | --back              Put a change on this machine to test it (its PR, or the agent's branch)
@@ -70,7 +70,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -1739,9 +1739,46 @@ PROJECT_FIELDS = """
   id number url title
   items(first: 1) { totalCount }
   fields(first: 50) { nodes { __typename
-    ... on ProjectV2FieldCommon { id name }
-    ... on ProjectV2SingleSelectField { options { id name } } } }
+    ... on ProjectV2FieldCommon { id name dataType }
+    ... on ProjectV2SingleSelectField { options { id name } }
+    ... on ProjectV2IterationField { configuration { iterations { id title startDate duration } } } } }
 """
+# An item's field values, for every kind of field a project can add itself
+FIELD_VALUES = """fieldValues(first:50){ nodes{
+  ... on ProjectV2ItemFieldSingleSelectValue { name field{ ... on ProjectV2FieldCommon { name } } }
+  ... on ProjectV2ItemFieldTextValue { text field{ ... on ProjectV2FieldCommon { name } } }
+  ... on ProjectV2ItemFieldNumberValue { number field{ ... on ProjectV2FieldCommon { name } } }
+  ... on ProjectV2ItemFieldDateValue { date field{ ... on ProjectV2FieldCommon { name } } }
+  ... on ProjectV2ItemFieldIterationValue { title field{ ... on ProjectV2FieldCommon { name } } } } }"""
+# Board fields a project adds itself (Area, Team, Sprint…), which `issue … --field NAME=VALUE` sets. Status and
+# Priority have HAAM's own commands and rules.
+CUSTOM_FIELD_TYPES = ("SINGLE_SELECT", "TEXT", "NUMBER", "DATE", "ITERATION")
+HAAM_FIELDS = ("Status", "Priority")
+
+
+def field_values(nodes):
+    """{field name: value} from an item's fieldValues nodes."""
+    out = {}
+    for v in nodes or []:
+        if not v or not v.get("field"):
+            continue
+        for k in ("name", "text", "number", "date", "title"):
+            if v.get(k) is not None:
+                val = v[k]
+                out[v["field"]["name"]] = int(val) if isinstance(val, float) and val.is_integer() else val
+                break
+    return out
+
+
+def parse_field_args(items):
+    """['Area=Billing', 'Sprint=@current'] → [('Area', 'Billing'), …]."""
+    out = []
+    for x in items or []:
+        name, sep, value = x.partition("=")
+        if not sep or not name.strip():
+            raise RuntimeError(f"--field takes NAME=VALUE (e.g. --field Area=Billing), not '{x}'")
+        out.append((name.strip(), value.strip()))
+    return out
 
 
 class GHProject:
@@ -1785,25 +1822,95 @@ class GHProject:
         valid = ", ".join(o["name"] for o in f.get("options") or [])
         raise RuntimeError(f"'{option}' isn't a {field_name} on the board (valid: {valid})")
 
+    def field_type(self, f):
+        return f.get("dataType") or ("SINGLE_SELECT" if "options" in f else None)
+
+    def custom_fields(self):
+        """The board's own fields that --field can set, with their options."""
+        out = []
+        for f in (self.data or self.load())["fields"]["nodes"]:
+            t = self.field_type(f)
+            if f.get("name") and t in CUSTOM_FIELD_TYPES and f["name"] not in HAAM_FIELDS:
+                opts = ([o["name"] for o in f.get("options") or []] if t == "SINGLE_SELECT" else
+                        [i["title"] for i in ((f.get("configuration") or {}).get("iterations") or [])] if t == "ITERATION"
+                        else [])
+                out.append({"name": f["name"], "type": t.lower().replace("_", "-"), "options": opts})
+        return out
+
+    def resolve_field(self, name, value):
+        """Check NAME=VALUE against the board before anything changes: returns (field id, value input or None to
+        clear, display value)."""
+        f = next((x for x in (self.data or self.load())["fields"]["nodes"]
+                  if (x.get("name") or "").lower() == name.lower()), None)
+        own = ", ".join(c["name"] for c in self.custom_fields()) or "none"
+        if not f:
+            raise RuntimeError(f"The board has no field '{name}' (its own fields: {own}; `issue fields` lists them)")
+        if f["name"] in HAAM_FIELDS:
+            raise RuntimeError(f"Set {f['name']} with --{f['name'].lower()} or `issue {f['name'].lower()}`: it follows "
+                               "HAAM's rules")
+        t = self.field_type(f)
+        if t not in CUSTOM_FIELD_TYPES:
+            raise RuntimeError(f"'{f['name']}' is filled in by GitHub ({(t or '?').lower()}); --field sets the board's "
+                               f"own fields: {own}")
+        if value == "":
+            return f["id"], None, ""
+        if t == "SINGLE_SELECT":
+            o = next((o for o in f.get("options") or [] if o["name"].lower() == value.lower()), None)
+            if not o:
+                raise RuntimeError(f"'{value}' isn't an option of {f['name']} (options: "
+                                   f"{', '.join(x['name'] for x in f.get('options') or [])})")
+            return f["id"], {"singleSelectOptionId": o["id"]}, o["name"]
+        if t == "NUMBER":
+            try:
+                return f["id"], {"number": float(value)}, value
+            except ValueError:
+                raise RuntimeError(f"{f['name']} takes a number, not '{value}'")
+        if t == "DATE":
+            try:
+                datetime.date.fromisoformat(value)
+            except ValueError:
+                raise RuntimeError(f"{f['name']} takes a date as YYYY-MM-DD, not '{value}'")
+            return f["id"], {"date": value}, value
+        if t == "ITERATION":
+            its = ((f.get("configuration") or {}).get("iterations") or [])
+            if value.lower() in ("@current", "current"):
+                today = datetime.date.today()
+                it = next((i for i in its if datetime.date.fromisoformat(i["startDate"]) <= today <
+                           datetime.date.fromisoformat(i["startDate"]) + datetime.timedelta(days=int(i["duration"]))),
+                          None)
+            else:
+                it = next((i for i in its if i["title"].lower() == value.lower()), None)
+            if not it:
+                raise RuntimeError(f"No {f['name']} '{value}' (open ones: {', '.join(i['title'] for i in its) or 'none'}"
+                                   "; @current is the one running today)")
+            return f["id"], {"iterationId": it["id"]}, it["title"]
+        return f["id"], {"text": value}, value
+
+    def set_fields(self, iss, resolved):
+        item = self.ensure_item(iss)
+        for field_id, val, _ in resolved:
+            if val is None:
+                gql("""mutation($p:ID!,$i:ID!,$f:ID!){ clearProjectV2ItemFieldValue(input:{projectId:$p, itemId:$i,
+                         fieldId:$f}){ projectV2Item{ id } } }""", {"p": self.data["id"], "i": item, "f": field_id})
+            else:
+                gql("""mutation($p:ID!,$i:ID!,$f:ID!,$v:ProjectV2FieldValue!){ updateProjectV2ItemFieldValue(input:{
+                         projectId:$p, itemId:$i, fieldId:$f, value:$v }){ projectV2Item{ id } } }""",
+                    {"p": self.data["id"], "i": item, "f": field_id, "v": val})
+
     # --- issues
     def issue(self, number):
         d = gql("""query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){
                      id number title state url body createdAt parent{ number repository{ nameWithOwner } }
                      assignees(first:10){ nodes{ login } } labels(first:30){ nodes{ name } }
                      projectItems(first:20){ nodes{ id project{ id number }
-                       fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue {
-                         name field{ ... on ProjectV2FieldCommon { name } } } } } } } } } }""",
+                       %s } } } } }""" % FIELD_VALUES,
                 {"o": self.repo_owner, "r": self.repo_name, "n": int(number)})
         iss = ((d.get("repository") or {}).get("issue"))
         if not iss:
             raise RuntimeError(f"Issue #{number} not found in {self.repo}")
         proj = self.data or self.load()
         item = next((i for i in iss["projectItems"]["nodes"] if i["project"]["id"] == proj["id"]), None)
-        values = {}
-        if item:
-            for v in item["fieldValues"]["nodes"]:
-                if v and v.get("field"):
-                    values[v["field"]["name"]] = v["name"]
+        values = field_values(item["fieldValues"]["nodes"]) if item else {}
         return {
             "number": iss["number"], "title": iss["title"], "state": iss["state"], "url": iss["url"],
             "node_id": iss["id"], "created": iss["createdAt"],
@@ -1811,6 +1918,7 @@ class GHProject:
             "labels": [l["name"] for l in iss["labels"]["nodes"]],
             "item_id": item["id"] if item else None,
             "status": values.get("Status"), "priority": values.get("Priority"),
+            "fields": {k: v for k, v in values.items() if k not in HAAM_FIELDS},
             "parent": self._parent(iss.get("parent")),
         }
 
@@ -1875,24 +1983,28 @@ class GHProject:
                          pageInfo{ hasNextPage endCursor }
                          nodes{ id content{ __typename ... on Issue { number title state url createdAt parent{ number repository{ nameWithOwner } }
                            repository{ nameWithOwner } assignees(first:10){ nodes{ login } } labels(first:30){ nodes{ name } } } }
-                           fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue {
-                             name field{ ... on ProjectV2FieldCommon { name } } } } } } } } } }""",
+                           %s } } } } }""" % FIELD_VALUES,
                     {"p": proj["id"], "a": after})
             page = d["node"]["items"]
             for n in page["nodes"]:
                 c = n.get("content") or {}
                 if c.get("__typename") != "Issue":
                     continue
-                vals = {v["field"]["name"]: v["name"] for v in n["fieldValues"]["nodes"] if v and v.get("field")}
+                vals = field_values(n["fieldValues"]["nodes"])
                 out.append({"number": c["number"], "title": c["title"], "state": c["state"], "url": c["url"],
                             "repo": c["repository"]["nameWithOwner"], "created": c["createdAt"],
                             "assignees": [a["login"] for a in c["assignees"]["nodes"]],
                             "labels": [l["name"] for l in c["labels"]["nodes"]],
                             "status": vals.get("Status"), "priority": vals.get("Priority"),
+                            "fields": {k: v for k, v in vals.items() if k not in HAAM_FIELDS},
                             "parent": self._parent(c.get("parent"))})
             if not page["pageInfo"]["hasNextPage"]:
                 return out
             after = page["pageInfo"]["endCursor"]
+
+
+def board_field_name(board, field_id):
+    return next((f["name"] for f in board.data["fields"]["nodes"] if f.get("id") == field_id), field_id)
 
 
 def gh_login():
@@ -2152,12 +2264,21 @@ def issue_action(args, cfg, board):
             items = [i for i in items if i.get("parent") == pn]
         if args.no_parent:
             items = [i for i in items if not i.get("parent")]
+        for name, want in parse_field_args(args.field):
+            items = [i for i in items if str(next((v for k, v in (i.get("fields") or {}).items()
+                                                   if k.lower() == name.lower()), "")).lower() == want.lower()]
         order = {n: k for k, (n, _, _) in enumerate(GH_PRIORITIES)}
         items.sort(key=lambda i: (order.get(i["priority"], 9), i["created"]))
         lines = [f"#{i['number']:<5} {i['status'] or '-':<12} {i['priority'] or '-':<7} "
                  f"{','.join(i['assignees']) or '-':<14} {i['title']}  [{', '.join(i['labels'])}]"
                  + (f"  (epic #{i['parent']})" if i.get("parent") else "") for i in items]
         return {"items": items, "message": "\n".join(lines) or "No matching issues."}
+
+    if a == "fields":
+        fl = board.custom_fields()
+        lines = [f"  {f['name']} ({f['type']})" + (f": {', '.join(f['options'])}" if f["options"] else "") for f in fl]
+        return {"fields": fl, "message": ("The board's own fields (set with --field NAME=VALUE):\n" + "\n".join(lines))
+                if fl else "The board has no fields of its own besides Status and Priority."}
 
     if a == "create":
         if not args.title:
@@ -2175,6 +2296,7 @@ def issue_action(args, cfg, board):
             if EPIC_LABEL not in parent["labels"]:
                 raise RuntimeError(f"#{parent['number']} isn't an epic (label '{EPIC_LABEL}'). Make it one first: "
                                    f"issue label {parent['number']} --add {EPIC_LABEL}")
+        fields = [board.resolve_field(n, v) for n, v in parse_field_args(args.field)]    # checked before creating
         cmd = ["gh", "issue", "create", "-R", repo, "--title", args.title, "--body", body]
         for lab in labels:
             cmd += ["--label", lab]
@@ -2187,11 +2309,16 @@ def issue_action(args, cfg, board):
         board.set_option(iss, "Status", status)
         if args.priority:
             board.set_option(iss, "Priority", args.priority)
+        if fields:
+            board.set_fields(iss, fields)
         if parent:
             board.link(parent, iss)
+        shown = "".join(f", {board_field_name(board, fid)}={disp}" for fid, _, disp in fields if disp)
         return {"number": number, "url": iss["url"], "status": status, "parent": parent["number"] if parent else None,
+                "fields": {board_field_name(board, fid): disp for fid, _, disp in fields},
                 "message": f"Created {'epic ' if args.epic else ''}#{number} ({status}"
-                           f"{', ' + args.priority if args.priority else ''}{', in epic #' + str(parent['number']) if parent else ''}): {iss['url']}"}
+                           f"{', ' + args.priority if args.priority else ''}{shown}"
+                           f"{', in epic #' + str(parent['number']) if parent else ''}): {iss['url']}"}
 
     number = parse_issue_number(args.number) if args.number else None
     if number is None:
@@ -2202,7 +2329,9 @@ def issue_action(args, cfg, board):
         msg = (f"#{iss['number']} {iss['title']}\n  state: {iss['state']} · status: {iss['status'] or '-'} · "
                f"priority: {iss['priority'] or '-'} · assignees: {', '.join(iss['assignees']) or '-'}\n"
                f"  labels: {', '.join(iss['labels']) or '-'}"
-               + (f" · epic: #{iss['parent']}" if iss.get("parent") else "") + f"\n  {iss['url']}")
+               + (f" · epic: #{iss['parent']}" if iss.get("parent") else "")
+               + ("\n  " + " · ".join(f"{k}: {v}" for k, v in iss["fields"].items()) if iss.get("fields") else "")
+               + f"\n  {iss['url']}")
         return {"issue": {k: v for k, v in iss.items() if k != "node_id"}, "message": msg}
 
     if a == "link":
@@ -2239,17 +2368,22 @@ def issue_action(args, cfg, board):
         return {"number": number, "message": f"#{number} is no longer part of epic #{iss['parent']}"}
 
     if a == "edit":
-        if not (args.title or args.body or args.body_file):
-            sys.exit("Give --title and/or --body / --body-file")
-        cmd = ["gh", "issue", "edit", str(number), "-R", repo]
-        if args.title:
-            cmd += ["--title", args.title]
-        if args.body or args.body_file:
-            cmd += ["--body", Path(args.body_file).read_text() if args.body_file else args.body]
-        code, out, err = run(cmd)
-        if code != 0:
-            raise RuntimeError(err or out)
-        return {"number": number, "message": f"#{number} updated"}
+        if not (args.title or args.body or args.body_file or args.field):
+            sys.exit("Give --title, --body / --body-file and/or --field NAME=VALUE")
+        fields = [board.resolve_field(n, v) for n, v in parse_field_args(args.field)]
+        if args.title or args.body or args.body_file:
+            cmd = ["gh", "issue", "edit", str(number), "-R", repo]
+            if args.title:
+                cmd += ["--title", args.title]
+            if args.body or args.body_file:
+                cmd += ["--body", Path(args.body_file).read_text() if args.body_file else args.body]
+            code, out, err = run(cmd)
+            if code != 0:
+                raise RuntimeError(err or out)
+        if fields:
+            board.set_fields(iss, fields)
+        shown = ", ".join(f"{board_field_name(board, fid)}={disp or '(cleared)'}" for fid, _, disp in fields)
+        return {"number": number, "message": f"#{number} updated" + (f": {shown}" if shown else "")}
 
     if a == "add":
         board.ensure_item(iss)
@@ -5162,7 +5296,7 @@ def main():
 
     p = common(sub.add_parser("issue", help="work with issues on the GitHub Projects board (for agents)"))
     p.add_argument("action", choices=["list", "create", "view", "add", "claim", "release", "status", "priority",
-                                      "label", "comment", "close", "link", "unlink", "children", "edit"])
+                                      "label", "comment", "close", "link", "unlink", "children", "edit", "fields"])
     p.add_argument("number", nargs="?", help="issue number (#123 or 123)")
     p.add_argument("value", nargs="?", help="new status or priority")
     p.add_argument("--title")
@@ -5173,6 +5307,10 @@ def main():
     p.add_argument("--status", action="append", help="list: filter by status (repeatable); create: initial status")
     p.add_argument("--label", action="append", help="list: must have label; create: extra label (repeatable)")
     p.add_argument("--no-label", action="append", help="list: must not have label (repeatable)")
+    p.add_argument("--field", action="append", metavar="NAME=VALUE",
+                   help="create/edit: set one of the board's own fields (e.g. Area=Billing, Estimate=3, "
+                        "Due=2026-11-30, Sprint=@current; empty value clears it); list: only items with that value. "
+                        "Repeatable. `issue fields` lists them")
     p.add_argument("--unassigned", action="store_true")
     p.add_argument("--epic", action="store_true", help="create: make the new issue an epic (label 'epic')")
     p.add_argument("--parent", help="create/link: the epic this issue belongs to; list: only that epic's issues")

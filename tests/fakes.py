@@ -165,14 +165,30 @@ def opts(a, name):
 def proj_view(p):
     return {"id": p["id"], "number": p["number"], "url": p["url"], "title": p["title"],
             "items": {"totalCount": len([i for i in st["items"] if i["project"] == p["id"]])},
-            "fields": {"nodes": [{"__typename": "ProjectV2SingleSelectField", "id": f["id"], "name": f["name"],
-                                  "options": f["options"]} for f in p["fields"]]}}
+            "fields": {"nodes": [field_view(f) for f in p["fields"]]}}
+def field_view(f):
+    t = f.get("type", "SINGLE_SELECT")
+    v = {"__typename": "ProjectV2Field", "id": f["id"], "name": f["name"], "dataType": t}
+    if t == "SINGLE_SELECT":
+        v.update(__typename="ProjectV2SingleSelectField", options=f["options"])
+    if t == "ITERATION":
+        v.update(__typename="ProjectV2IterationField", configuration={"iterations": f["iterations"]})
+    return v
 def values(item):
     out_ = []
     p = next(p for p in st["projects"] if p["id"] == item["project"])
     for f in p["fields"]:
-        oid = item["values"].get(f["id"])
-        o = next((o for o in f["options"] if o["id"] == oid), None)
+        val = item["values"].get(f["id"])
+        if isinstance(val, dict):          # set through a ProjectV2FieldValue
+            if "singleSelectOptionId" in val:
+                val = val["singleSelectOptionId"]
+            elif "iterationId" in val:
+                it = next(i for i in f["iterations"] if i["id"] == val["iterationId"])
+                out_.append({"title": it["title"], "field": {"name": f["name"]}}); continue
+            else:
+                (k, x), = val.items()
+                out_.append({k: x, "field": {"name": f["name"]}}); continue
+        o = next((o for o in f.get("options") or [] if o["id"] == val), None)
         if o:
             out_.append({"name": o["name"], "field": {"name": f["name"]}})
     return out_
@@ -383,8 +399,12 @@ if a[:2] == ["api", "graphql"]:
         out({"data": {"addProjectV2ItemById": {"item": {"id": it["id"]}}}})
     if "updateProjectV2ItemFieldValue" in q:
         it = next(i for i in st["items"] if i["id"] == v["i"])
-        it["values"][v["f"]] = v["o"]
+        it["values"][v["f"]] = v["v"] if "v" in v else v["o"]
         out({"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": it["id"]}}}})
+    if "clearProjectV2ItemFieldValue" in q:
+        it = next(i for i in st["items"] if i["id"] == v["i"])
+        it["values"].pop(v["f"], None)
+        out({"data": {"clearProjectV2ItemFieldValue": {"projectV2Item": {"id": it["id"]}}}})
     if "items(first:100" in q:
         nodes = []
         for it in st["items"]:

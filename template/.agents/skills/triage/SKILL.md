@@ -53,7 +53,7 @@ Then ask: *"Reply `ok` to apply all of this, or tell me what to change (e.g. `#1
 
 ## 4. Apply exactly what was confirmed
 For each item, in the tracker:
-- Set the priority and fix the stream label. For `UAT: skip`, add the label `uat:skip` (GitHub: `haam.py issue label <n> --add uat:skip --human`, allowed here because the human confirmed it).
+- Set the priority and fix the stream label. If the human gave a value for one of the board's own fields (e.g. `Area Billing`), set it: GitHub `haam.py issue edit <n> --field Area=Billing`. For `UAT: skip`, add the label `uat:skip` (GitHub: `haam.py issue label <n> --add uat:skip --human`, allowed here because the human confirmed it).
 - Status: `Ready` (bugs), `Discovery` (ideas to assess), `Parked` or `Canceled` (on GitHub these two need `--human`, allowed here because the human confirmed them; close Canceled issues as not planned or duplicate). Leave "needs info" items in `Triage`.
 - Comment: `🗂️ Triaged by <user>: <priority> · <next step> · <why>`. For "needs info", comment the question and mention the reporter. For duplicates, link the original. For stale nudges, mention the assignee.
 - "Release the claim": unassign, remove `claimed`, status back to `Ready` for a build (an assessment stays in `Discovery`, a spec in `Backlog`), comment why (GitHub: `issue release <n> --human --body "<why>"`, allowed here because the human confirmed it).

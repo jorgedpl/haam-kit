@@ -37,6 +37,7 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **Create an epic** | `haam.py issue create --epic --stream idea --title "…"` | Create issue with label `epic` |
 | **Put an issue in an epic** | `haam.py issue link 14 --parent 9` | Set the issue's parent to the epic |
 | **Create an issue inside an epic** (e.g. spec slices, gaps) | `haam.py issue create --stream feature --parent 9 --title "…"` | Create sub-issue of the epic |
+| **The board's own fields** (Area, Team, Estimate, Sprint…) | `haam.py issue fields` lists them and their options. Set them with `--field NAME=VALUE` on `issue create` or `issue edit` (repeatable; an empty value clears one; `Sprint=@current` is the iteration running today), and filter with `issue list --field Area=Billing`. A wrong name or value is refused before anything changes | The team's own fields, with the Linear connection |
 | **Take an issue out of an epic** | `haam.py issue unlink 14` | Clear the issue's parent |
 | **Rewrite an issue** (title, description) | `haam.py issue edit 14 --title "…" --body-file new.md` | Update issue |
 | **An epic's issues** | `haam.py issue children 9` (with progress) | List the epic's sub-issues |

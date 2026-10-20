@@ -47,7 +47,7 @@ Read the spec and the code it points at. Post a short plan as a comment on the i
 - Update `docs/product/ARCHITECTURE.md`, `.env.example` and other docs if your change affects them.
 
 ## 5. Verify locally
-Run `make check` until it passes. Also run any project-specific test skills listed in `AGENTS.md` §8 that apply to the change, and report their results. Never skip or weaken tests to get green.
+Run `make check` until it passes (if `haam.config.json` lists `heavy_runs` and your command is one of them, run it as `python3 tools/haam/haam.py exclusive "<this chat, <ID>>" -- make check`, so it doesn't collide with another chat's run on this machine). Also run any project-specific test skills listed in `AGENTS.md` §8 that apply to the change, and report their results. Never skip or weaken tests to get green.
 
 ## 6. Self-review before the PR
 Do a security self-review of your diff and fix anything you find (Claude Code: `/security-review`; other tools: check `git diff origin/main...` against section D of `.github/review/REVIEWER.md`). Re-read your own diff (`git diff origin/main...`) against each acceptance criterion.

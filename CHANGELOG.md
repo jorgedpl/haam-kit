@@ -6,6 +6,23 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-20
+
+### Added
+- **`haam.py exclusive "<who>" -- <command>`: parallel chats take turns on a machine-wide test resource.**
+  - The problem: every chat has its own worktree, but some test runs use something the whole machine shares, such as a local database the tests clone, a simulator or a device. Two chats running them at once break each other, and the failure looks like a broken change.
+  - It takes a lock in the repository's common git directory, which every worktree shares, and says who holds it and since when. It also waits until no other heavy run shows in the process list for a quiet spell (`--quiet`, default 10 s), for runs that don't use the lock. Then it runs the command, returns its exit code and releases the lock on any exit, Ctrl-C and kill included.
+  - It never waits for itself: its own process group, its ancestors and any other `haam.py exclusive` (the shell around it included) don't count. A lock left by a run that died is taken over. After `--timeout` minutes (default 60) it gives up with exit code 124, and nothing has run.
+  - **`heavy_runs`** in `haam.config.json` says what counts as a heavy run: regular expressions matched against the process list, e.g. `"make (check|test-integration)"`. It is empty by default, so nothing waits. Set it with `config --heavy-run "<pattern>"` (or `--clear-heavy-runs`).
+  - Agents run their heavy commands through it (`AGENTS.md` §7, `/build`), and with `heavy_runs` set, `local-ci` takes its turn too.
+
+### Fixed
+- `worktree clean` (and the `after-ship` tidy-up) keeps any worktree a program is still running in, such as an agent chat or a terminal. Before, a chat's worktree with nothing of its own (for example detached at `main`) could be removed under it once it looked idle.
+- `worktree clean` read a worktree's last use after running `git status` in it, which can reset that time, so "unused for 24h" worktrees were sometimes kept.
+
+### Migration
+- `haam.py update`. If your tests share a machine-wide resource (a local database, a simulator, a device), list those runs: `haam.py config --heavy-run "<pattern>"`, then commit `haam.config.json`.
+
 ## [1.9.1] - 2026-10-19
 
 ### Fixed

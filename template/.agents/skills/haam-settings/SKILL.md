@@ -37,7 +37,8 @@ The areas and their settings:
   - `deploy_approval` (each | automatic).
 - **Limits:** `max_open_prs`, `max_in_uat`, `max_review_rounds`, `max_pr_lines` (whole numbers).
 - **Protected areas:** `protected_paths`. Show the list. To add: `config --protected "src/auth/**" --human`. To remove: `config --unprotected "…" --human`.
-- **Housekeeping:** `worktree_cleanup` (after-ship | manual).
+- **Housekeeping:** `worktree_cleanup` (after-ship | manual). After-ship never removes a worktree a program (an agent chat, a terminal) is still running in.
+- **Shared test resources:** `heavy_runs`. If tests use something the whole machine shares (a local database they clone, a simulator, a device), two chats running them at once break each other. List those commands as patterns: `config --heavy-run "make (check|test-integration)"` (`--clear-heavy-runs` empties the list). Agents then run them through `haam.py exclusive`, one at a time, and so does `local-ci`. Empty (the default): nothing waits.
 
 Point out combinations that undo each other's safety, in one line each, and let them decide:
 - `ci off` with `review off`: nothing checks the code before your test;

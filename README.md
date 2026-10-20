@@ -30,7 +30,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.9.1 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.10.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -65,6 +65,7 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `github-project [--apply]` | admin | GitHub Projects board: 12 statuses, Priority field, labels, repo link |
 | `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 9 labels |
 | `issue list\|create\|claim\|release\|status\|…` | agents | Work the GitHub Projects board from any agent tool |
+| `exclusive "<who>" -- <command>` | agents | Run a heavy test run (one that uses a machine-wide resource) when no other one is running on this machine |
 | `capacity` | agents | Hold new work when too many PRs are open or waiting for your test (limits in `haam.config.json`) |
 | `ci-usage [--days 7]` | admin | Where the GitHub Actions minutes went, by workflow, job, trigger and day |
 | `settings [--explain] [--set key=value] [--apply]` | owner/admin | Your choices: when CI and the AI reviews run, what you test, grouping, shipping, limits (`/haam-settings` walks you through them) |

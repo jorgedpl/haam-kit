@@ -134,6 +134,7 @@ On GitHub Projects, `haam.py issue claim <number> [--for assess|spec] --tool "<t
 - Fill in `.github/pull_request_template.md` completely, including **Built with** (your agent tool and model).
 - Rebase on `main` before opening or updating a PR. Keep PRs small (target: `max_pr_lines` changed lines, default 400).
 - **One chat, one folder.** Chats that share a folder overwrite each other's files and branches. When more than one agent chat may be open on a machine, each agent chat that changes files works in its own git worktree under `.claude/worktrees/`; `/work` sets one up (`python3 tools/haam/haam.py worktree status|new|prep|clean`). The main folder belongs to the human's chat. When unsure, use a worktree.
+- **One heavy run at a time.** Some test runs use something the whole machine shares (a local database the tests clone, a simulator, a device), so two chats running them at once break each other and it looks like a broken change. If `haam.config.json` lists `heavy_runs`, run those commands through `python3 tools/haam/haam.py exclusive "<this chat, #ID>" -- <command>` (e.g. `-- make check`): it waits for the machine-wide lock and for any other heavy run to finish, runs the command and returns its exit code (124: it gave up waiting, nothing ran). A failure right after another chat's run is worth one rerun through `exclusive` before you call the change broken.
 
 ## 8. Commands (the contract between agents, CI and humans)
 

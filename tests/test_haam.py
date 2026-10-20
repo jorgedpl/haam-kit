@@ -10,9 +10,11 @@ _sys.dont_write_bytecode = True  # keep the kit free of __pycache__
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1310,6 +1312,26 @@ class TestWorktrees(ToolTestCase):
         self.assertFalse(done.exists())
         self.assertTrue(busy.exists() and fresh.exists())
 
+    def test_clean_keeps_a_worktree_a_program_is_running_in(self):
+        idle = Path(json.loads(self.wt("new", "idle", "--json").stdout)["path"])
+        idx = Path(subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=idle, capture_output=True,
+                                  text=True).stdout.strip()) / "index"
+        old = time.time() - 3 * 86400
+        os.utime(idx, (old, old))                                           # untouched for 3 days
+        chat = subprocess.Popen(["sleep", "30"], cwd=idle)                  # a chat still open in it
+        try:
+            items = {i["text"]: i["detail"] for s in json.loads(self.wt("clean", "--json").stdout)["sections"]
+                     for i in s["items"]}
+            if not (Path("/proc/self/cwd").exists() or shutil.which("lsof")):
+                self.skipTest("can't see working directories here")
+            self.assertIn("a program is running in it", items.get(f"keep: {idle}", ""))
+        finally:
+            chat.kill()
+            chat.wait()
+        os.utime(idx, (old, old))                                           # the first clean's git status touched it
+        items = {i["text"] for s in json.loads(self.wt("clean", "--json").stdout)["sections"] for i in s["items"]}
+        self.assertIn(f"remove: {idle}", items)
+
     def test_checkout_pr_detaches_the_branch_and_comes_back(self):
         bin_dir = self.tmp / "bin"
         install_fake_gh_projects(bin_dir)
@@ -1588,6 +1610,116 @@ class TestWorktrees(ToolTestCase):
         status = {i["text"]: i["status"] for i in sec["items"]}
         self.assertEqual(status[".worktreeinclude"], "ok")
         self.assertEqual(status[".claude/worktrees/ is git-ignored"], "ok")
+
+
+class TestExclusive(ToolTestCase):
+    """haam.py exclusive: one heavy run at a time on this machine, shared by every worktree."""
+
+    def setUp(self):
+        super().setUp()
+        (self.proj / "haam.config.json").write_text(json.dumps({"heavy_runs": ["heavy-marker"]}))
+        self.lock_dir = self.proj / ".git" / "haam-exclusive.lock"
+
+    def ex(self, who, *cmd, quiet="0.3", cwd=None, check=False):
+        return self.run_tool("exclusive", who, "--quiet", quiet, "--", *cmd, cwd=cwd, check=check)
+
+    def py(self, code):
+        return [sys.executable, "-c", code]
+
+    def test_lock_released_after_success_and_failure(self):
+        p = self.ex("chat A", *self.py("import os,sys; print(os.path.isdir(sys.argv[1]))"), str(self.lock_dir),
+                    check=True)
+        self.assertEqual(p.stdout.strip(), "True")                           # held while the command runs
+        self.assertFalse(self.lock_dir.exists())
+        p = self.ex("chat A", *self.py("import sys; sys.exit(3)"))
+        self.assertEqual(p.returncode, 3)                                    # the command's own exit code
+        self.assertFalse(self.lock_dir.exists())
+
+    def test_lock_released_when_interrupted(self):
+        pidfile = self.tmp / "child.pid"
+        a = subprocess.Popen([sys.executable, str(TOOL), "exclusive", "chat A", "--quiet", "0.2", "--",
+                              *self.py("import os,sys,time; open(sys.argv[1],'w').write(str(os.getpid())); time.sleep(60)"),
+                              str(pidfile)], cwd=self.proj, env=self.env, stderr=subprocess.DEVNULL)
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text():
+                break
+            time.sleep(0.1)
+        self.assertTrue(self.lock_dir.exists())
+        a.send_signal(signal.SIGTERM)
+        a.wait(timeout=20)
+        self.assertFalse(self.lock_dir.exists())
+        child = int(pidfile.read_text())
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("the command was left running")
+
+    def test_second_caller_waits_for_the_first_even_from_another_worktree(self):
+        wt = self.tmp / "wt"
+        git(self.proj, "worktree", "add", "-q", "--detach", str(wt))
+        (wt / "haam.config.json").write_text(json.dumps({"heavy_runs": ["heavy-marker"]}))
+        marks = self.tmp / "marks"
+        a = subprocess.Popen([sys.executable, str(TOOL), "exclusive", "chat A", "--quiet", "0.2", "--",
+                              *self.py("import sys,time; time.sleep(1.5); open(sys.argv[1],'a').write('A-end %f\\n' % time.time())"),
+                              str(marks)], cwd=self.proj, env=self.env, stderr=subprocess.DEVNULL)
+        for _ in range(100):
+            if self.lock_dir.exists():
+                break
+            time.sleep(0.05)
+        p = self.ex("chat B", *self.py("import sys,time; open(sys.argv[1],'a').write('B-start %f\\n' % time.time())"),
+                    str(marks), cwd=wt, check=True)
+        a.wait(timeout=20)
+        self.assertIn("Waiting for chat A", p.stderr)
+        t = dict(line.split() for line in marks.read_text().splitlines())
+        self.assertGreaterEqual(float(t["B-start"]), float(t["A-end"]))
+
+    def test_never_waits_for_itself(self):
+        start = time.time()
+        # Its own command line, and the shell around it, both match the heavy-run pattern
+        p = subprocess.run(["bash", "-c", f"'{sys.executable}' '{TOOL}' exclusive me --quiet 0.3 -- "
+                                          f"bash -c 'echo heavy-marker; sleep 0.5'"],
+                           cwd=self.proj, env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertLess(time.time() - start, 8)
+        self.assertNotIn("Waiting", p.stderr)
+
+    def test_waits_for_a_heavy_run_that_skips_the_lock(self):
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2)", "heavy-marker"],
+                                 start_new_session=True)
+        try:
+            p = self.ex("chat B", *self.py("import time; print(time.time())"), check=True)
+            self.assertIn("other heavy run", p.stderr)
+            self.assertIsNotNone(other.poll())                               # it ran only after the other finished
+        finally:
+            other.kill()
+
+    def test_takes_over_a_lock_whose_owner_died(self):
+        self.lock_dir.mkdir()
+        (self.lock_dir / "owner").write_text(json.dumps({"who": "a crashed chat", "pid": 999999,
+                                                         "host": os.uname().nodename, "since": "earlier"}))
+        p = self.ex("chat A", "true", check=True)
+        self.assertIn("a crashed chat", p.stderr)
+        self.assertFalse(self.lock_dir.exists())
+
+    def test_gives_up_after_the_timeout(self):
+        self.lock_dir.mkdir()
+        (self.lock_dir / "owner").write_text(json.dumps({"who": "chat A", "pid": os.getpid(),
+                                                         "host": os.uname().nodename, "since": "now"}))
+        p = self.run_tool("exclusive", "chat B", "--timeout", "0.02", "--", "true", check=False)
+        self.assertEqual(p.returncode, 124)
+        self.assertTrue(self.lock_dir.exists())                              # someone else's lock is left alone
+
+    def test_config_adds_heavy_runs(self):
+        (self.proj / "haam.config.json").unlink()
+        self.run_tool("config", "--product", "Acme", "--heavy-run", "make (check|test-integration)")
+        self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["heavy_runs"],
+                         ["make (check|test-integration)"])
+        self.run_tool("config", "--clear-heavy-runs")
+        self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["heavy_runs"], [])
 
 
 def git_status(cwd):

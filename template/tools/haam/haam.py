@@ -32,6 +32,7 @@ CI cost:
 
 Parallel chats (one worktree per agent chat):
     worktree status|new|prep|list|clean [--apply]
+    exclusive "WHO" -- COMMAND              Run a heavy test run when no other is running here (heavy_runs)
 
 Everyone:
     version   [--check]                           Kit version here, in the project, and the latest release
@@ -53,6 +54,7 @@ MIT licence. Copyright (c) 2026 Jorge del Prado. See docs/setup/HAAM-LICENSE.md.
 """
 
 import argparse
+import contextlib
 import datetime
 import getpass
 import hashlib
@@ -68,7 +70,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.9.1"
+VERSION = "1.10.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -114,6 +116,10 @@ DEFAULT_CONFIG = {
     "protected_paths": ["AGENTS.md", "CLAUDE.md", ".agents/**", ".claude/**", ".cursor/**", ".codex/**", ".grok/**",
                         ".gemini/**", ".github/**", "tools/haam/**", "haam.config.json", ".mcp.json", "Makefile",
                         "scripts/**", ".githooks/**", ".gitleaks.toml", ".gitleaksignore"],
+    # Test runs that use something the whole machine shares (a local database the tests clone, a simulator, a device),
+    # as regular expressions matched against the process list. `haam.py exclusive` waits until none of them is running
+    # (and takes the machine-wide lock), so two chats' runs never collide. Empty: nothing waits.
+    "heavy_runs": [],
     "_applied": {"team_key": PLACEHOLDER_KEY, "product_name": ""},
 }
 
@@ -1009,6 +1015,11 @@ def cmd_config(args):
             if x.strip() and tracked and not protected_matches([x.strip()], tracked):
                 rep.add("warn", f"Protected pattern '{x.strip()}' matches no file in the repository",
                         "check the spelling (e.g. src/auth/** for everything in src/auth)")
+    if args.clear_heavy_runs:
+        cfg["heavy_runs"] = []
+    for x in args.heavy_run or []:
+        if x.strip() and x.strip() not in (cfg.get("heavy_runs") or []):
+            cfg["heavy_runs"] = list(cfg.get("heavy_runs") or []) + [x.strip()]
     if args.flow is not None:
         if args.flow not in ("test-first", "checks-first"):
             sys.exit("--flow must be test-first (owner tests before the PR) or checks-first (PR and checks, then test)")
@@ -1039,9 +1050,10 @@ def cmd_config(args):
 
     missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
     for k in ("product_name", "tracker", "team_key", "github_repo", "product_owner_github",
-              "production_url", "agents", "deploy", "flow", "max_open_prs", "max_in_uat", "protected_paths") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
+              "production_url", "agents", "deploy", "flow", "max_open_prs", "max_in_uat", "protected_paths",
+              "heavy_runs") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
         v = cfg.get(k)
-        rep.add("ok" if v else "warn", f"{k}: {v if v else '(not set)'}")
+        rep.add("ok" if v else ("info" if k == "heavy_runs" else "warn"), f"{k}: {v if v else '(not set)'}")
     if missing:
         rep.action(WHO_AGENT, "Ask the human for the missing values, then re-run with flags",
                    "python3 tools/haam/haam.py config --product NAME --tracker github --team-key KEY --github-repo owner/name --owner USER")
@@ -3801,7 +3813,7 @@ def cmd_settings(args):
         rows.append({"group": group, "key": key, "value": val, "default": DEFAULT_CONFIG.get(key),
                      "options": [] if opts is int else list(opts), "what": what, "options_help": helps,
                      "changed_now": key in changed})
-    res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "github_variables": github_variables(cfg),
+    res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "heavy_runs": cfg.get("heavy_runs") or [], "github_variables": github_variables(cfg),
            "required_checks": required_checks(cfg), "applied": [], "changed": changed, "refused": refused}
     for r_ in refused:
         rep.add("fail", "Not changed: " + r_)
@@ -3879,6 +3891,7 @@ def cmd_settings(args):
             for o in r["options"]:
                 print(f"      {'→' if o == r['value'] else '·'} {o}: {r['options_help'].get(o, '')}")
     print(f"\n  protected_paths    {', '.join(cfg.get('protected_paths') or [])}")
+    print(f"  heavy_runs         {', '.join(cfg.get('heavy_runs') or []) or '(none: haam.py exclusive only takes turns)'}")
     if changed:
         print(f"\n{OK} Saved in {CONFIG_NAME}: " + ", ".join(f"{k}={v}" for k, v in changed.items()))
     for r_ in refused:
@@ -3919,20 +3932,27 @@ def cmd_local_ci(args):
     gh_api("POST", f"repos/{repo}/statuses/{sha}", {"state": "pending", "context": "ci-local",
                                                      "description": f"make check running on {gh_login() or 'the owner'}'s computer"})
     print(f"{INFO} make setup && make check on PR #{num} at {sha[:8]} (a clean copy in {wt.relative_to(main)})…", flush=True)
+    # With heavy_runs set, wait for this machine's other heavy runs (agents' make check) so they don't collide.
+    turn = (MachineTurn(f"local-ci for PR #{num}", cfg.get("heavy_runs"), args.timeout,
+                        say=lambda m: print(m, flush=True), cwd=root)
+            if cfg.get("heavy_runs") else contextlib.nullcontext())
     try:
         copy_includes(main, wt)       # local-only files the build needs (.worktreeinclude), as for an agent's worktree
         mk = (wt / "Makefile").read_text(errors="ignore") if (wt / "Makefile").exists() else ""
-        if re.search(r"^setup:", mk, re.M):
-            subprocess.run(["make", "setup"], cwd=wt, timeout=args.timeout * 60, check=True)
-        p = subprocess.run(["make", "check"], cwd=wt, timeout=args.timeout * 60)
-        ok = p.returncode == 0
-        desc = "make check passed on the owner's computer" if ok else "make check failed on the owner's computer"
-        if ok and re.search(r"^audit:", (wt / "Makefile").read_text(errors="ignore") if (wt / "Makefile").exists() else "", re.M):
-            a = subprocess.run(["make", "audit"], cwd=wt, timeout=args.timeout * 60)     # the dependencies check too
-            if a.returncode != 0:
-                ok, desc = False, "make audit found vulnerable dependencies (owner's computer)"
-            else:
-                desc = "make check and make audit passed on the owner's computer"
+        with turn:
+            if re.search(r"^setup:", mk, re.M):
+                subprocess.run(["make", "setup"], cwd=wt, timeout=args.timeout * 60, check=True)
+            p = subprocess.run(["make", "check"], cwd=wt, timeout=args.timeout * 60)
+            ok = p.returncode == 0
+            desc = "make check passed on the owner's computer" if ok else "make check failed on the owner's computer"
+            if ok and re.search(r"^audit:", mk, re.M):
+                a = subprocess.run(["make", "audit"], cwd=wt, timeout=args.timeout * 60)     # the dependencies check too
+                if a.returncode != 0:
+                    ok, desc = False, "make audit found vulnerable dependencies (owner's computer)"
+                else:
+                    desc = "make check and make audit passed on the owner's computer"
+    except TimeoutError:
+        ok, desc = False, f"this computer's other heavy runs didn't finish within {args.timeout} minutes"
     except subprocess.TimeoutExpired:
         ok, desc = False, f"make check didn't finish within {args.timeout} minutes"
     except subprocess.CalledProcessError:
@@ -4207,17 +4227,24 @@ def list_worktrees(root):
     return out
 
 
-def worktree_finished(main, w, base):
+def worktree_finished(main, w, base, in_use=None):
     """Decide whether a worktree can be removed without losing anything. Returns (ok, reason)."""
     p = Path(w["path"])
     if w["main"]:
         return False, "main folder"
+    if in_use and w["exists"]:
+        here = os.path.realpath(p)
+        if any(u == here or u.startswith(here + os.sep) for u in in_use):
+            return False, "a program is running in it (an agent chat or a terminal?)"
     if not w["haam_area"]:
         return False, f"outside {WORKTREE_DIR} (created by hand; remove it yourself)"
     if w["locked"]:
         return False, "locked (an agent is using it)"
     if not w["exists"]:
         return True, "folder already gone (prune)"
+    # Last use, read before `git status` (which can rewrite the index and so reset its time)
+    idx = Path(git_out(p, "rev-parse", "--absolute-git-dir") or p) / "index"
+    idle = (time.time() - (idx.stat().st_mtime if idx.exists() else 0)) / 3600
     changes = git_out(p, "status", "--porcelain")
     if changes:
         return False, f"{len(changes.splitlines())} unsaved change(s)"
@@ -4244,8 +4271,6 @@ def worktree_finished(main, w, base):
         return False, f"branch gone from origin but {unpushed} commit(s) aren't on GitHub; check before removing"
     if unpushed != "0":
         return False, f"{unpushed} commit(s) not pushed"
-    idx = Path(git_out(p, "rev-parse", "--absolute-git-dir") or p) / "index"
-    idle = (time.time() - (idx.stat().st_mtime if idx.exists() else 0)) / 3600
     if own == "0" and idle >= WORKTREE_IDLE_HOURS:
         return True, f"nothing of its own and unused for {int(idle)}h"
     return False, "in use or recently created"
@@ -4337,10 +4362,11 @@ def cmd_worktree(args):
         rep = Report()
         rep.section("Worktrees")
         remove = []
+        in_use = paths_in_use()
         for w in trees:
             if w["main"]:
                 continue
-            ok, why = worktree_finished(main, w, base)
+            ok, why = worktree_finished(main, w, base, in_use)
             rep.add("ok" if ok else "info", f"{'remove' if ok else 'keep'}: {w['path']}", why)
             if ok:
                 remove.append(w)
@@ -4358,6 +4384,256 @@ def cmd_worktree(args):
             run(["git", "worktree", "prune"], cwd=main)
         rep.print(args.json)
         return
+
+
+# ----------------------------------------------------------------------------- exclusive (one heavy run at a time)
+
+EXCLUSIVE_LOCK = "haam-exclusive.lock"
+EXCLUSIVE_SELF = re.compile(r"haam\.py['\"]?\s+exclusive(\s|$)")
+
+
+def process_table():
+    """[(pid, ppid, pgid, command)] for every process on this machine, or None where ps isn't available."""
+    try:
+        p = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,pgid=,command="], capture_output=True, text=True,
+                           timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    rows = []
+    for line in p.stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3] if len(parts) > 3 else ""))
+        except ValueError:
+            continue
+    return rows
+
+
+def compile_patterns(patterns):
+    out = []
+    for pat in patterns or []:
+        try:
+            out.append(re.compile(pat))
+        except re.error:
+            out.append(re.compile(re.escape(pat)))
+    return out
+
+
+def heavy_runs_now(patterns):
+    """Other processes matching the project's heavy_runs: never this process, its process group or its ancestors,
+    and never another `haam.py exclusive` (it waits for the lock, or holds it, so it isn't running anything free)."""
+    regs = compile_patterns(patterns)
+    rows = process_table()
+    if not regs or rows is None:
+        return []
+    parent = {pid: ppid for pid, ppid, _, _ in rows}
+    skip, x = set(), os.getpid()
+    while x and x not in skip:
+        skip.add(x)
+        x = parent.get(x)
+    try:
+        group = os.getpgid(0)
+    except (AttributeError, OSError):
+        group = None
+    return [(pid, cmd) for pid, _, pgid, cmd in rows
+            if pid not in skip and pgid != group and not EXCLUSIVE_SELF.search(cmd) and any(r.search(cmd) for r in regs)]
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def exclusive_lock_path(cwd=None):
+    """The lock lives in the repository's common git directory, so every worktree of this clone shares it."""
+    cwd = Path(cwd or Path.cwd())
+    common = git_out(cwd, "rev-parse", "--git-common-dir")
+    if not common:
+        sys.exit("haam.py exclusive runs inside the project's git repository (or one of its worktrees).")
+    return (cwd / common).resolve() / EXCLUSIVE_LOCK
+
+
+class MachineTurn:
+    """`with MachineTurn(who, patterns):` waits for the machine-wide lock, then for a quiet spell with no other heavy
+    run, and always releases the lock on the way out (success, failure, Ctrl-C, kill)."""
+
+    def __init__(self, who, patterns, timeout_min=60.0, quiet_s=10.0, say=print, cwd=None):
+        self.who, self.patterns, self.say = who, patterns, say
+        self.deadline = time.time() + timeout_min * 60
+        self.quiet = quiet_s
+        self.poll = min(2.0, max(0.2, quiet_s / 4)) if quiet_s else 0.5
+        self.lock = exclusive_lock_path(cwd)
+        self.held = False
+        self._old = {}
+
+    def _owner(self):
+        try:
+            return json.loads((self.lock / "owner").read_text())
+        except (OSError, ValueError):
+            return None
+
+    def _acquire(self):
+        told = False
+        while True:
+            try:
+                os.mkdir(self.lock)
+            except FileExistsError:
+                owner = self._owner()
+                stale = (owner and owner.get("host") == os.uname().nodename and not pid_alive(int(owner.get("pid") or 0))
+                         if hasattr(os, "uname") else False)
+                if owner is None:
+                    try:
+                        stale = time.time() - self.lock.stat().st_mtime > 30
+                    except OSError:
+                        continue
+                if stale:
+                    junk = self.lock.with_name(f"{EXCLUSIVE_LOCK}.stale-{os.getpid()}")
+                    try:
+                        os.rename(self.lock, junk)
+                        shutil.rmtree(junk, ignore_errors=True)
+                        self.say(f"{INFO} Took over a lock left behind by {(owner or {}).get('who', 'a run that ended')}.")
+                    except OSError:
+                        pass
+                    continue
+                if not told:
+                    self.say(f"{INFO} Waiting for {owner.get('who', '?')} (running since {owner.get('since', '?')}, "
+                             f"pid {owner.get('pid', '?')}) to finish…")
+                    told = True
+                if time.time() > self.deadline:
+                    return False
+                time.sleep(self.poll)
+                continue
+            (self.lock / "owner").write_text(json.dumps({
+                "who": self.who, "pid": os.getpid(), "host": os.uname().nodename if hasattr(os, "uname") else "",
+                "since": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
+            self.held = True
+            return True
+
+    def _wait_quiet(self):
+        if not self.patterns:
+            return True
+        quiet_since, told = None, False
+        while True:
+            busy = heavy_runs_now(self.patterns)
+            now = time.time()
+            if busy:
+                quiet_since = None
+                if not told:
+                    self.say(f"{INFO} Waiting for {len(busy)} other heavy run(s) that don't use the lock: "
+                             + "; ".join(f"pid {pid}: {cmd[:80]}" for pid, cmd in busy[:3]))
+                    told = True
+            elif quiet_since is None:
+                quiet_since = now
+            if quiet_since is not None and now - quiet_since >= self.quiet:
+                return True
+            if now > self.deadline:
+                return False
+            time.sleep(self.poll)
+
+    def release(self):
+        if self.held:
+            owner = self._owner()
+            if not owner or owner.get("pid") == os.getpid():
+                shutil.rmtree(self.lock, ignore_errors=True)
+            self.held = False
+
+    def _on_signal(self, signum, _frame):
+        raise SystemExit(128 + signum)
+
+    def __enter__(self):
+        for sig in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, sig):
+                self._old[sig] = signal.signal(getattr(signal, sig), self._on_signal)
+        try:
+            if not self._acquire() or not self._wait_quiet():
+                raise TimeoutError
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        for sig, old in self._old.items():
+            signal.signal(getattr(signal, sig), old)
+        self._old = {}
+        return False
+
+
+def cmd_exclusive(args):
+    """Run a heavy command (one that uses a machine-wide resource) when no other one is running on this machine."""
+    command = list(args.command or [])
+    if "--" in command:     # options given after <who> land here too: read them, then the command after --
+        k = command.index("--")
+        pre = argparse.ArgumentParser(prog="haam.py exclusive", add_help=False)
+        pre.add_argument("--timeout", type=float)
+        pre.add_argument("--quiet", type=float)
+        opts, extra = pre.parse_known_args(command[:k])
+        if extra:
+            sys.exit(f"Unknown option(s) before --: {' '.join(extra)}")
+        args.timeout = opts.timeout if opts.timeout is not None else args.timeout
+        args.quiet = opts.quiet if opts.quiet is not None else args.quiet
+        command = command[k + 1:]
+    if not command:
+        sys.exit('Give the command after --, e.g. haam.py exclusive "chat A, #12" -- make check')
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    patterns = cfg.get("heavy_runs") or []
+    child = None
+    try:
+        with MachineTurn(args.who, patterns, args.timeout, args.quiet, say=lambda m: print(m, file=sys.stderr, flush=True)):
+            print(f"{INFO} {args.who}: running {' '.join(command)}", file=sys.stderr, flush=True)
+            child = subprocess.Popen(command)
+            code = child.wait()
+            child = None
+            sys.exit(code)
+    except TimeoutError:
+        print(f"✘ Gave up after {args.timeout:g} minutes: the machine was still busy. Nothing was run.", file=sys.stderr)
+        sys.exit(124)
+    except FileNotFoundError:
+        sys.exit(f"Command not found: {command[0]}")
+    finally:
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+
+
+def paths_in_use():
+    """Folders that running programs have as their working directory (to keep a chat's worktree while it runs)."""
+    out = set()
+    proc = Path("/proc")
+    if proc.is_dir() and (proc / "self" / "cwd").exists():
+        for d in proc.iterdir():
+            if d.name.isdigit() and d.name != str(os.getpid()):
+                try:
+                    out.add(os.path.realpath(os.readlink(d / "cwd")))
+                except OSError:
+                    pass
+        return out
+    if have("lsof"):
+        try:
+            p = subprocess.run(["lsof", "-a", "-d", "cwd", "-F", "pn"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return out
+        pid = None
+        for line in p.stdout.splitlines():
+            if line.startswith("p"):
+                pid = line[1:]
+            elif line.startswith("n") and pid != str(os.getpid()):
+                out.add(os.path.realpath(line[1:]))
+    return out
 
 
 # ----------------------------------------------------------------------------- invite
@@ -4859,6 +5135,9 @@ def main():
     p.add_argument("--project-owner", help="GitHub user/org that owns the board (default: repo owner)")
     p.add_argument("--deploy", help="github (deploy.yml on merge, default) or manual (you deploy by hand)")
     p.add_argument("--flow", help="test-first (default: owner tests before the PR) or checks-first")
+    p.add_argument("--heavy-run", action="append", help="add a heavy run (regex on the process list) for haam.py "
+                   "exclusive, e.g. 'make (check|test-integration)' (repeatable)")
+    p.add_argument("--clear-heavy-runs", action="store_true", help="empty the heavy_runs list")
     p.add_argument("--protected", help="add protected path patterns, comma-separated (e.g. 'src/auth/**,db/migrations/**')")
     p.add_argument("--unprotected", help="remove protected path patterns, comma-separated")
     p.add_argument("--max-open-prs", type=int, help="agents hold new work at this many open PRs (default 10)")
@@ -5000,6 +5279,13 @@ def main():
     p.add_argument("--only", choices=["ai-review", "security-review"])
     p.add_argument("--timeout", type=float, default=15, help="minutes per review")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("exclusive", help="run a heavy command when no other one is running on this machine")
+    p.add_argument("who", help="who is asking, for the others' messages, e.g. 'chat A, #12'")
+    p.add_argument("--timeout", type=float, default=60, help="minutes to wait before giving up (exit 124)")
+    p.add_argument("--quiet", type=float, default=10, help="seconds with no other heavy run before starting")
+    p.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command, e.g. -- make check")
+    p.set_defaults(func=cmd_exclusive)
 
     p = common(sub.add_parser("worktree", help="one worktree per agent chat (parallel work on one machine)"))
     p.add_argument("action", choices=["status", "new", "prep", "list", "clean"])

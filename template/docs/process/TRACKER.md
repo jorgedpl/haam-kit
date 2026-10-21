@@ -22,7 +22,7 @@ Skills say "in the tracker"; this page says how to do each operation in each tra
 | Streams, `agent-ready`, `human-only`, `override-followup`, `epic`, `uat-failed`, `claimed`, `mode:prototype`, `mode:epic-build`, `spike-ready` | Issue labels | Issue labels |
 | Epic (groups the issues of one feature) | Issue labelled `epic`; its issues are GitHub **sub-issues** | Issue labelled `epic`; its issues are **sub-issues** (parent set) |
 | Who is working on it | Status In Progress (building) or label `claimed` (assessing, writing a spec, building a prototype), plus the claim comment. The assignee alone can't tell two chats of the same person apart | Same |
-| Status moves on PR open/merge | `tracker-sync.yml` workflow | Linear's GitHub integration |
+| Status moves on PR open/merge | `tracker-sync.yml` workflow: issues being delivered only (not epics, not docs-only PRs or spikes) | Linear's GitHub integration |
 
 ## Operations
 

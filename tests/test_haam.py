@@ -1367,6 +1367,34 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("sync-pr", "--pr", "5", "--event", "merged")
         self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "Deploying")
 
+    def test_pr_sync_leaves_epics_mentions_docs_and_spikes_alone(self):
+        self.setup_board()
+        mk = lambda *a: json.loads(self.tool("issue", "create", *a, "--json").stdout)["number"]
+        epic = mk("--stream", "feature", "--epic", "--title", "Reporting", "--status", "In Progress")
+        a = mk("--stream", "feature", "--title", "Slice A", "--status", "In Progress", "--parent", str(epic))
+        b = mk("--stream", "feature", "--title", "Slice B", "--status", "Backlog", "--parent", str(epic))
+        ctx = mk("--stream", "feature", "--title", "Related", "--status", "Ready")
+        st = self.gh_state()
+        code = [{"path": "src/report.py"}]
+        st["prs"] = {
+            "5": {"title": f"#{a}: Slice A (epic #{epic})", "body": f"Refs #{a}\nRefs #{epic}\nSee also refs #{ctx}",
+                  "headRefName": f"{a}-slice-a", "isDraft": False, "files": code},
+            "6": {"title": f"#{epic}: Brief", "body": f"Refs #{epic}\nRefs #{b}", "headRefName": f"docs/{epic}-epic",
+                  "isDraft": False, "files": [{"path": "docs/epics/GH-1-reporting.md"}]},
+            "7": {"title": f"#{b}: Prototype", "body": f"Refs #{b}", "headRefName": f"spike/{b}-try", "isDraft": False,
+                  "files": code}}
+        self.state.write_text(json.dumps(st))
+        status = lambda n: json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"]
+        out = self.tool("sync-pr", "--pr", "5", "--event", "opened").stdout
+        self.assertEqual((status(a), status(epic), status(ctx)), ("In Review", "In Progress", "Ready"))
+        self.assertIn("an epic", out)
+        self.tool("sync-pr", "--pr", "5", "--event", "merged")
+        self.assertEqual((status(a), status(epic), status(ctx)), ("Deploying", "In Progress", "Ready"))
+        for pr_ in ("6", "7"):                                              # docs-only, and a spike
+            for ev in ("opened", "merged"):
+                self.tool("sync-pr", "--pr", pr_, "--event", ev)
+        self.assertEqual((status(epic), status(b)), ("In Progress", "Backlog"))
+
     def test_issue_command_refuses_on_linear_projects(self):
         self.tool("config", "--tracker", "linear")
         p = self.tool("issue", "list", check=False)

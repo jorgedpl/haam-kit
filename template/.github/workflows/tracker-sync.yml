@@ -1,8 +1,10 @@
 # Keeps the GitHub Projects board in step with pull requests (only when
 # haam.config.json says "tracker": "github"; does nothing for Linear projects,
 # where Linear's own GitHub integration moves issues).
-#   PR opened / ready for review → linked issues move to "In Review"
-#   PR merged                    → linked issues move to "Deploying"
+#   PR opened / ready for review → linked issues that are In Progress move to "In Review"
+#   PR merged                    → linked issues that are In Progress, In Review or UAT move to "Deploying"
+# Never moved: epics (their status follows their sub-issues), issues a PR only mentions (in Backlog, Ready…),
+# and anything linked from a docs-only PR (an epic brief, a split spec) or a spike branch.
 # New issues are put on the board by the board's own "Auto-add to project" workflow (free, no
 # Actions minutes) and by `haam.py issue create`, not by this workflow.
 # A PR links an issue with "Refs #123" in its description (or a branch named 123-...).

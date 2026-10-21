@@ -72,7 +72,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.15.0"
+VERSION = "1.15.1"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -2616,6 +2616,12 @@ def issue_action(args, cfg, board):
     raise RuntimeError(f"Unknown action '{a}'")
 
 
+# What a PR's open and merge may move: only work that's being delivered. A mere mention ("Refs #5" for context) of
+# something in Backlog, Ready or Decision, an epic (its status follows its slices: /build, /release), a docs-only PR
+# (an epic brief, a split spec) and a spike never move the board.
+SYNC_FROM = {"opened": {"In Progress"}, "merged": {"In Progress", "In Review", "UAT"}}
+
+
 def cmd_sync_pr(args):
     """Used by the tracker-sync workflow: move linked issues when a PR opens or merges."""
     root = find_repo_root(Path.cwd())
@@ -2624,10 +2630,17 @@ def cmd_sync_pr(args):
         print("tracker is not github; nothing to do")
         return
     code, out, err = run(["gh", "pr", "view", str(args.pr), "-R", cfg["github_repo"], "--json",
-                          "title,body,headRefName,isDraft"])
+                          "title,body,headRefName,isDraft,files"])
     if code != 0:
         sys.exit(f"Can't read PR #{args.pr}: {err}")
     pr = json.loads(out)
+    if (pr.get("headRefName") or "").lower().startswith("spike/"):
+        print(f"PR #{args.pr} is a spike (a prototype): it never merges, so the board doesn't move")
+        return
+    if docs_only(pr.get("files")):
+        print(f"PR #{args.pr} changes only docs (a brief, a split spec, an assessment): the issues it mentions "
+              "stay where they are")
+        return
     nums = linked_issue_numbers(pr)
     if not nums:
         print(f"PR #{args.pr} doesn't reference an issue (use 'Refs #123' in the description)")
@@ -2635,7 +2648,6 @@ def cmd_sync_pr(args):
     board = GHProject(cfg)
     board.load()
     target = {"opened": "In Review", "merged": "Deploying"}[args.event]
-    keep = {"opened": {"UAT", "Deploying", "Done"}, "merged": {"Done"}}[args.event]
     for n in nums:
         try:
             iss = board.issue(n)
@@ -2645,8 +2657,14 @@ def cmd_sync_pr(args):
         if args.event == "opened" and pr.get("isDraft"):
             print(f"#{n}: PR is a draft; leaving status {iss['status']}")
             continue
-        if iss["status"] in keep:
-            print(f"#{n}: already {iss['status']}; unchanged")
+        if EPIC_LABEL in iss["labels"]:
+            print(f"#{n}: an epic; its status follows its sub-issues, unchanged")
+            continue
+        if iss["status"] == target:
+            continue
+        if iss["status"] not in SYNC_FROM[args.event]:
+            print(f"#{n}: {iss['status'] or 'no status'}; unchanged (only work being delivered moves on "
+                  f"{args.event})")
             continue
         board.set_option(iss, "Status", target)
         print(f"#{n}: {iss['status'] or '-'} → {target}")

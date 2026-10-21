@@ -6,6 +6,18 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.15.1] - 2026-10-22
+
+### Fixed
+- **The board no longer moves issues a PR only mentions.** `sync-pr`, run by the tracker-sync workflow, moved every issue named in a PR (`Refs #N`, the title, the branch) to In Review when the PR opened, and to Deploying when it merged. Now:
+  - **epics are left alone**, because their status follows their sub-issues;
+  - **a docs-only PR moves nothing**, so an epic brief or a split spec no longer sends the epic and its Backlog slices to Deploying;
+  - **neither does a spike branch**;
+  - **only work being delivered moves:** In Progress to In Review when the PR opens, and In Progress, In Review or UAT to Deploying when it merges. An issue mentioned for context, in Backlog or Ready say, stays where it is.
+
+### Migration
+- `haam.py update` (the fix is in `tools/haam/haam.py`; the workflow's comments changed too).
+
 ## [1.15.0] - 2026-10-21
 
 Room for agents to build big pieces fast, with a guard on what reaches users.

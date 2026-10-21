@@ -161,9 +161,9 @@ Agents take **bugs before features, older before newer, smaller before larger**.
 |---|---|---|
 | **Agent queue** (Ready) | 3–10 items | Empty: agents sit idle, so spec more. Over 10: priorities go stale, so re-rank |
 | **Decision** | 5 or fewer | Book 20 minutes and decide |
-| **UAT** | 3 or fewer | Stop starting agents and test. Agents produce faster than you can test |
+| **UAT** | `max_in_uat` (default 10) | Agents hold new builds at the limit (`haam.py capacity`): it's your testing time, the main limit in test-first. Test with `/test all`; items the agents fully verified pass with one reply (`pass all verified`). For a weekend of agent work, open a batch window in `/haam-settings`: a raise that ends by itself |
 | **Agents running** | No more than you can test tomorrow | Fewer agents, smaller items |
-| **Open PRs** | `max_open_prs` in `haam.config.json` (default 10) | Agents hold new builds automatically (`haam.py capacity`): every open PR costs CI minutes on each push. Specs and assessments carry on. Test and ship what's open |
+| **Ready PRs** | `max_open_prs` in `haam.config.json` (default 10) | Agents hold new builds at the limit: every ready PR costs CI minutes on each push. Drafts and docs-only PRs don't count. Specs and assessments carry on. Test and ship what's open |
 
 ### 5.6 Changing priorities
 Change them whenever the facts change, but say why in a comment. Agents and colleagues read the history. Never quietly demote an Urgent item: comment, and tell whoever reported it.

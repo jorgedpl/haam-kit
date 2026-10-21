@@ -6,6 +6,20 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-21
+
+Capacity that fits test-first and batch testing (issue #3).
+
+### Changed
+- **`capacity` counts only what costs CI or waits on you.** `max_open_prs` counts ready PRs. Drafts and docs-only PRs (epic briefs, split specs, assessments, ADRs) are listed apart and never hold work. In one project, 15 of 16 open PRs were docs and drafts, which held every agent while only one PR needed the owner.
+- **The UAT queue is the main limit in test-first**, because it is how much you can test. `capacity` shows it first, along with the breakdown of ready, draft and docs-only PRs.
+- **The limits come from the owner's copy of `haam.config.json` in the main folder**, so a change counts at once for every agent chat on that computer, whatever worktree it's in.
+
+### Added
+- **Batch window:** a temporary raise of the limits that ends by itself after its last day. Use `config --max-in-uat 30 --until 2026-10-27 --human`, or `settings --set max_in_uat=30 --until … --human` in `/haam-settings`. `config --end-batch-window --human` ends it early. A weekend of agent work no longer leaves the guard off.
+- **`haam.py overlap --files <paths>`** lists the branches waiting for your test that change the same files. `/next` uses it to prefer work that won't collide with them. When every candidate overlaps, it takes the top one and marks it `test and ship after <ID>`, and `/test all` keeps that order. Overlapping branches waiting together end in merge conflicts after the first one merges.
+- **"pass all verified":** a UAT plan's *Agent pre-check* can say *Fully verified by the agent: yes*, with evidence for every acceptance criterion. This is only for changes that need no one's eyes, hands or judgement: tests only, text that matches the spec word for word, logic fully covered by tests. It never applies to protected areas or rework. `/test all` lists those items first and passes them on one reply, so the sitting goes to device, visual and judgement checks. Each pass is recorded on the exact commit the agent verified.
+
 ## [1.12.0] - 2026-10-21
 
 ### Added

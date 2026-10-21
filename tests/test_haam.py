@@ -1072,6 +1072,46 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("config", "--max-open-prs", "20", "--human")
         self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
 
+    def test_capacity_counts_ready_prs_and_the_uat_queue_with_a_batch_window(self):
+        self.setup_board()
+        st = self.gh_state()
+        pr = lambda k, **kw: {"title": f"PR {k}", "headRefName": f"b{k}", "state": "OPEN", "labels": [], "url": "u",
+                              "isDraft": False, "files": [{"path": f"src/f{k}.py"}], **kw}
+        st["prs"] = {"1": pr(1), "2": pr(2, isDraft=True),
+                     "3": pr(3, files=[{"path": "docs/specs/GH-3-x.md"}, {"path": "docs/epics/GH-3.md"}]),
+                     "4": pr(4, isDraft=True, files=[{"path": "README.md"}])}
+        self.state.write_text(json.dumps(st))
+        self.tool("config", "--max-open-prs", "2", "--max-in-uat", "2", "--human")
+        res = json.loads(self.tool("capacity", "--json").stdout)
+        self.assertEqual(res["open_prs"], 1)                                # only the ready code PR counts
+        self.assertEqual([p["number"] for p in res["draft_prs"]], [2])
+        self.assertEqual(sorted(p["number"] for p in res["docs_prs"]), [3, 4])
+        self.assertFalse(res["hold"])
+        for t in ("A", "B"):
+            self.tool("issue", "create", "--stream", "bug", "--title", t, "--status", "UAT")
+        res = json.loads(self.tool("capacity", "--json").stdout)
+        self.assertTrue(res["hold"])
+        self.assertIn("2 changes waiting for the owner to test", res["reasons"][0])
+        # A batch window raises the UAT limit until its last day, then the normal limit is back by itself
+        future = str(__import__("datetime").date.today() + __import__("datetime").timedelta(days=3))
+        self.assertNotEqual(self.tool("config", "--max-in-uat", "30", "--until", future, check=False).returncode, 0)
+        self.tool("config", "--max-in-uat", "30", "--until", future, "--human")
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual((cfg["max_in_uat"], cfg["batch_window"]), (2, {"until": future, "max_in_uat": 30}))
+        res = json.loads(self.tool("capacity", "--json").stdout)
+        self.assertEqual(res["max_in_uat"], 30)
+        self.assertFalse(res["hold"])
+        self.assertIn(f"Batch window until {future}", self.tool("capacity").stdout)
+        cfg["batch_window"]["until"] = "2020-01-01"
+        (self.proj / "haam.config.json").write_text(json.dumps(cfg))
+        self.assertTrue(json.loads(self.tool("capacity", "--json").stdout)["hold"])
+        self.assertNotEqual(self.tool("config", "--max-in-uat", "30", "--until", "2020-01-01", "--human",
+                                      check=False).returncode, 0)        # not in the past
+        self.tool("settings", "--set", "max_in_uat=12", "--until", future, "--human")
+        self.assertEqual(json.loads(self.tool("capacity", "--json").stdout)["max_in_uat"], 12)
+        self.tool("config", "--end-batch-window", "--human")
+        self.assertNotIn("batch_window", json.loads((self.proj / "haam.config.json").read_text()))
+
     def test_agents_cant_mark_issues_themselves(self):
         self.setup_board()
         for lab in ("uat:skip", "agent-ready"):
@@ -1642,6 +1682,38 @@ class TestWorktrees(ToolTestCase):
         wt = Path(json.loads(self.wt("new", "w2", "--json").stdout)["path"])
         p = self.run_tool("config", "--max-in-uat", "50", "--human", tool=tool, cwd=wt, check=False)
         self.assertNotEqual(p.returncode, 0)
+
+    def test_overlap_finds_waiting_branches_with_the_same_files(self):
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        state = self.tmp / "gh-state.json"
+        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state)}
+        tool = lambda *a, **kw: self.run_tool(*a, tool=self.installed_tool(), env=env, **kw)
+        tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM")
+        tool("github-project", "--apply")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "config")
+        git(self.proj, "push", "-q", "origin", "main")
+        for title, path in (("Login fix", "src/auth/login.py"), ("Report fix", "src/reports/pdf.py")):
+            n = json.loads(tool("issue", "create", "--stream", "bug", "--title", title, "--status", "UAT",
+                                "--json").stdout)["number"]
+            git(self.proj, "switch", "-q", "-c", f"{n}-fix", "main")
+            (self.proj / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.proj / path).write_text("x\n")
+            git(self.proj, "add", path)
+            git(self.proj, "commit", "-qm", f"#{n}: fix")
+            git(self.proj, "push", "-q", "-u", "origin", f"{n}-fix")
+            git(self.proj, "switch", "-q", "main")
+        res = json.loads(tool("overlap", "--files", "src/auth/,docs/x.md", "--json").stdout)
+        self.assertEqual(len(res["waiting"]), 2)
+        self.assertEqual(len(res["overlapping"]), 1)
+        self.assertTrue(res["overlapping"][0].endswith("-fix"))
+        hit = next(w for w in res["waiting"] if w["overlap"])
+        self.assertEqual(hit["overlap"], ["src/auth/login.py"])
+        self.assertIn("No overlap", tool("overlap", "--files", "src/billing/**").stdout)
+        res = json.loads(tool("overlap", "--files", "src/reports/pdf.py", "--branch", res["overlapping"][0],
+                              "--json").stdout)
+        self.assertEqual(res["overlapping"], [])                             # only the branch given is compared
 
     def test_ship_refuses_in_an_agents_worktree(self):
         wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])

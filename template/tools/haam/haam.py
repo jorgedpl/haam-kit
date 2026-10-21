@@ -33,6 +33,8 @@ CI cost:
 Parallel chats (one worktree per agent chat):
     worktree status|new|prep|list|clean [--apply]
     exclusive "WHO" -- COMMAND              Run a heavy test run when no other is running here (heavy_runs)
+    capacity [--list]                       Room for new builds? ready PRs and the UAT queue vs the limits
+    overlap --files a,b/                    Branches waiting for your test that change the same files
 
 Everyone:
     version   [--check]                           Kit version here, in the project, and the latest release
@@ -70,7 +72,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -98,8 +100,10 @@ DEFAULT_CONFIG = {
     "production_url": "",
     "agents": ["claude", "cursor", "codex", "grok"],
     "deploy": "github",          # github: deploy.yml runs on merge; manual: the owner deploys by hand
-    "max_open_prs": 10,          # agents hold new work when this many PRs are open (CI minutes and your review time)
-    "max_in_uat": 10,            # ...or when this many changes are waiting for the owner to test
+    "max_open_prs": 10,          # agents hold new builds at this many ready PRs (drafts and docs-only PRs don't count)
+    "max_in_uat": 10,            # ...or at this many changes waiting for the owner to test (the main limit, test first)
+    # A temporary raise, e.g. for a weekend of agent work: {"until": "YYYY-MM-DD", "max_in_uat": 30}. After that day
+    # the normal limits apply again by themselves (config --max-in-uat 30 --until 2026-10-27 --human).
     "review": "github",          # github | local | protected-only | off  (see SETTINGS below and `haam.py settings`)
     "flow": "test-first",        # test-first: the owner tests locally before any PR exists; checks-first: PR + checks, then test
     "grouping": "per-issue",     # per-issue | per-epic | release
@@ -191,7 +195,7 @@ SETTINGS = [
                 "merged before it). (Recommended)",
         "automatic": "Deploys start as soon as a PR merges: fastest, but a merged change goes live without a last "
                      "look. Best with uat: always."}),
-    ("Limits", "max_open_prs", int, "Agents hold new work at this many open PRs.", {}),
+    ("Limits", "max_open_prs", int, "Agents hold new builds at this many ready PRs (CI cost).", {}),
     ("Limits", "max_in_uat", int, "...or at this many changes waiting for your test.", {}),
     ("Limits", "max_review_rounds", int, "Failing AI review rounds before an agent stops and hands over to you.", {}),
     ("Limits", "max_pr_lines", int, "Target size of one PR, in changed lines (bigger PRs are split).", {}),
@@ -959,7 +963,8 @@ def cmd_config(args):
     rep.section("Project configuration")
     owner_flags = [f for f, v in (("--flow", args.flow), ("--deploy", args.deploy), ("--protected", args.protected),
                                   ("--unprotected", args.unprotected), ("--max-open-prs", args.max_open_prs),
-                                  ("--max-in-uat", args.max_in_uat)) if v is not None]
+                                  ("--max-in-uat", args.max_in_uat), ("--until", args.until),
+                                  ("--end-batch-window", args.end_batch_window or None)) if v is not None]
     if owner_flags and (root / CONFIG_NAME).exists() and not args.human:
         sys.exit(f"{', '.join(owner_flags)}: these are the owner's settings. Change them inside /haam-settings (or "
                  "/haam-setup) after the human chose, with --human.")
@@ -1028,9 +1033,13 @@ def cmd_config(args):
         if args.deploy not in ("github", "manual"):
             sys.exit("--deploy must be github (deploy.yml runs on merge) or manual (you deploy by hand)")
         cfg["deploy"] = args.deploy
-    for key, val in (("max_open_prs", args.max_open_prs), ("max_in_uat", args.max_in_uat)):
-        if val is not None:
-            cfg[key] = int(val)
+    limits = {k: int(v) for k, v in (("max_open_prs", args.max_open_prs), ("max_in_uat", args.max_in_uat)) if v is not None}
+    if args.until:
+        set_batch_window(cfg, args.until, limits)           # a temporary raise; the normal limits stay as they are
+    else:
+        cfg.update(limits)
+    if args.end_batch_window:
+        cfg.pop("batch_window", None)
 
     cfg["team_key"] = (cfg.get("team_key") or PLACEHOLDER_KEY).upper()
     if not re.fullmatch(r"[A-Z][A-Z0-9]{1,6}", cfg["team_key"]):
@@ -3704,19 +3713,66 @@ def cmd_ship(args):
     finish("live", 0, f"{show_ref(ref)} is live.", run=run_info["url"] if run_info else None)
 
 
+def limits_config(root):
+    """The limits come from the owner's copy of haam.config.json in the main folder, so a change (a batch window,
+    say) counts at once for every agent chat on this computer, in whatever worktree."""
+    _, main, _ = git_paths(root)
+    try:
+        return load_config(main)
+    except SystemExit:
+        return load_config(root)
+
+
+def effective_limits(cfg, today=None):
+    """(max_open_prs, max_in_uat, window): the batch window's raise until its last day, then the normal limits."""
+    max_prs = int(cfg.get("max_open_prs") or DEFAULT_CONFIG["max_open_prs"])
+    max_uat = int(cfg.get("max_in_uat") or DEFAULT_CONFIG["max_in_uat"])
+    w = cfg.get("batch_window") or {}
+    try:
+        until = datetime.date.fromisoformat(str(w.get("until")))
+    except ValueError:
+        return max_prs, max_uat, None
+    if (today or datetime.date.today()) > until:
+        return max_prs, max_uat, None
+    return int(w.get("max_open_prs") or max_prs), int(w.get("max_in_uat") or max_uat), w
+
+
+def set_batch_window(cfg, until, limits):
+    """Store a temporary raise of the limits; refuses a day in the past."""
+    try:
+        day = datetime.date.fromisoformat(until)
+    except ValueError:
+        sys.exit(f"--until takes the last day as YYYY-MM-DD, not '{until}'")
+    if day < datetime.date.today():
+        sys.exit(f"{until} is in the past")
+    if not limits:
+        sys.exit("--until goes with the limits to raise, e.g. --max-in-uat 30 --until 2026-10-27")
+    cfg["batch_window"] = {"until": day.isoformat(), **limits}
+
+
+def docs_only(files):
+    """Only docs/** and *.md, as the release gate counts it (an empty or 100-file list doesn't count)."""
+    paths = [f.get("path") or "" for f in files or []]
+    return bool(paths) and len(paths) < 100 and all(x.startswith("docs/") or x.endswith(".md") for x in paths)
+
+
 def cmd_capacity(args):
     """Whether agents should start new work: open PRs and changes waiting in UAT against the limits in haam.config.json."""
     root = find_repo_root(Path.cwd())
-    cfg = load_config(root)
-    max_prs = int(cfg.get("max_open_prs") or DEFAULT_CONFIG["max_open_prs"])
-    max_uat = int(cfg.get("max_in_uat") or DEFAULT_CONFIG["max_in_uat"])
+    cfg = limits_config(root)
+    max_prs, max_uat, window = effective_limits(cfg)
     code, out, err = run(["gh", "pr", "list", "-R", cfg.get("github_repo") or "", "--state", "open", "--limit", "200",
-                          "--json", "number,title,isDraft,author"])
+                          "--json", "number,title,isDraft,author,files"])
     if code != 0:
         sys.exit(f"Couldn't count open pull requests: {(err or out)[:200]}")
     # Bots' PRs (Dependabot…) cost CI too, but they shouldn't stop the agents' own work.
-    counted = [p for p in json.loads(out or "[]")
-               if not ((p.get("author") or {}).get("login", "").endswith("[bot]") or (p.get("author") or {}).get("is_bot"))]
+    mine = [p for p in json.loads(out or "[]")
+            if not ((p.get("author") or {}).get("login", "").endswith("[bot]") or (p.get("author") or {}).get("is_bot"))]
+    # Only ready PRs cost CI on every push and wait on a human. Drafts run nothing; docs-only PRs (epic briefs, split
+    # specs, ADRs, assessments) run nothing and need no test. They're listed, but never hold work.
+    docs_prs = [p for p in mine if docs_only(p.get("files"))]
+    drafts = [p for p in mine if p.get("isDraft") and p not in docs_prs]
+    counted = [p for p in mine if p not in docs_prs and p not in drafts]
     open_prs = len(counted)
     uat_items = []
     in_uat = args.in_uat     # Linear: the agent counts the UAT items with the Linear connection and passes them
@@ -3730,36 +3786,49 @@ def cmd_capacity(args):
             in_uat = None
     reasons = []
     if open_prs >= max_prs:
-        reasons.append(f"{open_prs} open PRs (limit {max_prs})")
+        reasons.append(f"{open_prs} ready PRs (limit {max_prs})")
     if in_uat is not None and in_uat >= max_uat:
         reasons.append(f"{in_uat} changes waiting for the owner to test (limit {max_uat})")
     if in_uat is None:
         reasons_note = "UAT queue not counted (Linear: count the UAT items and pass --in-uat N)"
     else:
         reasons_note = ""
+    brief = lambda ps: [{"number": p["number"], "title": p.get("title", ""), "draft": bool(p.get("isDraft"))} for p in ps]
     res = {"hold": bool(reasons), "open_prs": open_prs, "max_open_prs": max_prs, "in_uat": in_uat,
-           "max_in_uat": max_uat, "reasons": reasons, "note": reasons_note,
-           "counted_prs": [{"number": p["number"], "title": p.get("title", ""), "draft": bool(p.get("isDraft"))}
-                           for p in counted],
+           "max_in_uat": max_uat, "reasons": reasons, "note": reasons_note, "batch_window": window,
+           "normal_limits": {"max_open_prs": int(cfg.get("max_open_prs") or DEFAULT_CONFIG["max_open_prs"]),
+                             "max_in_uat": int(cfg.get("max_in_uat") or DEFAULT_CONFIG["max_in_uat"])},
+           "counted_prs": brief(counted), "draft_prs": brief(drafts), "docs_prs": brief(docs_prs),
            "uat_issues": [{"number": i["number"], "title": i.get("title", "")} for i in uat_items]}
     if args.json:
         print(json.dumps(res, indent=2))
         return
+    queue = f"{in_uat}/{max_uat} waiting for your test" if in_uat is not None else "UAT queue not counted"
+    prs = f"{open_prs}/{max_prs} ready PRs" + (f" (+{len(drafts)} draft, {len(docs_prs)} docs-only: not counted)"
+                                               if drafts or docs_prs else "")
     if reasons:
-        print(f"{WARN} Hold new work: " + "; ".join(reasons) + ". Rework (uat-failed), finishing open PRs, specs and assessments are still fine.")
+        print(f"{WARN} Hold new builds: " + "; ".join(reasons) + ". Rework (uat-failed), finishing open PRs, specs and "
+              "assessments are still fine.")
     else:
-        print(f"{OK} Room for new work: {open_prs}/{max_prs} open PRs" + (f", {in_uat}/{max_uat} in UAT" if in_uat is not None else ""))
+        print(f"{OK} Room for new work: {queue}; {prs}")
+    if window:
+        print(f"{INFO} Batch window until {window['until']} (then back to {res['normal_limits']['max_in_uat']} in UAT, "
+              f"{res['normal_limits']['max_open_prs']} ready PRs)")
     if reasons_note:
         print(f"{INFO} {reasons_note}")
     if args.list or reasons:
         for p in counted:
-            print(f"   PR #{p['number']}{' (draft)' if p.get('isDraft') else ''}: {p.get('title', '')}")
+            print(f"   PR #{p['number']}: {p.get('title', '')}")
+        for p in drafts:
+            print(f"   PR #{p['number']} (draft, not counted): {p.get('title', '')}")
+        for p in docs_prs:
+            print(f"   PR #{p['number']} (docs only, not counted): {p.get('title', '')}")
         for i in uat_items:
             print(f"   In UAT: #{i['number']} {i.get('title', '')}")
         if reasons:
-            print("   To make room: test and ship what's waiting (/test); close PRs that are stale, red or untested "
-                  "(test-first works from the branch, so closing loses nothing); or raise the limits: "
-                  "haam.py config --max-open-prs N --max-in-uat N")
+            print("   To make room: test and ship what's waiting (/test all); close ready PRs that are stale or red "
+                  "(test-first works from the branch, so closing loses nothing); or open a batch window in "
+                  "/haam-settings (e.g. config --max-in-uat 30 --until <last day> --human)")
 
 
 # ----------------------------------------------------------------------------- CI cost: usage, settings, local review
@@ -3935,6 +4004,10 @@ def cmd_settings(args):
             changed.pop("runner")
             refused.append("runner=self-hosted: own runners only on private repositories (couldn't confirm this one "
                            "is private); on a public repository anyone's pull request could run code on your machine")
+    if getattr(args, "until", None):
+        lim = {k: changed.pop(k) for k in ("max_open_prs", "max_in_uat") if k in changed}
+        set_batch_window(cfg, args.until, lim)
+        changed["batch_window"] = cfg["batch_window"]
     if (changed.get("grouping") or setting_value(cfg, "grouping")) == "release" and \
             (changed.get("flow") or setting_value(cfg, "flow")) == "checks-first":
         sys.exit("grouping release needs flow test-first: in checks-first every change already has its own PR.")
@@ -3942,12 +4015,14 @@ def cmd_settings(args):
         cfg.update(changed)
         save_config(root, cfg)
     rows = []
+    _, _, window = effective_limits(cfg)
     for group, key, opts, what, helps in SETTINGS:
         val = setting_value(cfg, key)
         rows.append({"group": group, "key": key, "value": val, "default": DEFAULT_CONFIG.get(key),
                      "options": [] if opts is int else list(opts), "what": what, "options_help": helps,
                      "changed_now": key in changed})
-    res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "heavy_runs": cfg.get("heavy_runs") or [], "github_variables": github_variables(cfg),
+    res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "heavy_runs": cfg.get("heavy_runs") or [],
+           "batch_window": window, "github_variables": github_variables(cfg),
            "required_checks": required_checks(cfg), "applied": [], "changed": changed, "refused": refused}
     for r_ in refused:
         rep.add("fail", "Not changed: " + r_)
@@ -4026,6 +4101,9 @@ def cmd_settings(args):
                 print(f"      {'→' if o == r['value'] else '·'} {o}: {r['options_help'].get(o, '')}")
     print(f"\n  protected_paths    {', '.join(cfg.get('protected_paths') or [])}")
     print(f"  heavy_runs         {', '.join(cfg.get('heavy_runs') or []) or '(none: haam.py exclusive only takes turns)'}")
+    if window:
+        print(f"  batch window       until {window['until']}: " + ", ".join(f"{k} {v}" for k, v in window.items()
+                                                                           if k != "until"))
     if changed:
         print(f"\n{OK} Saved in {CONFIG_NAME}: " + ", ".join(f"{k}={v}" for k, v in changed.items()))
     for r_ in refused:
@@ -4994,6 +5072,65 @@ def cmd_protected(args):
     sys.exit(1 if hits and args.check else 0)
 
 
+def cmd_overlap(args):
+    """Which branches waiting for the owner's test change the same files as some new work, so /next can pick work that
+    won't collide with them (or batch it with them). Overlapping branches waiting together end in merge conflicts after
+    the first one merges, and the conflicted one needs a fresh test."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+    base = default_base(root)
+    waiting = []
+    if args.branch:
+        waiting = [{"issue": None, "branch": b} for b in args.branch]
+    elif cfg.get("tracker") == "github":
+        try:
+            board = GHProject(cfg)
+            board.load()
+            items = [i for i in board.items() if i["status"] == "UAT" and i["state"] == "OPEN"]
+        except RuntimeError as e:
+            sys.exit(f"Couldn't read the board: {e}")
+        seen = set()
+        for i in items:
+            try:
+                branch = find_branch(root, cfg, issue_ref(cfg, str(i["number"])))[0]
+            except RuntimeError:
+                branch = None
+            if branch and branch not in seen:      # a batch's issues share one branch
+                seen.add(branch)
+                waiting.append({"issue": f"#{i['number']}", "title": i.get("title", ""), "branch": branch})
+    else:
+        sys.exit("Linear: give the branches of the issues in UAT with --branch (repeatable), from their UAT comments.")
+    want = [x.strip() for x in (args.files or "").split(",") if x.strip()]
+    for w in waiting:
+        ref = w["branch"] if not git_out(root, "rev-parse", "--verify", "--quiet", f"origin/{w['branch']}") \
+            else f"origin/{w['branch']}"
+        code, out, _ = run(["git", "diff", "--name-only", "--no-renames", f"{base}...{ref}"], cwd=root)
+        w["files"] = out.splitlines() if code == 0 else []
+        w["overlap"] = protected_matches([x if any(c in x for c in "*?") or not x.endswith("/") else x + "**"
+                                          for x in want], w["files"]) if want else []
+    hits = [w for w in waiting if w["overlap"]]
+    res = {"base": base, "waiting": waiting, "files": want, "overlapping": [w["branch"] for w in hits]}
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    if not waiting:
+        print(f"{OK} Nothing is waiting for the owner's test.")
+        return
+    if not want:
+        for w in waiting:
+            print(f"  {w.get('issue') or ''} {w['branch']}: {len(w['files'])} file(s)")
+            for f in w["files"][:20]:
+                print(f"      {f}")
+        return
+    if hits:
+        for w in hits:
+            print(f"{WARN} {w.get('issue') or w['branch']} ({w['branch']}) waits with the same files: "
+                  + ", ".join(w["overlap"][:8]) + (" …" if len(w["overlap"]) > 8 else ""))
+    else:
+        print(f"{OK} No overlap with the {len(waiting)} branch(es) waiting for the owner's test.")
+
+
 def cmd_hooks(args):
     root = find_repo_root(Path.cwd())
     rep = Report()
@@ -5274,8 +5411,12 @@ def main():
     p.add_argument("--clear-heavy-runs", action="store_true", help="empty the heavy_runs list")
     p.add_argument("--protected", help="add protected path patterns, comma-separated (e.g. 'src/auth/**,db/migrations/**')")
     p.add_argument("--unprotected", help="remove protected path patterns, comma-separated")
-    p.add_argument("--max-open-prs", type=int, help="agents hold new work at this many open PRs (default 10)")
+    p.add_argument("--max-open-prs", type=int, help="agents hold new builds at this many ready PRs (default 10; drafts "
+                   "and docs-only PRs don't count)")
     p.add_argument("--max-in-uat", type=int, help="...or at this many changes waiting for you to test (default 10)")
+    p.add_argument("--until", help="with --max-in-uat / --max-open-prs: a batch window, a raise that ends by itself "
+                   "after this day (YYYY-MM-DD)")
+    p.add_argument("--end-batch-window", action="store_true", help="end the batch window now")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_config)
 
@@ -5380,6 +5521,12 @@ def main():
     p.add_argument("--apply", action="store_true")
     p.set_defaults(func=cmd_hooks)
 
+    p = common(sub.add_parser("overlap", help="branches waiting for the owner's test that change the same files"))
+    p.add_argument("--files", help="the new work's likely files or folders, comma-separated (from its spec); "
+                   "folders end in / and globs work (src/auth/**)")
+    p.add_argument("--branch", action="append", help="a waiting branch to compare (Linear; default: the board's UAT items)")
+    p.set_defaults(func=cmd_overlap)
+
     p = common(sub.add_parser("capacity", help="should agents start new work? open PRs and UAT queue vs limits"))
     p.add_argument("--in-uat", type=int, help="Linear: how many issues are in UAT (counted with the Linear connection)")
     p.add_argument("--list", action="store_true", help="list the PRs and issues it counted")
@@ -5396,6 +5543,8 @@ def main():
     p.add_argument("--explain", action="store_true", help="show every option and its trade-off")
     p.add_argument("--apply", action="store_true", help="sync GitHub: variables, required checks, production approval")
     p.add_argument("--human", action="store_true", help="the owner chose these settings in this session (/haam-settings)")
+    p.add_argument("--until", help="with --set max_in_uat=N / max_open_prs=N: a batch window that ends by itself "
+                   "after this day (YYYY-MM-DD)")
     p.set_defaults(func=cmd_settings)
 
     p = common(sub.add_parser("local-ci", help="ci = local: run make check on the PR's commit here and post ci-local"))

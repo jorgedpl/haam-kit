@@ -27,7 +27,9 @@ make dev
 - 
 
 ## Agent pre-check
-<!-- Filled by the agent if it ran the plan with a browser tool or `make e2e` first. -->
+<!-- Filled by the agent: what it checked itself (tests, `make e2e`, a browser tool) and what it saw. -->
+- **Fully verified by the agent:** no  <!-- "yes" only under the rules in /uat step 3; then the owner can pass it with "pass all verified" -->
+- Evidence: <the commands or runs, and their results, one line per acceptance criterion>
 
 ## Results
 Recorded as comments on the issue and the PR by `/test` (or `/uat-result`), so recording a result never changes the code that was tested.

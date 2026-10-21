@@ -36,6 +36,8 @@ The areas and their settings:
   - `deploy` (github | manual);
   - `deploy_approval` (each | automatic).
 - **Limits:** `max_open_prs`, `max_in_uat`, `max_review_rounds`, `max_pr_lines` (whole numbers).
+  - In test-first, `max_in_uat` is the real limit: it's how much you can test. `max_open_prs` guards the CI cost of ready PRs. Drafts and docs-only PRs (briefs, split specs, assessments, ADRs) never count, and `capacity --list` shows the breakdown.
+  - **Batch window**, for a weekend of agent work tested in one sitting: a temporary raise that ends by itself after its last day, e.g. `settings --set max_in_uat=30 --until 2026-10-27 --human` (or `config --max-in-uat 30 --until … --human`). `config --end-batch-window --human` ends it early. It counts at once for every agent chat on this computer. Suggest pairing it with `/test all` and "pass all verified" for the sitting.
 - **Protected areas:** `protected_paths`. Show the list. To add: `config --protected "src/auth/**" --human`. To remove: `config --unprotected "…" --human`.
 - **Housekeeping:** `worktree_cleanup` (after-ship | manual). After-ship never removes a worktree a program (an agent chat, a terminal) is still running in.
 - **Shared test resources:** `heavy_runs`. If tests use something the whole machine shares (a local database they clone, a simulator, a device), two chats running them at once break each other. List those commands as patterns: `config --heavy-run "make (check|test-integration)"` (`--clear-heavy-runs` empties the list). Agents then run them through `haam.py exclusive`, one at a time, and so does `local-ci`. Empty (the default): nothing waits.

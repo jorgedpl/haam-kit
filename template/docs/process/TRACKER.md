@@ -58,7 +58,8 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **See or change how HAAM runs** (owner) | `/haam-settings`; `haam.py settings [--explain]`, `settings --set key=value --human`, `settings --apply --human` (the owner's choice only) | Same |
 | **Run CI here** (setting `ci: local`) | `haam.py local-ci 123` (ship runs it for you) | Same |
 | **No UAT for this issue** (owner's decision) | `haam.py issue label 123 --add uat:skip --human` | Label `uat:skip` |
-| **Room for new work?** (`/next` checks first) | `haam.py capacity` (open PRs and UAT queue vs `max_open_prs`, `max_in_uat`) | Same command (counts PRs; the UAT count needs GitHub Projects) |
+| **Room for new work?** (`/next` checks first) | `haam.py capacity` (the UAT queue and ready PRs vs `max_in_uat`, `max_open_prs`, or a batch window's raise; drafts and docs-only PRs don't count) | Same command, with `--in-uat <count>` |
+| **Will new work collide with what's waiting?** | `haam.py overlap --files src/auth/,src/api/users.py` (branches in UAT that change the same files) | Same, with `--branch <name>` for each branch in UAT |
 | **Batch PR** (an epic's bugs) | Title `#12 #13 #14: …`, a `Refs #n` line per issue; `ship` closes them all | Title `APP-12 APP-13: …` |
 | **Close after release** | `haam.py issue close 123 --human` (sets Done and closes; `/release` only) | Status Done |
 

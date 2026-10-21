@@ -6,6 +6,27 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-10-21
+
+Help a new team make the right choices.
+
+### Added
+- **`docs/setup/DECISIONS.md`, the decisions guide.** It covers every choice a team makes when it adopts HAAM, in order, each with a recommendation and when to choose otherwise:
+  - setting up GitHub: each person's account, an organization with two owners, the GitHub CLI, and no separate accounts for agents;
+  - which GitHub plan gives which gate, and what to do without it;
+  - the reviewers' Claude access;
+  - GitHub Projects or Linear, side by side;
+  - who's who;
+  - every setting, with its cost or risk;
+  - how to size the limits;
+  - what to protect, as a checklist by area with typical paths;
+  - shared test resources.
+- **`haam.py settings --recommend`.** It suggests the limits from the number of builders (`--builders`), the chats each runs (`--chats`), and the owner's testing hours and sittings a week (`--testing-hours`, `--sittings`). `max_in_uat` comes from what you can test in one sitting. `max_open_prs` comes from the agent chats running at once, plus the queue in checks-first. Optional `--minutes-per-test` and `--changes-per-chat` refine it, and bad numbers are refused. It warns when the agents will produce more than you can test, and gives the command that applies its numbers. It changes nothing itself.
+- **`/haam-setup` is now a guided walk through the decisions.** It checks accounts and the GitHub plan first, explaining what the plan allows. Then it asks in four short rounds (who and where, how work flows, limits, what to protect), with a recommendation per question. For what to protect, it proposes real paths from the code, area by area. `/haam-settings` uses the same guide and `--recommend`.
+
+### Fixed
+- **Deploy approvals on private repositories need GitHub Enterprise Cloud.** On Free, Pro and Team, required reviewers work only on public repositories ([GitHub docs](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)). The tool's messages and the README said Team was enough.
+
 ## [1.13.0] - 2026-10-21
 
 Capacity that fits test-first and batch testing (issue #3).

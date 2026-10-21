@@ -18,10 +18,21 @@ You are guiding the **project admin** through adopting HAAM. The tool `tools/haa
 - After each phase, give a two-line status: done / waiting on the human.
 - If you can't run commands (some tools can't), show each command for the human to run and continue from their output.
 
+**How to ask.** Every choice is in `docs/setup/DECISIONS.md` (in the kit's `template/` folder until it's installed). For each one, give a one-line recommendation for *their* situation and the reason, then ask. Use your tool's multiple-choice question feature if it has one, at most 4 questions at a time. Accept "you choose", and take the recommendation then.
+
 ## Phase 0: Check the starting point
 1. Confirm you're at the root of the project's git repository (`git rev-parse --show-toplevel`).
-2. Ask the human to confirm they are an **admin** of the GitHub repository (and of the Linear workspace, if they choose Linear). Explain in 3 lines what will happen: install files on a branch, configure, open a PR, set up GitHub and Linear, then a trial run.
-3. If `AGENTS.md` and `tools/haam/haam.py` already exist, HAAM is installed: skip to Phase 2.
+2. **Accounts.** Ask whether everyone who will work on it has a GitHub account, and whether the repository belongs to an organization or to one person.
+   - Someone has no account, or there's no organization yet: walk them through `DECISIONS.md` §1, *Accounts*. Each person signs up themselves; you never create accounts or handle passwords. Recommend an organization with two owners.
+   - Check the GitHub CLI: `gh auth status`. If it isn't installed or signed in, they install it and run `gh auth login` themselves.
+3. Ask the human to confirm they are an **admin** of the GitHub repository (and of the Linear workspace, if they choose Linear). Explain in 3 lines what will happen: install files on a branch, make the decisions together, open a PR, set up GitHub and the tracker, then a trial run.
+4. **Plan.** Run `gh api repos/<owner>/<name> --jq '{private, owner: .owner.type}'`. Then find the plan: for an organization `gh api orgs/<org> --jq .plan.name` (it prints `null` unless they own the organization); for a personal account `gh api user --jq .plan.name`. If you can't tell, ask them. Then tell them in two or three lines what their plan means, from the table in `DECISIONS.md` §1:
+   - public repository: everything works;
+   - private on Free: no branch rules, so recommend Team (organization) or Pro (personal);
+   - private below Enterprise Cloud: no approver on production deploys, so their `ship` is the release decision (`deploy_approval: automatic`).
+
+   Let them decide whether to upgrade. Carry on either way.
+5. If `AGENTS.md` and `tools/haam/haam.py` already exist, HAAM is installed: skip to Phase 2.
 
 ## Phase 1: Install the kit
 1. `git switch -c chore/adopt-haam` (from an up-to-date default branch).
@@ -32,27 +43,49 @@ You are guiding the **project admin** through adopting HAAM. The tool `tools/haa
    - **Existing `Makefile`**: add the kit's targets.
 4. Delete `.haam/incoming/` when everything is merged.
 
-## Phase 2: Project configuration
-1. Ask the human, in **one** message:
-   - Product name
-   - **Tracker:** GitHub Projects (free, everything in GitHub; recommended for small teams) or Linear (nicer UX, free plan limited to a few hundred issues). See `docs/process/TRACKER.md`.
-   - A short product key (2–5 capital letters, e.g. `ACM`): the Linear team key if they use Linear
-   - GitHub repo (`owner/name`): propose the one from `git remote get-url origin`
-   - Product owner's GitHub username (approves production deploys) and any backup approvers
-   - Production URL (or none yet)
-   - Which agent tools the team uses (Claude Code, Cursor, Codex, Grok, Gemini, Copilot)
-   - How production is deployed: by `deploy.yml` when a PR merges (`github`), or by hand / another platform (`manual`)
-   - Limits for parallel work (defaults are fine to start): at most 10 open PRs and 10 changes waiting for their test
-   - The protected areas as folder or file patterns (AGENTS.md §4: authentication, payments, personal data, migrations…), e.g. `src/auth/**,db/migrations/**`. Agent and CI configuration are protected already. Changes there always get a human code review and never take the no-UAT lane: the gate checks the changed files.
-   - The order of testing: **test-first** (default: they test the agent's branch locally, and the PR and checks come only after their pass, which saves the most CI minutes) or **checks-first** (PR and checks, then their test)
-2. `python3 tools/haam/haam.py config --product "…" --tracker github|linear --team-key … [--linear-team "…"] --github-repo … --owner … [--backup-approvers a,b] [--production-url …] --agents claude,cursor,… --deploy github|manual [--max-open-prs 10] [--max-in-uat 10] [--flow test-first|checks-first] [--protected "src/auth/**,db/migrations/**"] --human` (`--human`: the owner chose these values with you now; re-running `config` later to change `--flow`, `--deploy`, `--protected` or the limits needs it too)
+## Phase 2: The decisions, in four short rounds
+Each round is one message, with a recommendation per question (`DECISIONS.md` has them). Wait for the answers before the next round.
+
+**Round 1: who and where** (`DECISIONS.md` §2–3)
+- Product name, and a short product key (2–5 capital letters, e.g. `ACM`; with Linear, the team key).
+- The GitHub repository (`owner/name`): propose the one from `git remote get-url origin`.
+- The product owner's GitHub username (they decide, test and ship), and one or two backup approvers.
+- **Tracker:** GitHub Projects or Linear. Recommend GitHub Projects unless they already work in Linear every day. Mention Linear's free cap and what's automatic only on GitHub Projects (§2's table).
+- Which agent tools the team uses (Claude Code, Cursor, Codex, Grok, Gemini, Copilot).
+- The production URL, or none yet.
+
+**Round 2: how work flows** (`DECISIONS.md` §4)
+- **Testing order** (`flow`): `test-first` (recommended: they test the agent's branch, then the PR and checks run once) or `checks-first`.
+- **What they test** (`uat`): `owner-decides` (recommended), `always` (regulated or safety-critical products) or `bugs-skip`.
+- **Deploys** (`deploy`): by `deploy.yml` when a PR merges (`github`), or another way (`manual`).
+- **Deploy approval** (`deploy_approval`): `each` (recommended) or `automatic`. Recommend `automatic` when the plan check in Phase 0 showed they can't have an approver (a private repository below Enterprise Cloud), and say why. If that leaves deploys automatic, advise against `uat: bugs-skip`: a bug fix could then reach production with nobody looking at it.
+
+The other settings (grouping, where CI and the reviews run, nightly, runner) start at their recommended values. Mention that `/haam-settings` changes them any time and that the first week's `ci-usage` will show whether they need to.
+
+**Round 3: limits** (`DECISIONS.md` §5)
+Ask four numbers:
+- how many people will run agent chats;
+- how many chats each runs at once;
+- how many hours a week the owner can test;
+- in how many sittings.
+
+Then run `python3 tools/haam/haam.py settings --recommend --builders N --chats N --testing-hours N --sittings N --flow <their choice>` and show its suggestion and notes (if they know how long one of their tests takes, or how many changes a chat finishes a day, add `--minutes-per-test` and `--changes-per-chat`), especially when the agents will out-produce the testing. They accept the numbers or change them.
+
+**Round 4: what to protect** (`DECISIONS.md` §6) waits for Phase 3, when you've read the code and can propose real paths.
+
+Then apply rounds 1–3:
+1. `python3 tools/haam/haam.py config --product "…" --tracker github|linear --team-key … [--linear-team "…"] --github-repo … --owner … [--backup-approvers a,b] [--production-url …] --agents claude,cursor,… --deploy github|manual --flow test-first|checks-first --max-open-prs N --max-in-uat N --human` (`--human`: the owner chose these values with you now; re-running `config` later to change `--flow`, `--deploy`, `--protected` or the limits needs it too).
+2. If they chose anything but the defaults for `uat` or `deploy_approval`: `python3 tools/haam/haam.py settings --set uat=… --set deploy_approval=… --human`. `github --apply` in Phase 6 sets up the deploy approval; `uat` takes effect for the release gate once the adoption PR is merged.
 3. `python3 tools/haam/haam.py agents --apply` and report per tool.
-   Then offer `/haam-settings`, which the human types themselves, to choose how CI, the AI reviews, testing, grouping and shipping work here. The defaults are a safe start.
 
 ## Phase 3: Teach HAAM about the project (your judgement work)
 1. **Command contract:** inspect the project (package.json, pyproject.toml, composer.json, go.mod, existing CI, README) and fill every `TODO(setup)` in `Makefile` (`setup`, `dev`, `test`, `lint`, `typecheck`, `build`, `audit`, `deploy` if they deploy from CI), and the runtime setup steps in `.github/workflows/ci.yml`, `security.yml`, `deploy.yml`. CI passes `make check` the list of changed files in `$CI_CHANGED_FILES`; if the project has clearly separate parts (e.g. a backend and a mobile app), offer to make `make check` run only the parts a PR touches, which saves a lot of CI minutes (the nightly run still checks everything). Run `make check`. If it fails on the current code, show the human why and agree whether to fix first or mark known failures.
 2. **Architecture map:** fill `docs/product/ARCHITECTURE.md` from the codebase (under 150 lines).
-3. **Protected areas:** propose real paths for `AGENTS.md` §4; confirm with the human.
+3. **Protected areas (round 4):** go through the checklist in `DECISIONS.md` §6. For each area that applies to this codebase, propose the real paths you found (e.g. `src/auth/**` for sign-in, `db/migrations/**`), with one line on why. Say which areas don't apply. Remind them that every protected change needs their code review and their test, so the list should cover what matters, not everything. On their OK:
+   - `python3 tools/haam/haam.py config --protected "<patterns>" --human` (it warns about a pattern that matches no file);
+   - replace the examples in `AGENTS.md` §4 with the same areas in words.
+
+   If the tests use something the whole machine shares (a local database they clone, a simulator, a device), also propose `config --heavy-run "<pattern>"` (`DECISIONS.md` §7).
 4. **Product context:** draft `docs/product/PRODUCT.md` from the README and code, then ask the human to correct it, especially *Current priorities* and *Non-negotiables*. Don't invent business facts.
 5. **Onboarding doc:** fill the `TODO(setup)` items in `docs/ONBOARDING.md` (clone URL, runtime, local URL).
 6. `python3 tools/haam/haam.py doctor` until no `TODO(setup)` remains that you can fill.

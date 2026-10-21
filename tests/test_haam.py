@@ -1112,6 +1112,30 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("config", "--end-batch-window", "--human")
         self.assertNotIn("batch_window", json.loads((self.proj / "haam.config.json").read_text()))
 
+    def test_settings_recommend_sizes_the_limits(self):
+        r = json.loads(self.tool("settings", "--recommend", "--builders", "2", "--chats", "3", "--testing-hours", "5",
+                                 "--sittings", "5", "--json").stdout)
+        self.assertEqual((r["max_in_uat"], r["max_open_prs"]), (10, 12))       # 60 min a sitting / 6 min a test
+        self.assertEqual(r["agents_per_week"], 60)
+        self.assertTrue(any("can produce about 60" in n for n in r["notes"]))  # more than 50 testable a week
+        self.assertIn("--set max_in_uat=10 --set max_open_prs=12 --human", r["command"])
+        r = json.loads(self.tool("settings", "--recommend", "--testing-hours", "2", "--sittings", "1",
+                                 "--chats", "1", "--json").stdout)
+        self.assertEqual(r["max_in_uat"], 20)
+        self.assertTrue(any("batch window" in n for n in r["notes"]))
+        r = json.loads(self.tool("settings", "--recommend", "--chats", "1", "--flow", "checks-first", "--json").stdout)
+        self.assertEqual((r["max_in_uat"], r["max_open_prs"]), (10, 11))       # every waiting change is a ready PR
+        for bad in (("--sittings", "0"), ("--minutes-per-test", "0"), ("--testing-hours", "-3"),
+                    ("--testing-hours", "nan"), ("--testing-hours", "inf"), ("--builders", "0")):
+            p = self.tool("settings", "--recommend", *bad, check=False)
+            self.assertNotEqual(p.returncode, 0, bad)
+            self.assertIn(bad[0], p.stderr)
+        self.assertNotEqual(self.tool("settings", "--recommend", "--set", "max_in_uat=9", "--human",
+                                      check=False).returncode, 0)
+        before = (self.proj / "haam.config.json").read_text()
+        self.assertIn("max_in_uat", self.tool("settings", "--recommend").stdout)   # no --human needed: changes nothing
+        self.assertEqual((self.proj / "haam.config.json").read_text(), before)
+
     def test_agents_cant_mark_issues_themselves(self):
         self.setup_board()
         for lab in ("uat:skip", "agent-ready"):

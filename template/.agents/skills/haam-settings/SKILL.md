@@ -12,7 +12,7 @@ Area: $ARGUMENTS (empty = all)
 This skill runs only when a human types it, in their own chat in the project's main folder. You explain and apply; **the human chooses**. Never change a setting they didn't choose.
 
 ## 1. Where things stand
-1. `python3 tools/haam/haam.py settings --explain --json`: every setting with its current value, default, options and trade-off.
+1. `python3 tools/haam/haam.py settings --explain --json`: every setting with its current value, default, options and trade-off. `docs/setup/DECISIONS.md` has when to choose each option, how to size the limits and what to protect: use it for your recommendations.
 2. For real numbers, also run:
    - `python3 tools/haam/haam.py ci-usage --days 7`: Actions minutes by workflow;
    - `python3 tools/haam/haam.py capacity --list`: open PRs and the UAT queue.
@@ -35,9 +35,9 @@ The areas and their settings:
 - **Shipping:**
   - `deploy` (github | manual);
   - `deploy_approval` (each | automatic).
-- **Limits:** `max_open_prs`, `max_in_uat`, `max_review_rounds`, `max_pr_lines` (whole numbers).
+- **Limits:** `max_open_prs`, `max_in_uat`, `max_review_rounds`, `max_pr_lines` (whole numbers). To size them, ask how many people run agent chats, how many chats each, and how many hours a week the owner tests in how many sittings, then run `python3 tools/haam/haam.py settings --recommend --builders N --chats N --testing-hours N --sittings N` and show what it suggests.
   - In test-first, `max_in_uat` is the real limit: it's how much you can test. `max_open_prs` guards the CI cost of ready PRs. Drafts and docs-only PRs (briefs, split specs, assessments, ADRs) never count, and `capacity --list` shows the breakdown.
-  - **Batch window**, for a weekend of agent work tested in one sitting: a temporary raise that ends by itself after its last day, e.g. `settings --set max_in_uat=30 --until 2026-10-27 --human` (or `config --max-in-uat 30 --until … --human`). `config --end-batch-window --human` ends it early. It counts at once for every agent chat on this computer. Suggest pairing it with `/test all` and "pass all verified" for the sitting.
+  - **Batch window**, for a weekend of agent work tested in one sitting: a temporary raise that ends by itself after its last day, e.g. `settings --set max_in_uat=30 --until <last day, YYYY-MM-DD> --human` (or `config --max-in-uat 30 --until … --human`). `config --end-batch-window --human` ends it early. It counts at once for every agent chat on this computer. Suggest pairing it with `/test all` and "pass all verified" for the sitting.
 - **Protected areas:** `protected_paths`. Show the list. To add: `config --protected "src/auth/**" --human`. To remove: `config --unprotected "…" --human`.
 - **Housekeeping:** `worktree_cleanup` (after-ship | manual). After-ship never removes a worktree a program (an agent chat, a terminal) is still running in.
 - **Shared test resources:** `heavy_runs`. If tests use something the whole machine shares (a local database they clone, a simulator, a device), two chats running them at once break each other. List those commands as patterns: `config --heavy-run "make (check|test-integration)"` (`--clear-heavy-runs` empties the list). Agents then run them through `haam.py exclusive`, one at a time, and so does `local-ci`. Empty (the default): nothing waits.
@@ -45,7 +45,7 @@ The areas and their settings:
 Point out combinations that undo each other's safety, in one line each, and let them decide:
 - `ci off` with `review off`: nothing checks the code before your test;
 - `deploy_approval automatic` with `uat bugs-skip`: an agent's bug fix can reach production with no human looking at it;
-- anything but `ci every-pr` with `review github`: the no-UAT lane stops merging by itself, and you ship those PRs (local results aren't tamper-proof; reduced checks aren't enough on their own);
+- anything but `ci every-pr` with `review github` (or a Linear tracker, or no `HAAM_PROJECT_TOKEN` secret): the no-UAT lane stops merging by itself, and you ship those PRs (local results aren't tamper-proof; reduced checks aren't enough on their own);
 - `grouping release`: one failing release check holds every change in it.
 
 ## 3. Apply

@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.13.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.14.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 
@@ -71,6 +71,7 @@ docs/
   product/PRODUCT.md          Your product context (you confirm it)
   product/ARCHITECTURE.md     Map of your codebase (the agent drafts it)
   setup/HAAM-ADOPTION-GUIDE.md  This guide
+  setup/DECISIONS.md          Every choice to make (accounts and plan, tracker, settings, limits, what to protect), with recommendations
   setup/AGENTS-SETUP.md       Per-tool setup: Claude Code, Cursor, Codex, Grok, Gemini, Copilot
   setup/LINEAR-SETUP.md       Linear configuration in detail
   setup/GITHUB-SETUP.md       GitHub configuration in detail
@@ -137,7 +138,7 @@ Full rules: `docs/process/GATES.md`. Reviewer instructions you can tune: `.githu
 ## Before you start
 
 You need:
-- [ ] Admin access to the GitHub repository (and a paid plan if the repo is private and you want rulesets and deploy approvals enforced; see Phase 4)
+- [ ] Admin access to the GitHub repository. If it's private, branch rules need GitHub Pro or Team, and an approver on production deploys needs Enterprise Cloud (`docs/setup/DECISIONS.md` §1)
 - [ ] A tracker: **GitHub Projects** (nothing extra; free on every plan) or admin access to a **Linear** workspace
 - [ ] A coding agent installed and signed in, in your own account
 - [ ] Python 3, Git, Make, and the GitHub CLI signed in (`gh auth login`)
@@ -239,7 +240,7 @@ This makes the checks exist in GitHub so they can be required. The first AI revi
 4. **Deploys:**
    - *Already deploying from GitHub Actions?* Add `environment: production` to your deploy job: that alone gives you Gate G5. Delete the kit's `deploy.yml` or keep it as reference.
    - *Deploying another way* (a hosting platform's Git integration, manual)? Either move deploys into `deploy.yml` (fill in `make deploy`) or keep your method and treat G5 as a manual step: the product owner deploys after merge, then runs `/release`. Turn off auto-deploy-on-push if it would bypass the approval.
-5. **Private repos on the free plan** can't enforce rulesets or deploy approvals; the tool tells you if so. Options: upgrade, or rely on the checks plus discipline until you do.
+5. **Private repositories:** branch rules need GitHub Pro or Team, and an approver on production deploys needs Enterprise Cloud; the tool tells you what your plan allows. Without an approver, your `ship` is the release decision: set `deploy_approval: automatic` (`docs/setup/DECISIONS.md` §1).
 
 Detail and manual equivalents: `docs/setup/GITHUB-SETUP.md`.
 

@@ -72,7 +72,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -1430,7 +1430,7 @@ def cmd_github(args):
                         f"Deploys only from {cfg.get('default_branch', 'main')}", "" if c4 == 0 else (e4 or "")[:120])
             elif reviewers and private and "422" in (e2 or "") and any(
                     k in (e2 or "").lower() for k in ("protection rule", "reviewer", "plan", "upgrade", "not available")):
-                # Required reviewers on private repos need GitHub Team or Enterprise: create the environment without them.
+                # Required reviewers on private repos need GitHub Enterprise Cloud: create the environment without them.
                 env_body["reviewers"] = []
                 c6, _, e6 = gh_api("PUT", f"repos/{repo}/environments/production", env_body)
                 if c6 == 0:
@@ -1438,8 +1438,8 @@ def cmd_github(args):
                            {"name": cfg.get("default_branch", "main"), "type": "branch"})
                 rep.add("warn" if c6 == 0 else "fail", "Environment 'production' created without a required approver"
                         if c6 == 0 else "Environment not configured",
-                        "your GitHub plan doesn't allow required reviewers on private repos (GitHub Team or Enterprise "
-                        "does). Deploys start as soon as a PR merges, so G5 is your 'ship' in /test." if c6 == 0 else (e6 or "")[:200])
+                        "your GitHub plan doesn't allow required reviewers on private repos (only GitHub Enterprise "
+                        "Cloud does). Deploys start as soon as a PR merges, so G5 is your 'ship' in /test." if c6 == 0 else (e6 or "")[:200])
             else:
                 rep.add("fail", "Environment not configured", (e2 or "")[:200])
             if cfg.get("production_url"):
@@ -3964,8 +3964,81 @@ def set_production_env(cfg, repo, rep):
     return code, err, body
 
 
+def recommend_limits(builders=1, chats=3, testing_hours=5.0, sittings=5, minutes_per_test=6.0, changes_per_chat=2.0,
+                     flow="test-first"):
+    """Limits sized to the team: the UAT queue to what the owner can test in one sitting, ready PRs to the agent chats
+    running at once (checks-first: plus the queue, since every change waiting for a test is a ready PR). Also compares
+    what the agents can produce in a week with what the owner can test. Inputs must be checked by the caller."""
+    per_sitting = testing_hours * 60 / sittings
+    raw_uat = round(per_sitting / minutes_per_test)
+    max_uat = int(min(50, max(3, raw_uat)))
+    running = builders * chats
+    raw_prs = 2 * running if flow != "checks-first" else max_uat + running
+    max_prs = int(min(30, max(4, raw_prs)))
+    can_test = testing_hours * 60 / minutes_per_test
+    can_make = running * changes_per_chat * 5
+    notes = []
+    if raw_uat != max_uat:
+        notes.append(f"max_in_uat is {max_uat}, the {'lowest' if raw_uat < max_uat else 'highest'} it suggests "
+                     f"(one sitting holds about {raw_uat} tests).")
+    if raw_prs != max_prs:
+        notes.append(f"max_open_prs is {max_prs}, the {'lowest' if raw_prs < max_prs else 'highest'} it suggests.")
+    if can_make > can_test * 1.1:
+        notes.append(f"The agents can produce about {can_make:.0f} changes a week; you can test about {can_test:.0f}. "
+                     "The queue will fill and agents will pause new builds. To keep up: more testing time, "
+                     "'pass all verified' in /test all, uat: bugs-skip for small fixes, or fewer agent chats.")
+    elif can_make < can_test * 0.5:
+        notes.append(f"You can test about {can_test:.0f} changes a week, and the agents produce about "
+                     f"{can_make:.0f}: room for more agent chats.")
+    if sittings <= 2:
+        notes.append(f"With {sittings} sitting(s) a week, max_in_uat already holds a whole sitting of tests. Keep a "
+                     "batch window (settings --set max_in_uat=N --until <last day> --human) for agent-heavy weekends.")
+    return {"inputs": {"builders": builders, "chats_per_builder": chats, "testing_hours_per_week": testing_hours,
+                       "sittings_per_week": sittings, "minutes_per_test": minutes_per_test,
+                       "changes_per_chat_per_day": changes_per_chat, "flow": flow},
+            "max_in_uat": max_uat, "max_open_prs": max_prs, "max_review_rounds": 2, "max_pr_lines": 400,
+            "agents_per_week": round(can_make), "you_can_test_per_week": round(can_test), "notes": notes,
+            "command": f"python3 tools/haam/haam.py settings --set max_in_uat={max_uat} --set max_open_prs={max_prs} --human"}
+
+
 def cmd_settings(args):
     """The owner's choices for this project, with their trade-offs; --set changes them, --apply syncs GitHub."""
+    if getattr(args, "recommend", False):
+        if args.set or args.apply or args.until:
+            sys.exit("--recommend only suggests (it changes nothing): run it on its own, then --set what you chose.")
+        bad = [f"--{k} must be a whole number of 1 or more" for k, v in (("builders", args.builders), ("chats", args.chats),
+                                                                          ("sittings", args.sittings)) if v < 1]
+        bad += [f"--{k} must be a number above 0" for k, v in (("testing-hours", args.testing_hours),
+                                                              ("minutes-per-test", args.minutes_per_test),
+                                                              ("changes-per-chat", args.changes_per_chat))
+                if not (v > 0 and v != float("inf"))]
+        if bad:
+            sys.exit("; ".join(bad))
+        flow = args.flow
+        if not flow:
+            try:
+                flow = setting_value(load_config(find_repo_root(Path.cwd())), "flow")
+            except SystemExit:
+                flow = "test-first"
+        r = recommend_limits(args.builders, args.chats, args.testing_hours, args.sittings, args.minutes_per_test,
+                             args.changes_per_chat, flow)
+        if args.json:
+            print(json.dumps(r, indent=2))
+            return
+        i = r["inputs"]
+        print(f"For {i['builders']} builder(s) with {i['chats_per_builder']} agent chat(s) each, "
+              f"{i['testing_hours_per_week']:g} h of testing a week in {i['sittings_per_week']} sitting(s), "
+              f"~{i['minutes_per_test']:g} min a test, {i['flow']}:")
+        print(f"  max_in_uat         {r['max_in_uat']:<5} what you can test in one sitting")
+        print(f"  max_open_prs       {r['max_open_prs']:<5} " + ("twice the agent chats running at once"
+                                                             if i["flow"] != "checks-first" else
+                                                             "the UAT queue plus the chats running at once (checks-first)"))
+        print(f"  max_review_rounds  {r['max_review_rounds']:<5} then the agent stops and asks you")
+        print(f"  max_pr_lines       {r['max_pr_lines']:<5} smaller PRs review and test better")
+        for n in r["notes"]:
+            print(f"{INFO} {n}")
+        print(f"\nTo apply (inside /haam-settings, once you've chosen): {r['command']}")
+        return
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     rep = Report()
@@ -4077,7 +4150,7 @@ def cmd_settings(args):
             c_e, e_e, _ = set_production_env(cfg, repo, rep)
             if c_e != 0:
                 rep.add("warn", "Couldn't change the production approval", (e_e or "")[:160] + (
-                    " (on private repositories, required reviewers need GitHub Team or Enterprise)" if not want_auto else ""))
+                    " (on private repositories, required reviewers need GitHub Enterprise Cloud)" if not want_auto else ""))
                 res.setdefault("failed", []).append("production")
             else:
                 res["applied"].append("production")
@@ -5545,6 +5618,16 @@ def main():
     p.add_argument("--human", action="store_true", help="the owner chose these settings in this session (/haam-settings)")
     p.add_argument("--until", help="with --set max_in_uat=N / max_open_prs=N: a batch window that ends by itself "
                    "after this day (YYYY-MM-DD)")
+    p.add_argument("--recommend", action="store_true", help="suggest the limits for your team (changes nothing)")
+    p.add_argument("--flow", choices=["test-first", "checks-first"], help="recommend: the testing order (default: "
+                   "this project's setting)")
+    p.add_argument("--builders", type=int, default=1, help="recommend: people running agent chats")
+    p.add_argument("--chats", type=int, default=3, help="recommend: agent chats each builder runs at once")
+    p.add_argument("--testing-hours", type=float, default=5, help="recommend: the owner's testing hours a week")
+    p.add_argument("--sittings", type=int, default=5, help="recommend: testing sittings a week")
+    p.add_argument("--minutes-per-test", type=float, default=6, help="recommend: minutes one test takes, on average")
+    p.add_argument("--changes-per-chat", type=float, default=2, help="recommend: changes one agent chat finishes a "
+                   "day (measure yours: issues completed a day ÷ chats)")
     p.set_defaults(func=cmd_settings)
 
     p = common(sub.add_parser("local-ci", help="ci = local: run make check on the PR's commit here and post ci-local"))

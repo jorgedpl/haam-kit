@@ -18,6 +18,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 - **Testing in one word, before anything costs CI minutes**: type `/test`, try the agent's change on your computer, reply `pass` (only now is the pull request opened and checked, once, on exactly what you tested) then `ship` (the agent merges, deploys and closes it), or just say what's wrong (it goes straight back to the agents and returns to you when fixed). `/test all` takes everything waiting in one sitting, and `ship --all` deploys it with one approval.
 - **A no-UAT lane** for changes you can't meaningfully test (config, dependency bumps, invisible refactors): mark the issue `uat:skip` once, and its PR merges by itself when CI and both AI reviews pass.
 - **Epics with an agent that asks the right questions**: `/triage group` turns a pile of loose issues into epics (one per feature); `/epic` reads each one, writes a short brief, asks you a few focused questions, then tidies the issues: duplicates, gaps, splits, order.
+- **A decisions guide** ([DECISIONS.md](template/docs/setup/DECISIONS.md)): every choice a team makes when it adopts HAAM, with a recommendation for each. It covers GitHub accounts and the plan you need, GitHub Projects or Linear, the settings, how to size the limits for your testing time, and what to protect. `/haam-setup` walks you through it.
 - **A guide for the product manager** ([PRODUCT-MANAGER.md](template/docs/process/PRODUCT-MANAGER.md)): daily and weekly rhythm, how to triage, priority rules with a bug impact × reach matrix, healthy queue sizes, done with an agent (`/triage`) or directly in GitHub Projects or Linear.
 - **Parallel agents without collisions**: open a new chat window, type `/work bugs`, and the agent gets its own copy of the project (a git worktree), picks the top bug and works it through to your test. Run as many as you like, on one computer or several.
 - **Code review where no one marks their own homework**: a secret scan before every commit and in CI, dependency audit, and two independent AI reviewers (spec/quality and security) that never saw the code being written. Humans review protected areas and can overrule.
@@ -30,7 +31,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.13.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.14.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -116,7 +117,7 @@ On GitHub Projects every agent uses the same `haam.py issue` commands, so there'
 
 ## Requirements
 
-- A GitHub repository (rulesets and deploy approvals on **private** repos need a paid GitHub plan; public repos work on the free plan)
+- A GitHub repository. Public repositories get everything on the free plan. On **private** ones, the branch rules need GitHub Pro or Team, and a required approver on production deploys needs GitHub Enterprise Cloud (without it, your `ship` is the release decision). [DECISIONS.md](template/docs/setup/DECISIONS.md) has the details.
 - A tracker: a GitHub Projects board (free, on any GitHub plan) or a Linear workspace (any plan)
 - Python 3.8+, Git, Make, GitHub CLI, [gitleaks](https://github.com/gitleaks/gitleaks)
 - A Claude secret for the CI reviewer agents: a Claude plan token (`claude setup-token`) or an Anthropic API key (usage-based; set a spend limit)

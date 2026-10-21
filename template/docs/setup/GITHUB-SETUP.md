@@ -57,6 +57,8 @@ Settings → **Environments** → New environment **`production`**:
 
 Now every merge to `main` runs `deploy.yml`, which pauses at *deploy-production* until an approver clicks **Review deployments → Approve**. GitHub emails/notifies the approvers.
 
+Required reviewers work on public repositories on every plan, but on private ones only with GitHub Enterprise Cloud. Without them, deploys start on merge, and your `ship` is the release decision: set `deploy_approval: automatic` with `/haam-settings` (`docs/setup/DECISIONS.md` §1).
+
 ## 5. CODEOWNERS (optional but recommended once there are two humans)
 `.github/CODEOWNERS`:
 ```

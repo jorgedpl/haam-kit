@@ -1,7 +1,7 @@
 ---
 name: spec
 description: Write a build-ready feature specification for an approved issue so any agent can implement it (prepares Gate G2, Definition of Ready). Use for issues in Backlog, or bugs that need a clearer fix plan.
-argument-hint: "<ID>"
+argument-hint: "[<ID>]  (empty: the next Backlog feature by priority)"
 ---
 
 # /spec: make an issue ready to build
@@ -10,6 +10,7 @@ argument-hint: "<ID>"
 
 Target: $ARGUMENTS
 
+0. **No ID given:** pick the spec to write as `/next specs` does (its steps 0b and 1, item 4: the highest-priority `Backlog` feature with no spec yet that no other chat has claimed), without waiting for a choice, and say in your first line which one and why. If there's none, say how many specs are waiting for the owner's approval and stop. A capacity hold doesn't apply: a spec opens no PR.
 1. **Load the issue** and its assessment (`docs/assessments/`) and any linked ADRs. It should be `stream:feature` in `Backlog` (or a bug needing a fix plan). **Claim it** so no other chat writes the same spec: GitHub Projects: `python3 tools/haam/haam.py issue claim <number> --for spec --tool "<your tool>" --machine "<this computer>"` (it adds label `claimed`, comments and refuses if another chat got there first; keep the claim id it prints). Linear: as `docs/process/TRACKER.md` → **Claim** says. If it's already claimed, stop and pick another. For an epic, claim each sub-issue as you spec it.
 2. **Epic context:** if the issue belongs to an epic, read the epic and its brief (`docs/epics/`) first and keep the spec consistent with its scope and slices. If the issue *is* an epic, don't spec it as one piece: make sure each sub-issue has its own spec (run this skill on each, in the brief's order).
 3. **Read the code** the change will touch. Specs grounded in real file paths and functions are the point.

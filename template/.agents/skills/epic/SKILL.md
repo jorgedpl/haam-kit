@@ -47,5 +47,5 @@ Possible changes: close a duplicate (link the original), merge two issues (move 
 Tell the human where the epic stands and what comes next:
 - First, the human merges the brief's docs PR, so other agents (who branch from `main`) can read it.
 - **Not decided yet** (stream `idea`): `/assess <epic>` adds effort and feasibility for the whole, then `/decide <epic> approve|park|reject`. Approving the epic approves its idea sub-issues too.
-- **Approved** (stream `feature`): the sub-issues without a spec get one (`/spec <ID>`, or agents via `/work features`), in the order of the slices table.
+- **Approved** (stream `feature`): the sub-issues without a spec get one (`/spec <ID>`, or agents via `/work specs`), in the order of the slices table.
 - Bugs inside the epic keep their own path and can be fixed at any time.

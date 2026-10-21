@@ -35,8 +35,8 @@ Skills live in `.agents/skills/<name>/SKILL.md` (the shared Agent Skills format)
 | Triage and prioritise with the product owner | `/triage [group\|inbox\|backlog\|stale]` | **human only** |
 | Shape an epic with the product owner | `/epic <ID>` or `/epic "<theme>"` | **human only** |
 | Record a decision (G1) | `/decide <ID> approve\|park\|reject` | **human only** |
-| Write the spec | `/spec <ID>` | agent |
-| Start an agent in a new chat window | `/work [bugs\|features\|ideas\|epic <ID>]` | anyone |
+| Write the spec (no ID: the next Backlog feature by priority) | `/spec [<ID>]` | agent |
+| Start an agent in a new chat window | `/work [bugs\|features\|specs\|ideas\|epic <ID>]` | anyone |
 | Pick the next work item | `/next` | agent |
 | Build a ready issue | `/build <ID>` | agent |
 | Prepare UAT | `/uat <ID>` | agent |

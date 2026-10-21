@@ -70,7 +70,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -3746,7 +3746,7 @@ def cmd_capacity(args):
         print(json.dumps(res, indent=2))
         return
     if reasons:
-        print(f"{WARN} Hold new work: " + "; ".join(reasons) + ". Rework (uat-failed) and finishing open PRs are still fine.")
+        print(f"{WARN} Hold new work: " + "; ".join(reasons) + ". Rework (uat-failed), finishing open PRs, specs and assessments are still fine.")
     else:
         print(f"{OK} Room for new work: {open_prs}/{max_prs} open PRs" + (f", {in_uat}/{max_uat} in UAT" if in_uat is not None else ""))
     if reasons_note:

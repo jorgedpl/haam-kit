@@ -76,7 +76,7 @@ Commands are written `/name` below; in Codex use `$name`.
 | Check your setup | `python3 tools/haam/haam.py doctor` |
 
 ### Running agents in parallel
-Open one new chat window per agent and type `/work` (or `/work bugs`, `/work features`; Codex: `$work`). The agent gets its own copy of the project (a git worktree under `.claude/worktrees/`), copies the local files listed in `.worktreeinclude` (like `.env`), picks the top item and works it through to the hand-over. Keep your own chat in the main folder for ideas, decisions and testing.
+Open one new chat window per agent and type `/work` (or `/work bugs`, `/work features`, `/work specs`, `/work ideas`; Codex: `$work`). The agent gets its own copy of the project (a git worktree under `.claude/worktrees/`), copies the local files listed in `.worktreeinclude` (like `.env`), picks the top item and works it through to the hand-over. Keep your own chat in the main folder for ideas, decisions and testing.
 
 - **Claude Code in VS Code:** new chat tab with Cmd+Shift+Esc (Mac) or Ctrl+Shift+Esc (Windows/Linux). In a terminal: `claude --worktree`.
 - **Other tools:** if the tool has its own worktree or parallel-agent option, use it; otherwise `/work` creates the worktree and tells you which folder to open in a new window.

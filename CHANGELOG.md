@@ -6,6 +6,17 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-21
+
+### Added
+- **`/work specs`, and `/spec` with no ID.** Both take the highest-priority Backlog feature with no spec yet that no other chat has claimed, so you can keep one chat writing specs while others build. Before, `/spec` needed an issue number, and `/work` wrote specs only when nothing was Ready to build and no bug was waiting.
+  - `/next` (and `/work`) now say exactly what each filter takes: `bugs`, `features` (Ready features, then specs), `specs`, `ideas`.
+  - "No spec yet" now also leaves out specs that are waiting for the owner's approval.
+
+### Fixed
+- **A capacity hold no longer stops specs and assessments.** They open no PR and add nothing to the owner's test queue. The hold still stops new builds.
+- **Agents no longer assess an epic you haven't shaped.** `/work ideas` used to pick up an epic straight after `/triage group`, before it had a brief. Now `/next` skips an epic with no brief in `docs/epics/` (on `main` or in an open docs PR), and `/assess` stops and suggests `/epic` first, unless you asked for the assessment anyway. `/next` lists such epics among the things waiting for you.
+
 ## [1.11.0] - 2026-10-21
 
 ### Added

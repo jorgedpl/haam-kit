@@ -30,7 +30,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.11.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.12.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -85,7 +85,7 @@ Every command shows a plan first and changes things only with `--apply`. Add `--
 Each agent chat gets its own folder, so chats never overwrite each other's work:
 
 1. Open a new chat window (Claude Code in VS Code: Cmd/Ctrl+Shift+Esc).
-2. Type `/work bugs` (or `/work features`, `/work ideas`, or just `/work`; Codex: `$work`).
+2. Type `/work bugs` (or `/work features`, `/work specs`, `/work ideas`, or just `/work`; Codex: `$work`).
 3. The agent moves into its own git worktree, copies local files like `.env`, claims the top item on the board, builds and tests it, opens the PR and hands you a test plan.
 
 Repeat for as many agents as you want, on any computer with the project cloned. The claim on the board stops two agents taking the same issue, whether to build it, assess it or write its spec. Your own chat stays in the main folder for ideas, decisions, testing and releases.

@@ -1,7 +1,7 @@
 ---
 name: next
 description: Pick the next most valuable unclaimed work item from the three streams (bugs, ready features, ideas needing assessment/spec) and start it. Use when asked "what's next", "pick something up", "work on the backlog" or when running unattended.
-argument-hint: "[bugs|features|ideas]  (optional: restrict to one stream)"
+argument-hint: "[bugs|features|specs|ideas]  (optional: restrict to one kind of work)"
 ---
 
 # /next: pull the next work item
@@ -10,8 +10,10 @@ argument-hint: "[bugs|features|ideas]  (optional: restrict to one stream)"
 
 Filter: $ARGUMENTS (empty = all streams)
 
+What each filter takes, from the queue in step 1: `bugs` → items 0–1 and 3 (bugs only) · `features` → items 0 and 2 (features only), then 4 · `specs` → item 4 only (specs to write) · `ideas` → item 5 only (ideas and epics to assess).
+
 ## 0. Room for new work?
-Run `python3 tools/haam/haam.py capacity` (Linear: first count the issues in `UAT` with the Linear connection and add `--in-uat <count>`). If it says **hold** (too many open PRs, or too many changes waiting for the owner to test; limits in `haam.config.json`; it lists what it counted), only take rework (label `uat-failed`) or finish a PR that's already open. If there's none of that, report the hold and stop: more PRs now would only cost CI minutes and wait.
+Run `python3 tools/haam/haam.py capacity` (Linear: first count the issues in `UAT` with the Linear connection and add `--in-uat <count>`). If it says **hold** (too many open PRs, or too many changes waiting for the owner to test; limits in `haam.config.json`; it lists what it counted), only take rework (label `uat-failed`), finish a PR that's already open, or write specs and assessments (items 4–5 in step 1): those open no PR and add nothing to the owner's test queue, so a hold never stops them. If there's none of that, report the hold and stop: more PRs now would only cost CI minutes and wait.
 
 ## 0b. Your own workspace
 If the item you pick will change files (build, spec, assessment), you need your own worktree when other agent chats may be open on this machine (`AGENTS.md` §7). Run `python3 tools/haam/haam.py worktree status`. In the main folder: Claude Code, move into a new worktree first (as in `/work` step 1); other tools, ask the human whether other chats are running and, if so, follow `/work` step 1.
@@ -26,8 +28,8 @@ Take the first match, in this order. **Batch an epic's items** (always when the 
 1. **Bugs**: label `stream:bug`, status `Ready`, priority Urgent or High.
 2. **Features**: status `Ready`, label `agent-ready`, by priority (Urgent → Low), then oldest first.
 3. **Bugs**: label `stream:bug`, status `Ready`, priority Medium or Low.
-4. **Specs to write**: status `Backlog`, label `stream:feature`, has a priority, no spec yet, not `claimed` → run `/spec`.
-5. **Ideas to assess**: label `stream:idea`, status `Discovery`, unassigned and not `claimed` (triaged for assessment, by priority), then status `Triage` → run `/assess`. Epics (label `epic`) that are still ideas are assessed here as a whole. Skip ideas that belong to an epic still being decided: they are decided with their epic.
+4. **Specs to write**: status `Backlog`, label `stream:feature`, has a priority, not `claimed`, and no spec yet: no `docs/specs/<FILE-ID>-*.md` on `main` or on the issue's branch, and no `📝 Spec ready for review` comment (that one waits for the owner's approval, not for an agent) → run `/spec`.
+5. **Ideas to assess**: label `stream:idea`, status `Discovery`, unassigned and not `claimed` (triaged for assessment, by priority), then status `Triage` → run `/assess`. Epics (label `epic`) that are still ideas are assessed here as a whole, but only once the owner has shaped them: skip an epic with no brief yet (no `docs/epics/<FILE-ID>-*.md` on `main` and none in an open docs PR); it waits for the owner's `/epic`. Skip ideas that belong to an epic still being decided: they are decided with their epic.
 
 **Epics:** never build or spec an epic itself (steps 1–4 skip label `epic`); build and spec its sub-issues. Also skip any issue with label `human-only`, any with no priority (except ideas in step 5), and any whose `blocked by` relations are not Done.
 
@@ -39,4 +41,4 @@ Take the first match, in this order. **Batch an epic's items** (always when the 
 Run the matching skill: `/build` for Ready items, `/spec` for Backlog features, `/assess` for ideas, following that skill's steps exactly (including the claim protocol).
 
 ## 4. Nothing to do?
-Report: count of items waiting on a human (status `Decision`, `UAT`, specs waiting for approval), and stop. Never invent work, and never start items that aren't through their gate.
+Report: count of items waiting on a human (status `Decision`, `UAT`, specs waiting for approval, epics waiting for `/epic` because they have no brief), and stop. Never invent work, and never start items that aren't through their gate.

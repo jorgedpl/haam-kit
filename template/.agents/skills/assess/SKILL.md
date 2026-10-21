@@ -14,7 +14,7 @@ Target: $ARGUMENTS
 2. **Epics:** if the issue is an epic, assess the feature as a whole: read its brief in `docs/epics/` (or, if the brief's PR isn't merged yet, from that PR's branch) and every sub-issue; size is the sum of the slices; risks cover all of them.
 3. **Read context:** `docs/product/PRODUCT.md` (priorities, non-negotiables), `docs/product/ARCHITECTURE.md`, related issues and specs in `docs/specs/`.
 4. **Investigate the codebase** to ground effort and feasibility in reality: which modules change, what data model changes, which external services are involved, which protected areas (`AGENTS.md` §4) are touched.
-5. **Spike (only if `--spike` is passed, or if a key unknown can't be resolved by reading):**
+5. **Spike (only if `--spike` is passed, or if a key unknown can't be resolved by reading):** a small one, to prove or disprove one assumption. For a working prototype the owner can try, use `/spike <ID>` instead.
    - Branch `spike/<branch-name>` from `origin/main`.
    - Time-box it: prove or disprove the single riskiest assumption. Quick and dirty is fine.
    - Record findings, then push the branch. **Never open a PR to merge a spike.**

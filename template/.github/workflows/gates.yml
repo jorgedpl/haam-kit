@@ -12,7 +12,9 @@
 # A pass belongs to the code that was tested: a push after it removes `uat-passed`,
 # unless the new head carries the owner's `uat` commit status (`haam.py publish`
 # posts it on exactly the commit they tested). Drafts included.
-# Docs-only PRs (docs/**, *.md) are exempt.
+# Docs-only PRs (docs/**, *.md) are exempt. Prototypes never merge, whatever the labels: not a spike/ branch, and
+# not files under prototypes/. Code kept from a prototype reaches main only through /spec and a normal branch, and
+# never takes the no-UAT lane (its commits say "spike:").
 # Branch protection on `main` requires the status check named "release-gate".
 name: Gates
 
@@ -164,11 +166,22 @@ jobs:
                 } catch (e) { core.warning(`Couldn't add human-review: ${e.message}`); }
               }
 
+              // Prototypes: a spike branch, or files under prototypes/, never merge.
+              const spikeBranch = /^spike\//i.test(pr.head.ref);
+              const prototypeFiles = paths.filter(f => /^prototypes\//i.test(f));
+
               // The no-UAT lane: every issue the PR is for is an open issue (not a PR) the owner marked uat:skip.
               let lane = false;
               let laneWhy = '';
+              let fromSpike = false;
               if (!docsOnly && labels.includes('uat:skip')) {
-                if (uatMode === 'always') {
+                const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: number });
+                fromSpike = commits.some(c => /^\S+:\s*spike:/i.test((c.commit && c.commit.message) || ''));
+              }
+              if (!docsOnly && labels.includes('uat:skip')) {
+                if (fromSpike) {
+                  laneWhy = 'Built from a prototype (spike commits): needs the owner\'s test';
+                } else if (uatMode === 'always') {
                   laneWhy = 'This project tests every change (setting uat: always): needs UAT';
                 } else if (touched.length) {
                   laneWhy = `uat:skip never applies to protected areas (${touched.slice(0, 3).join(', ')}): needs UAT`;
@@ -199,7 +212,11 @@ jobs:
               let state = 'failure';
               let description = laneWhy || 'Waiting for UAT: needs label uat-passed (or gate-override with reason)';
 
-              if (docsOnly) {
+              if (spikeBranch) {
+                description = 'Spike branch: prototypes never merge. Take it through /spec onto a normal branch';
+              } else if (prototypeFiles.length) {
+                description = `prototypes/ never merges (${prototypeFiles[0]}): move what you keep into the production code`;
+              } else if (docsOnly) {
                 state = 'success';
                 description = 'Docs-only change: UAT not required';
               } else if (labels.includes('uat-passed')) {
@@ -235,7 +252,7 @@ jobs:
               // Anything else that had auto-merge on loses it.
               // Only when CI and both AI reviews really ran on GitHub (HAAM_CI every-pr, HAAM_REVIEW github): with
               // local, reduced or no checks the owner ships lane PRs themselves.
-              const autoLane = lane && state === 'success' && tracker === 'github' && !pr.draft &&
+              const autoLane = lane && state === 'success' && tracker === 'github' && !pr.draft && !spikeBranch &&
                 ['', 'github'].includes(process.env.REVIEW_MODE || '') && ['', 'every-pr'].includes(process.env.CI_MODE || '');
               if (autoLane && !pr.auto_merge) enable.push(number);
               if (!autoLane && pr.auto_merge && !labels.includes('uat-passed') && !labels.includes('gate-override')) disable.push(number);

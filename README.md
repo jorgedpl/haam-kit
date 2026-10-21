@@ -13,11 +13,15 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 - **A lifecycle with five human gates**: decide the idea, approve the spec, automated checks with independent AI review, human acceptance test, production approval. Every gate can be overridden in an emergency, and every override is recorded and followed up.
 - **Three work streams** agents pull from: bugs, ready features, and ideas to assess. The tracker (GitHub Projects or Linear) holds the backlog, priorities and status.
-- **19 shared skills** (`/idea`, `/bug`, `/assess`, `/triage`, `/epic`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/test`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`, `/haam-settings`), in the open Agent Skills format.
+- **20 shared skills** (`/idea`, `/bug`, `/assess`, `/spike`, `/triage`, `/epic`, `/decide`, `/spec`, `/work`, `/next`, `/build`, `/uat`, `/test`, `/uat-result`, `/override`, `/release`, `/haam-setup`, `/haam-onboard`, `/haam-update`, `/haam-settings`), in the open Agent Skills format.
 - **Your settings, your trade-offs:** `/haam-settings` lets the product owner choose when CI and the AI reviews run (every PR, locally, only for protected areas, or off), what they test themselves, how work is grouped (per issue, per epic, or one release PR), whether deploys wait for approval, and the limits, each with its trade-off and the project's own numbers.
 - **Testing in one word, before anything costs CI minutes**: type `/test`, try the agent's change on your computer, reply `pass` (only now is the pull request opened and checked, once, on exactly what you tested) then `ship` (the agent merges, deploys and closes it), or just say what's wrong (it goes straight back to the agents and returns to you when fixed). `/test all` takes everything waiting in one sitting, and `ship --all` deploys it with one approval.
 - **A no-UAT lane** for changes you can't meaningfully test (config, dependency bumps, invisible refactors): mark the issue `uat:skip` once, and its PR merges by itself when CI and both AI reviews pass.
 - **Epics with an agent that asks the right questions**: `/triage group` turns a pile of loose issues into epics (one per feature); `/epic` reads each one, writes a short brief, asks you a few focused questions, then tidies the issues: duplicates, gaps, splits, order.
+- **Room for agents to build big pieces fast, with a guard:**
+  - `/spike` builds a throwaway working prototype for you to try before you decide;
+  - epic build mode lets one agent build a whole feature, slice by slice, with checkpoints, one test and one release;
+  - every change that merges meets every gate, and prototypes never merge.
 - **A decisions guide** ([DECISIONS.md](template/docs/setup/DECISIONS.md)): every choice a team makes when it adopts HAAM, with a recommendation for each. It covers GitHub accounts and the plan you need, GitHub Projects or Linear, the settings, how to size the limits for your testing time, and what to protect. `/haam-setup` walks you through it.
 - **A guide for the product manager** ([PRODUCT-MANAGER.md](template/docs/process/PRODUCT-MANAGER.md)): daily and weekly rhythm, how to triage, priority rules with a bug impact × reach matrix, healthy queue sizes, done with an agent (`/triage`) or directly in GitHub Projects or Linear.
 - **Parallel agents without collisions**: open a new chat window, type `/work bugs`, and the agent gets its own copy of the project (a git worktree), picks the top bug and works it through to your test. Run as many as you like, on one computer or several.
@@ -31,7 +35,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.14.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.15.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:

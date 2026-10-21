@@ -85,6 +85,8 @@ Then apply rounds 1–3:
    - `python3 tools/haam/haam.py config --protected "<patterns>" --human` (it warns about a pattern that matches no file);
    - replace the examples in `AGENTS.md` §4 with the same areas in words.
 
+   **Production code** (`DECISIONS.md` §8): by default everything except prototypes, tests and docs counts as production code, which always meets every gate. If the product's code clearly lives in a few folders (e.g. `src/`, `api/`, `mobile/`), propose `config --production "src/**,api/**" --human` and, for folders that never run for users (fixtures, sample data, internal tools), `config --not-production "…" --human`. Tell them in one line that `/spike` and epic build mode exist for when they want agents to build freely.
+
    If the tests use something the whole machine shares (a local database they clone, a simulator, a device), also propose `config --heavy-run "<pattern>"` (`DECISIONS.md` §7).
 4. **Product context:** draft `docs/product/PRODUCT.md` from the README and code, then ask the human to correct it, especially *Current priorities* and *Non-negotiables*. Don't invent business facts.
 5. **Onboarding doc:** fill the `TODO(setup)` items in `docs/ONBOARDING.md` (clone URL, runtime, local URL).

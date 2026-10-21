@@ -14,7 +14,7 @@ Five gates stand between an idea and production. Each one has a clear owner, a c
 
 ## G1 Decision checklist
 
-The assessment must contain:
+The assessment (or, for an idea built as a prototype, the prototype's notes from `/spike`) must contain:
 - [ ] Problem statement and who it's for
 - [ ] Value estimate with evidence (or an explicit "no evidence yet")
 - [ ] Effort size with reasoning from the codebase
@@ -22,7 +22,7 @@ The assessment must contain:
 - [ ] At least two options plus "do nothing"
 - [ ] A recommendation
 
-The human answers one of: **approve** (with priority), **park** (with revisit trigger), **reject** (with reason).
+The human answers one of: **approve** (with priority), **park** (with revisit trigger), **reject** (with reason). For a prototype, they try it first (`/test`), so the decision rests on using it rather than reading about it.
 
 ## G2 Definition of Ready
 

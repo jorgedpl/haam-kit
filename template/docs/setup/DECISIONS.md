@@ -25,6 +25,7 @@ The product owner makes these, with the project admin. `/haam-setup` walks throu
 | Limits | `settings --recommend` | Your testing time or the number of agents changes | §5 |
 | Protected areas | The defaults, plus your sensitive code | The architecture changes | §6 |
 | Shared test resources (`heavy_runs`) | None | Tests share a local database, a simulator or a device | §7 |
+| How much freedom agents get | Prototypes and epic build mode when you ask for them; production code is everything except prototypes, tests and docs | You want agents to explore more, or your production code lives in a few folders | §8 |
 
 ## 1. GitHub account, organization and plan
 
@@ -156,6 +157,32 @@ Review the list whenever `docs/product/ARCHITECTURE.md` changes.
 
 ## 7. Shared test resources
 Some tests use something the whole computer shares, such as a local database the tests clone, a phone simulator or a connected device. Two agent chats running them at once break each other, and the failure looks like a broken change. List those commands as patterns: `config --heavy-run "make (check|test-integration)"`. Agents then run them one at a time through `haam.py exclusive`. Leave the list empty when your tests are self-contained.
+
+## 8. How much freedom agents get
+Agents can build big pieces fast, the way people "vibe-code" with AI, wherever a mistake is cheap to throw away. Everything that runs for real users stays behind the gates.
+
+**A few words used here:**
+- **Prototype** (or **spike**): a quick, throwaway working version of an idea, built to be tried, never shipped as it is.
+- **Slice:** one shippable piece of an epic, with its own issue and spec.
+- **Lead agent:** the one agent chat that builds a whole epic. It can hand independent slices to helper agents (**sub-agents**).
+- **Feature flag:** a switch in the code that keeps a new feature hidden until someone turns it on.
+- **Production code:** the code that runs for real users.
+
+Three choices:
+
+| Choice | What it does | When to use it |
+|---|---|---|
+| **Prototype first.** Type `/spike`, or choose `prototype` in `/triage` | An agent builds a prototype on a `spike/` branch, with no spec, PR or size limit. You try it with `/test`. Then you say `discard`, `change: <what>`, `rebuild` (spec it and build it fresh) or `keep` (spec it and build from that code) | When trying the idea tells you more than reading about it: a new screen, a flow, an integration you're unsure of |
+| **Epic build mode.** Label an approved epic `mode:epic-build`; `/decide` and `/triage backlog` offer it | One lead agent builds every slice of the epic on one branch, with a checkpoint after each slice. You test and ship the whole feature once | A feature whose slices only make sense together, or that you'd rather judge as a whole |
+| **What counts as production code** (`production_paths`, `non_production_paths`) | Tells agents and you what runs for users, so a prototype's notes and `haam.py production` show what a change would touch. Prototypes, tests and docs sit outside it by default | Narrow it when your product lives in a few folders: `config --production "src/**,api/**" --human`. Add folders that never run for users with `config --not-production "…" --human`. If your docs are what users see, take them out of the list with `config --remove-not-production "docs/**" --human` |
+
+Whatever the mode, every change that merges meets every gate. The guard behind that:
+- a prototype never merges: the release gate refuses `spike/` branches and anything under `prototypes/`, and `publish` refuses spikes;
+- kept prototype code reaches users only through `/spec`, a normal branch and your test, behind a feature flag that's off by default. It never takes the no-UAT lane: the gate sees its `spike:` commits;
+- production code never imports from `prototypes/`, and the AI reviewer blocks it if it does;
+- a prototype never changes protected areas, and `/test` shows you its changed protected files and new dependencies before running anything;
+- protected areas always get your code review;
+- no agent touches production systems or data, in any mode.
 
 ## Sources
 - GitHub: [About rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) (plans that include them) · [Deployments and environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) (required reviewers on private repositories) · [About GitHub Advanced Security](https://docs.github.com/en/get-started/learning-about-github/about-github-advanced-security) (Secret Protection) · [Pricing](https://github.com/pricing)

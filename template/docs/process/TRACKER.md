@@ -19,9 +19,9 @@ Skills say "in the tracker"; this page says how to do each operation in each tra
 | Files for the issue | `docs/specs/GH-123-slug.md` (same for assessments, UAT) | `docs/specs/APP-123-slug.md` |
 | 12 statuses | Board's **Status** field | Team workflow statuses |
 | Priority | Board's **Priority** field (Urgent/High/Medium/Low) | Built-in priority |
-| Streams, `agent-ready`, `human-only`, `override-followup`, `epic`, `uat-failed`, `claimed` | Issue labels | Issue labels |
+| Streams, `agent-ready`, `human-only`, `override-followup`, `epic`, `uat-failed`, `claimed`, `mode:prototype`, `mode:epic-build`, `spike-ready` | Issue labels | Issue labels |
 | Epic (groups the issues of one feature) | Issue labelled `epic`; its issues are GitHub **sub-issues** | Issue labelled `epic`; its issues are **sub-issues** (parent set) |
-| Who is working on it | Status In Progress (building) or label `claimed` (assessing, writing a spec), plus the claim comment. The assignee alone can't tell two chats of the same person apart | Same |
+| Who is working on it | Status In Progress (building) or label `claimed` (assessing, writing a spec, building a prototype), plus the claim comment. The assignee alone can't tell two chats of the same person apart | Same |
 | Status moves on PR open/merge | `tracker-sync.yml` workflow | Linear's GitHub integration |
 
 ## Operations
@@ -43,6 +43,8 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 | **An epic's issues** | `haam.py issue children 9` (with progress) | List the epic's sub-issues |
 | **Issues not in any epic** | `haam.py issue list --open-only --no-parent --no-label epic` | List issues without a parent |
 | **Claim** (before building, assessing or writing a spec) | `haam.py issue claim 123 --tool "Claude Code" --machine laptop` (build: refuses if already claimed or not Ready; `--force` for bugs being fixed straight from Triage only when the human said so). Assessing: add `--for assess`; writing a spec: `--for spec`. It prints a claim id: keep it | Re-fetch; if In Progress, labelled `claimed` or assigned to someone else, stop; else assign to you, set In Progress (build) or add label `claimed` (assess, spec), comment with a claim id, re-read the comments (AGENTS.md §6) |
+| **Build a prototype** (`/spike`) | `haam.py issue claim 123 --for spike` (ideas in Triage to Decision, Backlog features), then when pushed: `issue label 123 --add spike-ready` and `issue release 123 --claim <id> --status Decision` (a Backlog feature: no `--status`) | Claim as above (label `claimed`, a claim comment saying "to build a prototype"), label `spike-ready`, release |
+| **Production code in a change** | `haam.py production` (the files a branch changes that run for users) | Same |
 | **Release a claim** (assessment or spec pushed; or the chat stops) | `haam.py issue release 123 --claim <id> [--status Decision]` (`--human` instead of the id only in `/triage stale` or `/test`) | Unassign, remove `claimed`, set the status, comment `🔓 Claim released` |
 | **Change status** | `haam.py issue status 123 "UAT"` | Update issue status |
 | **Human-only status** (Done, Parked, Canceled, Decision→Backlog) | Same, plus `--human`, **only** inside `/triage`, `/epic`, `/decide`, `/test`, `/release` or `/override` typed by a human | Same rule |
@@ -68,7 +70,7 @@ Commands in the GitHub column run from the repository root. Add `--json` for mac
 - Every piece of work has an issue in the tracker; nothing is tracked anywhere else.
 - If the tracker can't be reached, stop and tell the human.
 - The claim protocol is what stops two agent chats (or two machines) building, assessing or specifying the same thing. Never skip it.
-- Human-only moves happen only inside the human-only skills, and the tool asks for `--human` on GitHub as a reminder.
+- Human-only moves happen only inside the human-only skills, and the tool asks for `--human` on GitHub as a reminder. Agents act under the owner's own login, so GitHub can't tell who set an owner's label (`uat:skip`, `mode:prototype`, `mode:epic-build`): that's a rule, checked by the tool on GitHub Projects and by nothing on Linear. An agent that broke it with plain `gh` could, with `uat:skip`, let a change outside the protected areas skip your test; CI and both AI reviews still run, and deploys still wait for you where your plan allows.
 
 ## GitHub Projects setup (admin, once)
 

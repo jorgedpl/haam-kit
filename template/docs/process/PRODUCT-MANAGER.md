@@ -88,6 +88,7 @@ For each item, answer four questions:
 | Bug without enough to go on | **Needs info** | Stays in Triage, with your question as a comment | You or the reporter answer, then triage again |
 | Urgent bug | **Ready, start now** | Ready, Urgent | Start an agent now; `/override` is available if the deploy can't wait |
 | Idea worth exploring | **Assess** | Discovery, with a priority | An agent writes the assessment (`/work ideas` or `/assess #12`) |
+| Idea you'd understand better by trying it | **Prototype** | Discovery, label `mode:prototype` | An agent builds a throwaway working version (`/spike #12`); you try it with `/test` and decide |
 | Good idea, wrong time | **Park** | Parked, with a "revisit when…" comment | Comes back at a weekly review |
 | Idea you won't do | **Reject** | Canceled, with a one-line reason | Closed |
 | Duplicate | **Duplicate** | Canceled, linked to the original | Closed |

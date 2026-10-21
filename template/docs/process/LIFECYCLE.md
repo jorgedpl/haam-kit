@@ -57,8 +57,8 @@ flowchart LR
 | # | Status | Linear category (Linear only) | Meaning | Who moves it here |
 |---|---|---|---|---|
 | 1 | **Triage** | Triage | New idea or bug, unassessed | Anyone (`/idea`, `/bug`) |
-| 2 | **Discovery** | Backlog | Being assessed: value, effort, risk, feasibility spike | Agent (`/assess`) |
-| 3 | **Decision** | Backlog | Assessment done, waiting for a human call (**G1**) | Agent, after `/assess` |
+| 2 | **Discovery** | Backlog | Being assessed (value, effort, risk, feasibility spike), or built as a throwaway prototype for the owner to try | Agent (`/assess`, or `/spike` when the owner chose `prototype`) |
+| 3 | **Decision** | Backlog | Assessment or prototype done, waiting for a human call (**G1**) | Agent, after `/assess` or `/spike` |
 | 4 | **Backlog** | Backlog | Approved, prioritised, needs a spec | Human (`/decide approve`) |
 | 5 | **Ready** | Unstarted | Spec approved, Definition of Ready met (**G2**), label `agent-ready` | Human approves spec |
 | 6 | **In Progress** | Started | An agent or developer has claimed it and is building | Agent (`/build`) |
@@ -72,6 +72,10 @@ flowchart LR
 **Test-first order (the default, `"flow": "test-first"`):** the owner tests before any PR exists, so after In Progress the issue goes to **UAT** (G4, on the agent's pushed branch), then, when they pass it, **In Review** (the PR opens and G3's checks and reviews run once, on the tested commit), then Deploying and Done. A failed test, or a failed check, sends it back to Ready with `uat-failed`; changed code is always tested again. Projects that prefer the checks first (`"flow": "checks-first"`) use the order in the table. Either way, a pass belongs to the commit that was tested: a later push removes `uat-passed`.
 
 **No-UAT lane (`uat:skip`):** for changes the owner can't meaningfully test (a kit or config update, a dependency bump, an invisible refactor, CI), they mark the issue `uat:skip` when triaging it or approving its spec. The agent then skips UAT: the PR opens straight away, CI and both AI reviews run, the gate passes because the owner marked the issue, and on GitHub Projects the PR merges by itself (auto-merge; on Linear the owner ships it). The issue goes In Progress → In Review → Deploying, and to Done with the owner's next `ship` of anything: the production deploy still needs their approval, and one deploy carries every change merged before it. Never for protected areas (`human-review`). (On Linear, its GitHub integration may mark the issue Done at merge, before the deploy.)
+
+**Prototypes and epic build mode:** two ways to let agents build big pieces fast without loosening the gates (`docs/setup/DECISIONS.md` §8).
+- **Prototype first** (`/spike`): an agent builds a throwaway working version on a `spike/` branch, before the decision or the spec. The owner tries it and says `discard`, `change`, `rebuild` or `keep`. A spike never merges. What's kept goes through `/spec` and the normal gates.
+- **Epic build mode** (label `mode:epic-build`): one lead agent builds every slice of an approved epic on one branch, with a checkpoint after each slice. The owner tests and ships the whole feature once.
 
 **Shipping in batches:** `/test all` tests everything waiting in one sitting, and `ship --all` merges what passed plus what the lane merged, then approves **one** production deploy for all of them (older waiting deploy runs are cancelled: the newest carries every change).
 
@@ -179,7 +183,7 @@ How to triage and choose priorities (levels, bug impact × reach, value/confiden
 |---|---|---|
 | Idea, bug, status, priority, discussion | Tracker issue | `/idea`, `/bug` |
 | Assessment and feasibility | `docs/assessments/APP-123-*.md` | `/assess` |
-| Spike code | branch `spike/app-123-*` (never merged) | `/assess` |
+| Spike code | branch `spike/app-123-*` (never merged; refused by the release gate) | `/assess`, `/spike` |
 | Decision record (technical) | `docs/decisions/NNNN-*.md` (ADR) | `/decide`, `/spec` |
 | Epic brief | `docs/epics/APP-123-*.md` | `/epic` |
 | Feature spec | `docs/specs/APP-123-*.md` | `/spec` |

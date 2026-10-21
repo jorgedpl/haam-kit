@@ -72,7 +72,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -85,6 +85,10 @@ if os.environ.get("HAAM_LINEAR_API", "").startswith("http://127.0.0.1:"):
 LINEAR_MCP = "https://mcp.linear.app/mcp"
 
 TRACKERS = ("github", "linear")
+
+NON_PRODUCTION_DEFAULT = ["prototypes/**", "docs/**", "**/*.md", "tests/**", "test/**", "**/__tests__/**",
+                          "**/*.test.*", "**/*.spec.*", "**/*_test.*", "**/test_*.py", "**/src/test/**",
+                          "**/src/androidTest/**", "**/*Tests/**"]
 
 DEFAULT_CONFIG = {
     "product_name": "",
@@ -124,6 +128,11 @@ DEFAULT_CONFIG = {
     # as regular expressions matched against the process list. `haam.py exclusive` waits until none of them is running
     # (and takes the machine-wide lock), so two chats' runs never collide. Empty: nothing waits.
     "heavy_runs": [],
+    # Production code: what runs for real users. A change there always meets every gate, whatever mode it was built
+    # in; prototypes, tests and docs are outside it. production_paths minus non_production_paths. Spike branches
+    # (spike/…) never merge.
+    "production_paths": ["**"],
+    "non_production_paths": NON_PRODUCTION_DEFAULT,
     "_applied": {"team_key": PLACEHOLDER_KEY, "product_name": ""},
 }
 
@@ -212,6 +221,7 @@ GITHUB_LABELS = [
     ("human-review", "FBCA04", "Touches protected area; human code review required"),
     ("ai-review-overruled", "5319E7", "Human overrules the AI reviews on this PR"),
     ("uat:skip", "C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
+    ("epic-build", "3E4B9E", "One PR for a whole epic, built slice by slice: review it per slice"),
 ]
 
 # (name, Linear state type, colour)
@@ -964,6 +974,8 @@ def cmd_config(args):
     owner_flags = [f for f, v in (("--flow", args.flow), ("--deploy", args.deploy), ("--protected", args.protected),
                                   ("--unprotected", args.unprotected), ("--max-open-prs", args.max_open_prs),
                                   ("--max-in-uat", args.max_in_uat), ("--until", args.until),
+                                  ("--production", args.production), ("--not-production", args.not_production),
+                                  ("--remove-not-production", args.remove_not_production),
                                   ("--end-batch-window", args.end_batch_window or None)) if v is not None]
     if owner_flags and (root / CONFIG_NAME).exists() and not args.human:
         sys.exit(f"{', '.join(owner_flags)}: these are the owner's settings. Change them inside /haam-settings (or "
@@ -1020,6 +1032,18 @@ def cmd_config(args):
             if x.strip() and tracked and not protected_matches([x.strip()], tracked):
                 rep.add("warn", f"Protected pattern '{x.strip()}' matches no file in the repository",
                         "check the spelling (e.g. src/auth/** for everything in src/auth)")
+    if args.production is not None:
+        cfg["production_paths"] = [x.strip() for x in args.production.split(",") if x.strip()] or ["**"]
+        tracked = git_out(root, "ls-files").splitlines()
+        for x in cfg["production_paths"]:
+            if tracked and not protected_matches([x], tracked):
+                rep.add("warn", f"Production pattern '{x}' matches no file in the repository", "check the spelling")
+    if args.not_production or args.remove_not_production:
+        cur = list(cfg.get("non_production_paths") if cfg.get("non_production_paths") is not None
+                   else NON_PRODUCTION_DEFAULT)
+        cur += [x.strip() for x in (args.not_production or "").split(",") if x.strip() and x.strip() not in cur]
+        drop = {x.strip() for x in (args.remove_not_production or "").split(",") if x.strip()}
+        cfg["non_production_paths"] = [x for x in cur if x not in drop]
     if args.clear_heavy_runs:
         cfg["heavy_runs"] = []
     for x in args.heavy_run or []:
@@ -1060,7 +1084,7 @@ def cmd_config(args):
     missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
     for k in ("product_name", "tracker", "team_key", "github_repo", "product_owner_github",
               "production_url", "agents", "deploy", "flow", "max_open_prs", "max_in_uat", "protected_paths",
-              "heavy_runs") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
+              "production_paths", "non_production_paths", "heavy_runs") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
         v = cfg.get(k)
         rep.add("ok" if v else ("info" if k == "heavy_runs" else "warn"), f"{k}: {v if v else '(not set)'}")
     if missing:
@@ -1709,6 +1733,9 @@ GH_ISSUE_LABELS = [
     ("uat-failed", "D93F0B", "Failed the human test: rework first, then test again"),
     ("uat:skip", "C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
     ("claimed", "FBCA04", "An agent chat is assessing it or writing its spec: leave it to that chat"),
+    ("mode:prototype", "D4C5F9", "Owner decided: an agent builds a throwaway prototype first (/spike)"),
+    ("mode:epic-build", "3E4B9E", "Owner decided: one lead agent builds this whole epic, slice by slice"),
+    ("spike-ready", "D4C5F9", "A prototype is ready for the owner to try (/test)"),
 ]
 CLAIMED_LABEL = "claimed"
 CLAIM_MARK, RELEASE_MARK = "🤖 Claimed by", "🔓 Claim released"
@@ -1716,7 +1743,9 @@ CLAIM_RACE_MINUTES = 10
 EPIC_LABEL = "epic"
 # Issue labels only a human's decision adds (agents pass --human only inside the skill where the human decided)
 HUMAN_LABELS = {"agent-ready": "agent-ready is added only after a human approves the spec",
-                "uat:skip": "uat:skip (no UAT, merges by itself) is the owner's decision"}
+                "uat:skip": "uat:skip (no UAT, merges by itself) is the owner's decision",
+                "mode:prototype": "mode:prototype (an agent builds a prototype first) is the owner's decision",
+                "mode:epic-build": "mode:epic-build (one agent builds the whole epic) is the owner's decision"}
 # Moving into these needs a human decision (they're done through human-only skills)
 HUMAN_STATUSES = {"Done", "Parked", "Canceled"}
 PROJECT_TOKEN_SECRET = "HAAM_PROJECT_TOKEN"
@@ -2477,6 +2506,10 @@ def issue_action(args, cfg, board):
         elif phase == "assess":
             if iss["status"] not in ("Triage", "Discovery", None):
                 raise RuntimeError(f"#{number} is in {iss['status']}: only ideas in Triage or Discovery are assessed.")
+        elif phase == "spike":
+            if iss["status"] not in ("Triage", "Discovery", "Decision", "Backlog", None):
+                raise RuntimeError(f"#{number} is in {iss['status']}: prototypes are built for ideas (Triage to "
+                                   "Decision) and Backlog features, before their spec.")
         elif phase == "spec":
             if not (iss["status"] == "Backlog" or (bug and iss["status"] in ("Triage", "Ready"))):
                 raise RuntimeError(f"#{number} is in {iss['status']}: specs are written for Backlog features "
@@ -2496,12 +2529,13 @@ def issue_action(args, cfg, board):
             raise RuntimeError(err or out)
         if phase == "build":
             board.set_option(iss, "Status", "In Progress")
-        elif phase == "assess" and iss["status"] != "Discovery":
+        elif phase in ("assess", "spike") and iss["status"] in ("Triage", None):
             board.set_option(iss, "Status", "Discovery")
         tool = args.tool or "an agent"
         where = f" on {args.machine}" if args.machine else ""
         branch = args.branch or (f"{number}-<short-title>" if phase == "build" else "")
-        what = {"build": "", "assess": " to assess it", "spec": " to write its spec"}[phase]
+        what = {"build": "", "assess": " to assess it", "spec": " to write its spec",
+                "spike": " to build a prototype"}[phase]
         body = (f"{CLAIM_MARK} @{me} via {tool}{where}{what}" + (f" · branch `{branch}`" if branch else "")
                 + f" · claim {token}")
         code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
@@ -2527,7 +2561,9 @@ def issue_action(args, cfg, board):
         release = f"python3 tools/haam/haam.py issue release {number} --claim {token}"
         nxt = {"build": f"Branch: git fetch origin && git switch -c {number}-<short-title> origin/main",
                "assess": f"When the assessment is pushed: {release} --status Decision",
-               "spec": f"When the spec is pushed: {release}"}[phase]
+               "spec": f"When the spec is pushed: {release}",
+               "spike": "Branch spike/<branch name>; when the prototype is pushed, label it spike-ready and "
+                        + (f"{release} --status Decision" if "stream:idea" in iss["labels"] else release)}[phase]
         return {"number": number, "assignee": me, "claim": token, "phase": phase,
                 "message": f"Claimed #{number} for @{me}{what} (claim {token}). {nxt}"}
 
@@ -2763,7 +2799,10 @@ def cmd_checkout_pr(args):
     print(f"{OK} {show_ref(ref)}: testing {branch} at {sha[:8]} ({where})")
     if note:
         print(f"{WARN} {note}")
-    print(f"   Test plan: {res['uat_plan'] or 'not found in docs/uat/ (ask the agent to run /uat)'}")
+    if (branch or "").lower().startswith("spike/"):
+        print("   A prototype: how to try it is in its notes (prototypes/<slug>/README.md or docs/spikes/).")
+    else:
+        print(f"   Test plan: {res['uat_plan'] or 'not found in docs/uat/ (ask the agent to run /uat)'}")
     print("   Next: make setup && make dev, then follow the plan. Afterwards: python3 tools/haam/haam.py checkout-pr --back")
 
 
@@ -2875,6 +2914,8 @@ def cmd_publish(args):
     ref = issue_ref(cfg, args.issue)
     repo = cfg["github_repo"]
     sha, tested_branch = tested_sha(root, ref), tested_branch_of(root, ref)
+    if (tested_branch or "").lower().startswith("spike/"):
+        sys.exit("That was a prototype (a spike branch): it never ships. Say discard, redo or keep (/test 3c).")
     if not sha:
         sys.exit(f"No record of a test for {show_ref(ref)}. Test it first: python3 tools/haam/haam.py checkout-pr {args.issue}")
     run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
@@ -2885,6 +2926,8 @@ def cmd_publish(args):
         sys.exit(str(e))
     if not branch:
         sys.exit(f"No branch found for {show_ref(ref)}.")
+    if branch.lower().startswith("spike/"):
+        sys.exit("That's a prototype (a spike branch): it never ships. Say discard, redo or keep (/test 3c).")
     if tested_branch and branch != tested_branch:
         sys.exit(f"The test was of {tested_branch}, but the PR is on {branch}. Test it again first.")
     issues = tracker_issues(cfg, ref, branch, args.also)     # read before pushing, so a bad ID changes nothing
@@ -4174,6 +4217,8 @@ def cmd_settings(args):
                 print(f"      {'→' if o == r['value'] else '·'} {o}: {r['options_help'].get(o, '')}")
     print(f"\n  protected_paths    {', '.join(cfg.get('protected_paths') or [])}")
     print(f"  heavy_runs         {', '.join(cfg.get('heavy_runs') or []) or '(none: haam.py exclusive only takes turns)'}")
+    print(f"  production code    {', '.join(cfg.get('production_paths') or ['**'])}, except "
+          f"{', '.join((cfg.get('non_production_paths') or NON_PRODUCTION_DEFAULT)[:6])} …")
     if window:
         print(f"  batch window       until {window['until']}: " + ", ".join(f"{k} {v}" for k, v in window.items()
                                                                            if k != "until"))
@@ -5204,6 +5249,38 @@ def cmd_overlap(args):
         print(f"{OK} No overlap with the {len(waiting)} branch(es) waiting for the owner's test.")
 
 
+def production_files(cfg, files):
+    """The files that are production code: in production_paths and not in non_production_paths."""
+    prod = protected_matches(cfg.get("production_paths") or ["**"], files)
+    keep_out = set(protected_matches(cfg.get("non_production_paths") or [], prod))
+    return [f for f in prod if f not in keep_out]
+
+
+def cmd_production(args):
+    """Which changed files are production code (what runs for users), compared with the base."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    base = args.base or default_base(root)
+    code, out, err = run(["git", "diff", "--name-only", "--no-renames", f"{base}...HEAD"], cwd=root)
+    if code != 0 or base == "HEAD":
+        sys.exit(f"Couldn't compare with {base} ({(err or 'no base branch').strip()[:160]}). Fetch first, or pass --base.")
+    files = out.splitlines()
+    hits = production_files(cfg, files)
+    branch = git_out(root, "branch", "--show-current") or ""
+    res = {"base": base, "production": hits, "other": [f for f in files if f not in hits],
+           "spike": branch.startswith("spike/")}
+    if args.json:
+        print(json.dumps(res, indent=2))
+    elif hits:
+        print(f"{WARN} Production code changed ({len(hits)} file(s)): " + ", ".join(hits[:20])
+              + (" …" if len(hits) > 20 else ""))
+        if res["spike"]:
+            print("   On a spike branch that's fine, but it can't ship as it is: it goes through /spec and the gates.")
+    else:
+        print(f"{OK} No production code changed (compared with {base}): only " + (", ".join(files[:8]) or "nothing"))
+    sys.exit(1 if hits and args.check else 0)
+
+
 def cmd_hooks(args):
     root = find_repo_root(Path.cwd())
     rep = Report()
@@ -5482,6 +5559,11 @@ def main():
     p.add_argument("--heavy-run", action="append", help="add a heavy run (regex on the process list) for haam.py "
                    "exclusive, e.g. 'make (check|test-integration)' (repeatable)")
     p.add_argument("--clear-heavy-runs", action="store_true", help="empty the heavy_runs list")
+    p.add_argument("--production", help="what counts as production code: path patterns, comma-separated, replacing "
+                   "the list (default: everything, e.g. 'src/**,api/**')")
+    p.add_argument("--not-production", help="add path patterns that are never production code (prototypes, tests…)")
+    p.add_argument("--remove-not-production", help="remove patterns from the not-production list, e.g. 'docs/**' "
+                   "when your docs site is what users see")
     p.add_argument("--protected", help="add protected path patterns, comma-separated (e.g. 'src/auth/**,db/migrations/**')")
     p.add_argument("--unprotected", help="remove protected path patterns, comma-separated")
     p.add_argument("--max-open-prs", type=int, help="agents hold new builds at this many ready PRs (default 10; drafts "
@@ -5535,7 +5617,7 @@ def main():
     p.add_argument("--tool", help="claim: agent tool, e.g. 'Claude Code'")
     p.add_argument("--machine", help="claim: which computer, e.g. 'desktop'")
     p.add_argument("--branch", help="claim: branch name")
-    p.add_argument("--for", dest="for_", choices=["build", "assess", "spec"],
+    p.add_argument("--for", dest="for_", choices=["build", "assess", "spec", "spike"],
                    help="claim: what this chat is about to do (default build)")
     p.add_argument("--claim", help="release/status: this chat's claim id (printed by claim, and in its comment)")
     p.add_argument("--force", action="store_true", help="claim: allow a non-Ready issue (bugs); status: move an issue "
@@ -5589,6 +5671,11 @@ def main():
     p.add_argument("--base", help="compare with this ref (default: origin/main)")
     p.add_argument("--check", action="store_true", help="exit 1 if any protected file changed")
     p.set_defaults(func=cmd_protected)
+
+    p = common(sub.add_parser("production", help="list changed files that are production code (what runs for users)"))
+    p.add_argument("--base", help="compare with this ref (default: origin/main)")
+    p.add_argument("--check", action="store_true", help="exit 1 if any production file changed")
+    p.set_defaults(func=cmd_production)
 
     p = common(sub.add_parser("hooks", help="turn on the commit secret scan without switching off your own git hooks"))
     p.add_argument("--apply", action="store_true")

@@ -6,6 +6,37 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-10-21
+
+Room for agents to build big pieces fast, with a guard on what reaches users.
+
+### Added
+- **`/spike`: build it to find out.**
+  - **What it does:** an agent builds a throwaway working prototype of an idea or a Backlog feature on a `spike/` branch, with no spec, no PR and no size limit. Stand-alone code goes in `prototypes/<slug>/`. Its notes say how to try it, what was learned, which production files it changed, and what doing it properly would take.
+  - **Limits:** a prototype never changes protected areas or adds workflows, and uses only test or sandbox keys.
+  - **How you start it:** type `/spike <ID>`, or choose `prototype` in `/triage` (label `mode:prototype`). `/work ideas` then builds a prototype instead of writing an assessment, and `/work specs` does the same for a Backlog feature before its spec. Claims use `issue claim --for spike`.
+  - **How you judge it:** `/test` lists prototypes to try (label `spike-ready`). Before running anything, it shows you the protected files and new dependencies the prototype changes, and the commands it will run.
+  - **What you decide:**
+    - `discard`;
+    - `change: <what>`: the agent carries on on the same branch;
+    - `rebuild`: spec it and build it fresh;
+    - `keep`: spec it and build from the prototype's commits, behind a feature flag that's off by default, with a follow-up issue to turn it on.
+- **Epic build mode.** When you approve an epic, `/decide` offers the label `mode:epic-build` (`/triage backlog` too).
+  - `/work epic <ID>` then has one lead agent build every Ready slice on one branch named after the first slice, in the brief's order. It can hand independent slices to sub-agents. Other chats leave those slices alone.
+  - It posts a checkpoint on the epic after each slice, and follows a redirect only from the product owner.
+  - You test the whole feature once, from one plan. One PR, labelled `epic-build`, carries every slice, and the AI reviewer reviews it slice by slice. The 400-line target applies per slice. It works with test-first; with checks-first or release grouping, the slices go as an ordinary batch.
+- **What counts as production code:** `production_paths` minus `non_production_paths` in `haam.config.json`. By default that's everything except prototypes, tests and docs.
+  - `haam.py production` lists the production files a branch changes.
+  - `config --production`, `--not-production` and `--remove-not-production` change the list. They're the owner's settings, so they need `--human`.
+- **Prototypes never merge.** The release gate refuses `spike/` branches (in any case) and PRs with files under `prototypes/`, whatever their labels, an override included. `publish` refuses spikes. Kept prototype code never takes the no-UAT lane: the gate looks for `spike:` commits. The AI reviewer blocks production code that imports from `prototypes/`, and a flag-gated change whose flag isn't off by default.
+- **Labels:** `mode:prototype` and `mode:epic-build` (the owner's decisions; agents need `--human`), `spike-ready` (issues) and `epic-build` (PRs).
+- `DECISIONS.md` §8, *How much freedom agents get*. `/haam-setup` and `/haam-settings` cover the production paths. G1 accepts a prototype's notes in place of an assessment.
+
+### Migration
+- `haam.py update`, then merge the updated `gates.yml` and `.github/review/REVIEWER.md`.
+- GitHub Projects: `haam.py github-project --apply` and `haam.py github --apply` add the new labels. Linear: create them (`LINEAR-SETUP.md` §3).
+- Optional: narrow production code to your real folders with `config --production "src/**,…" --human`.
+
 ## [1.14.0] - 2026-10-21
 
 Help a new team make the right choices.

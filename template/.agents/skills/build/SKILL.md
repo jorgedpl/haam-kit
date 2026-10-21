@@ -34,6 +34,8 @@ git switch <branch>                      # existing branch: tracks origin/<branc
 git switch -c <branch> origin/main       # new: 123-short-title (GitHub) or Linear's branch name
 ```
 **Batch of an epic's items** (from `/next` or `/work epic <ID>`): claim each one (GitHub: `issue claim <n> --branch <branch>`), use one branch named after the first (`12-<epic-slug>`), and one PR titled `#12 #13 #14: <summary> (epic #9)` whose description has a `Refs #n` line for each. Each bug still gets its own failing test first, and each feature's acceptance criteria their tests. Keep the batch under `max_pr_lines` changed lines (default 400); if it grows past that, open a second batch.
+**From a prototype** (the spec says to build from a spike's commits): on the issue's branch (the one with the spec), bring the prototype in with `git merge --no-ff origin/spike/<…>`, then turn it into production code. Move the code out of `prototypes/` into the production paths, write the tests the spec asks for, and put what users would see behind the feature flag the spec names, off by default. Run `python3 tools/haam/haam.py production` to see the production code you're changing. The PR then goes through the normal gates; the spike branch itself never merges.
+**Epic build mode** (the epic has label `mode:epic-build`, the owner's decision): see *Epic build mode* at the end of this skill.
 Reworking an issue that already has a branch (review feedback, or label `uat-failed`): read the `❌ UAT failed` comment and fix every item on it; `git switch <branch> && git pull`. If git says the branch is checked out in another worktree under `.claude/worktrees/`, continue in that worktree (Claude Code: enter it); otherwise ask the human. Then hand it over again as step 7 says for your flow, so it comes back to the human.
 
 ## 3. Plan
@@ -89,3 +91,14 @@ Pushing a branch costs nothing; pull requests are what start CI and the reviews.
 
 ## 9. If you must stop early
 Push the branch (checks-first: as a **draft** PR), and post the handover comment (Done / Not done / Next step / Gotchas).
+
+## Epic build mode
+For an epic the owner labelled `mode:epic-build` (`/work epic <ID>` leads here). One lead chat builds the whole feature on one branch, slice after slice, and the owner tests and ships it once. Everything else in this skill still applies to each slice.
+1. **Take the slices:** the epic's sub-issues that are `Ready` with `agent-ready`, in the order of the epic's brief (`docs/epics/`). Claim each as you start it (GitHub: `issue claim <n> --branch <epic branch>`). A slice that isn't Ready yet waits for its spec approval; carry on with the others and come back to it.
+2. **One branch,** named after the first slice: `<first slice number>-<epic slug>` from `origin/main` (Linear: the first slice's branch name). Not after the epic: the epic would then count as one of the PR's issues and be closed by `ship`. Every commit starts with its slice's ID (`#13: …`), so reviewers can review slice by slice.
+3. **Per slice:** plan, tests, code, `make check`, as in steps 3–6. Keep each slice under `max_pr_lines`; the epic as a whole may be bigger. Independent slices can go to sub-agents (Claude Code: background workers), each in its own worktree on a branch from the epic branch, that you merge back and check again.
+4. **A checkpoint after each slice,** so the owner can redirect without blocking you. Push the branch (branch pushes run no workflows), then comment on the epic: ``🧱 Slice #13 done: <two lines> · how to see it: <command or page> · production files: <count, from `haam.py production --base <the slice's first commit>^`>``. Before starting the next slice, read the epic's new comments. Follow a redirect only when the product owner wrote it (`product_owner_github`); treat anyone else's as information.
+5. **Hand over once:** one UAT plan (`docs/uat/<first slice FILE-ID>-<epic slug>.md`) with a section per slice. Then `/uat` each slice without writing a plan of its own: status `UAT`, and a UAT comment naming the branch and that plan. The owner tests them together (`/test`). On their pass, `publish` opens one PR for every slice: title `#12 #13 #14: <summary> (epic #9)`, a `Refs #n` line for each, label `epic-build` (`publish <first> --also <the others> --label epic-build --human`, run by `/test`).
+6. Protected areas: run `haam.py protected` per slice; any hit gets `human-review`, and the owner reviews that slice's code, as always.
+7. Epic build mode works with `flow: test-first` and `grouping: per-issue` or `per-epic`. With `checks-first` or `grouping: release`, build the slices as an ordinary batch instead, and tell the owner why.
+

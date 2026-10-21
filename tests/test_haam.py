@@ -76,9 +76,9 @@ const pr = Object.assign({ number: 7, title: '#12: Bump deps', head: { ref: '12-
 const issue = (n) => scenario.issues[n] === undefined ? null : Object.assign({ state: 'open', labels: [] },
   Array.isArray(scenario.issues[n]) ? { labels: scenario.issues[n] } : scenario.issues[n]);
 const github = {
-  paginate: async (fn) => fn === 'files' ? scenario.files : fn === 'pulls' ? [pr] : [],
+  paginate: async (fn) => fn === 'files' ? scenario.files : fn === 'pulls' ? [pr] : fn === 'commits' ? (scenario.commits || []) : [],
   rest: {
-    pulls: { get: async () => ({ data: pr }), listFiles: 'files', list: 'pulls' },
+    pulls: { get: async () => ({ data: pr }), listFiles: 'files', list: 'pulls', listCommits: 'commits' },
     issues: { get: async ({ issue_number }) => {
                 const i = issue(issue_number);
                 if (!i) throw new Error('Not Found');
@@ -169,6 +169,23 @@ class TestRepository(unittest.TestCase):
                                files=[{"filename": "src/billing.py"}])
         self.assertEqual(st, "success")
         self.assertEqual(calls["labels"], [])
+        # A spike never merges, whatever its labels, even docs-only
+        for labels, files in ((["uat-passed"], [{"filename": "src/app.py"}]), (["gate-override"], [{"filename": "src/a.py"}]),
+                              ([], [{"filename": "docs/notes.md"}])):
+            st, desc, calls = gate(pr={"title": "#12: Prototype", "head": {"ref": "spike/12-try", "sha": "s"},
+                                       "labels": labels}, issues={12: ["uat:skip"]}, files=files)
+            self.assertEqual(st, "failure", labels)
+            self.assertIn("Spike branch", desc)
+        st, desc, _ = gate(pr={"title": "#12: P", "head": {"ref": "SPIKE/12-try", "sha": "s"}, "labels": ["uat-passed"]})
+        self.assertEqual(st, "failure")                                             # any case
+        st, desc, _ = gate(pr={"labels": ["uat-passed"]}, files=[{"filename": "prototypes/voice/app.py"}])
+        self.assertEqual(st, "failure")                                             # prototypes/ never merges
+        self.assertIn("prototypes/", desc)
+        st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]},
+                               commits=[{"commit": {"message": "#12: spike: try voice notes"}}])
+        self.assertEqual(st, "failure")                                             # kept prototype code: no lane
+        self.assertIn("prototype", desc)
+        self.assertEqual(calls["outputs"]["enable"], "")
         # The uat setting: always (no lane at all) and bugs-skip (a bug counts as marked)
         st, desc, calls = gate(pr={"labels": ["uat:skip"]}, issues={12: ["uat:skip"]}, uat="always")
         self.assertEqual(st, "failure")
@@ -663,7 +680,7 @@ class TestGitHub(ToolTestCase):
         env = next(json.loads(r["body"]) for r in writes if any(x.endswith("environments/production") for x in r["args"]))
         self.assertEqual(env["reviewers"], [{"type": "User", "id": 583231}])
         created = [r["args"][2] for r in writes if r["args"][:2] == ["label", "create"]]
-        self.assertEqual(sorted(created), ["ai-review-overruled", "gate-override", "human-review", "uat:skip"])
+        self.assertEqual(sorted(created), ["ai-review-overruled", "epic-build", "gate-override", "human-review", "uat:skip"])
         patch = [json.loads(r["body"]) for r in writes if "PATCH" in r["args"] and r["body"] and "allow_auto_merge" in r["body"]]
         self.assertEqual(patch, [{"allow_auto_merge": True}])           # the no-UAT lane's auto-merge
         # Secrets are never set by the tool
@@ -941,6 +958,23 @@ class TestGitHubProjects(ToolTestCase):
         listed = json.loads(self.tool("issue", "list", "--field", "Area=wallet", "--json").stdout)["items"]
         self.assertEqual([i["number"] for i in listed], [r["number"]])
         self.assertNotIn(other, [i["number"] for i in listed])
+
+    def test_spike_claims_and_owner_mode_labels(self):
+        self.setup_board()
+        n = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Voice notes", "--json").stdout)["number"]
+        p = self.tool("issue", "label", str(n), "--add", "mode:prototype", check=False)
+        self.assertNotEqual(p.returncode, 0)                                   # the owner's decision
+        self.tool("issue", "label", str(n), "--add", "mode:prototype", "--human")
+        r = json.loads(self.tool("issue", "claim", str(n), "--for", "spike", "--json").stdout)
+        self.assertEqual(r["phase"], "spike")
+        view = json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]
+        self.assertEqual(view["status"], "Discovery")
+        self.assertIn("claimed", view["labels"])
+        self.assertTrue(any("to build a prototype" in c["body"] for c in self.gh_state()["comments"]))
+        self.assertNotEqual(self.tool("issue", "claim", str(n), "--for", "assess", check=False).returncode, 0)
+        self.tool("issue", "release", str(n), "--claim", r["claim"])
+        self.tool("issue", "status", str(n), "Ready")
+        self.assertNotEqual(self.tool("issue", "claim", str(n), "--for", "spike", check=False).returncode, 0)
 
     def test_epics_group_issues_and_cant_be_built(self):
         self.setup_board()
@@ -1738,6 +1772,43 @@ class TestWorktrees(ToolTestCase):
         res = json.loads(tool("overlap", "--files", "src/reports/pdf.py", "--branch", res["overlapping"][0],
                               "--json").stdout)
         self.assertEqual(res["overlapping"], [])                             # only the branch given is compared
+
+    def test_production_lists_production_code_changes(self):
+        tool = self.installed_tool()
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app", tool=tool)
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "config")
+        git(self.proj, "push", "-q", "origin", "main")
+        git(self.proj, "switch", "-q", "-c", "spike/7-voice", "main")
+        for f in ("prototypes/voice/app.py", "tests/test_voice.py", "docs/notes.md", "src/voice.py"):
+            (self.proj / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.proj / f).write_text("x\n")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "spike")
+        res = json.loads(self.run_tool("production", "--json", tool=tool).stdout)
+        self.assertEqual(res["production"], ["src/voice.py"])
+        self.assertTrue(res["spike"])
+        self.assertIn("can't ship as it is", self.run_tool("production", tool=tool).stdout)
+        self.assertEqual(self.run_tool("production", "--check", tool=tool, check=False).returncode, 1)
+        # The project narrows production code to src/; changing it later needs the owner
+        git(self.proj, "switch", "-q", "main")
+        p = self.run_tool("config", "--production", "lib/**", tool=tool, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.run_tool("config", "--production", "src/**", "--not-production", "src/fixtures/**", "--human", tool=tool)
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual(cfg["production_paths"], ["src/**"])
+        self.assertIn("src/fixtures/**", cfg["non_production_paths"])
+        self.assertIn("prototypes/**", cfg["non_production_paths"])
+        self.assertNotEqual(self.run_tool("config", "--not-production", "x/**", tool=tool, check=False).returncode, 0)
+        self.run_tool("config", "--remove-not-production", "docs/**", "--human", tool=tool)
+        self.assertNotIn("docs/**", json.loads((self.proj / "haam.config.json").read_text())["non_production_paths"])
+        # publish refuses a spike the owner tried
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "settings")
+        self.run_tool("checkout-pr", "APP-7", "--branch", "spike/7-voice", tool=tool)
+        p = self.run_tool("publish", "APP-7", "--human", tool=tool, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("prototype", p.stdout + p.stderr)
 
     def test_ship_refuses_in_an_agents_worktree(self):
         wt = Path(json.loads(self.wt("new", "w1", "--json").stdout)["path"])

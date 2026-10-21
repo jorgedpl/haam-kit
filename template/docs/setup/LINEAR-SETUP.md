@@ -47,6 +47,11 @@ And these standalone labels:
 | `override-followup` | Created after a gate override | `/override` |
 | `epic` | Parent issue grouping the sub-issues of one feature | `/triage group`, `/epic`, or a human |
 | `uat-failed` | Failed the human test; agents rework it first | `/test`, `/uat-result` |
+| `uat:skip` | The owner decided: no test of theirs | `/triage`, or "spec approved, no UAT" |
+| `claimed` | An agent chat is assessing it, writing its spec or building a prototype | The agent, while it works |
+| `mode:prototype` | The owner decided: build a throwaway prototype first (`/spike`) | `/triage` |
+| `mode:epic-build` | The owner decided: one lead agent builds this whole epic | `/decide` |
+| `spike-ready` | A prototype is ready for the owner to try | `/spike` |
 
 Optional: area labels (`area:onboarding`, `area:billing`, `area:checkout`…) to filter the board.
 

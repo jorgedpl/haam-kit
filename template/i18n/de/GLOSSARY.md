@@ -76,3 +76,5 @@ So werden die Schlüsselbegriffe der HAAM-Doku ins Deutsche übertragen. Halte d
 | Definition of Ready | Definition of Ready | |
 | prompt / token | Prompt / Token | |
 | onboarding / to onboard | Onboarding / onboarden | |
+| Built with (PR-Vorlage) | Erstellt mit (Built with) | Überschrift und alle Verweise darauf |
+| Agent pre-check (UAT-Plan) | Vorabprüfung durch den Agenten (Agent pre-check) | Zeile `**Fully verified by the agent:** no` bleibt Englisch |

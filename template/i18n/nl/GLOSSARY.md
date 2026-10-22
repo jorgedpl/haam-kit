@@ -84,3 +84,8 @@ Hoe de belangrijkste termen van HAAM in de Nederlandse docs zijn weergegeven. Ho
 | digest | overzicht | |
 | ADR | ADR | |
 | trade-off | afweging | |
+| gate names (G1 Decision, G2 Ready, G3 Verified, G4 Accepted, G5 Released) | ongewijzigd | Engels gehouden |
+| Built with (PR template) | Gebouwd met (Built with) | Engels tussen haakjes, overal hetzelfde |
+| Agent pre-check (UAT plan) | Controle vooraf door de agent (Agent pre-check) | de regel `**Fully verified by the agent:** no` blijft Engels |
+| saved view names (Waiting on me, Agent queue, Ideas inbox…) | ongewijzigd | letterlijke namen van de weergaven |
+| "spec approved" | "spec approved" | Engels gehouden: agents en `haam.py` zoeken ernaar |

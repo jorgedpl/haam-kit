@@ -6,6 +6,15 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+### Added
+- **`exclusive` takes turns in order** (issue #5). Each waiter writes a ticket in `<common git dir>/haam-exclusive.lock.queue/`, and the lock goes to the oldest ticket whose process is still alive. Dead tickets are removed as they're found, and a waiter's own ticket goes when it gets the lock, gives up or is interrupted. A copy of `haam.py` from before tickets still takes the lock whenever it's free, so mixed versions keep working. Before, whoever polled first when the lock freed won, and one project saw a run give up after three hours without a turn.
+- **A waiting heavy run can move to another machine** (issue #5). With `HAAM_REMOTE_RUNNER=<ssh host>` set on a machine (optionally `HAAM_REMOTE_REPO=<clone path there>`), a waiting `make …` run goes to that host as soon as the host's own lock is free:
+  - the same commit, plus any uncommitted changes as a snapshot, is pushed to `refs/haam-remote/<id>` over plain ssh (ignoring a `core.sshCommand` that pins a GitHub-only key), and no local ref moves;
+  - it runs through the host's own `exclusive`, in a temporary worktree, after `worktree prep` and `make setup`;
+  - output and the exit code come back as if it ran locally;
+  - the worktree and the ref are removed afterwards, whatever the result.
+  Without the variable nothing changes. `AGENTS.md` §7 says so. Tests: `tests/test_exclusive.py`.
+
 ## [1.16.0] - 2026-10-22
 
 ### Added

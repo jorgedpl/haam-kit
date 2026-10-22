@@ -28,7 +28,13 @@ TRANSLATED = [
     ".github/pull_request_template.md",
 ]
 
-FENCE = re.compile(r"^```.*?^```", re.M | re.S)
+# Text the skills or workflows look for, so it stays in English in every language.
+LITERALS = {
+    "docs/templates/uat-plan.md": ["**Fully verified by the agent:** no"],
+    ".github/pull_request_template.md": ["Refs #"],
+}
+
+FENCE = re.compile(r"^[ \t]*```.*?^[ \t]*```", re.M | re.S)
 INLINE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 HEADING = re.compile(r"^(#{1,6}) ", re.M)
@@ -96,6 +102,11 @@ def main(langs):
                 bad += 1
                 continue
             readme = lang if src.name == "README.md" and src.parent == ROOT else None
+            rel = tr.relative_to(TEMPLATE / "i18n" / lang).as_posix() if readme is None else ""
+            for lit in LITERALS.get(rel, []):
+                if lit not in tr.read_text():
+                    print(f"{lang}: {tr.relative_to(ROOT)}: must keep this text in English: {lit}")
+                    bad += 1
             for problem in check(src.read_text(), tr.read_text(), readme):
                 print(f"{lang}: {tr.relative_to(ROOT)}: {problem}")
                 bad += 1

@@ -100,7 +100,7 @@ Bugs skip Discovery and Decision: **Triage → Ready → In Progress → UAT →
   - Technical feasibility: which parts of the codebase change, unknowns, and **an optional spike** on a throwaway branch `spike/app-123-<slug>` that is **never merged**.
   - Options: at least two ways to do it, plus "do nothing".
   - Recommendation: approve / park / reject, with priority suggestion.
-- The assessment is committed (via a small PR or directly on a `docs/` branch, see §8) and linked from the issue. Status moves to **Decision**.
+- The assessment is committed on the issue's own branch (no PR; see §8) and linked from the issue. Status moves to **Decision**.
 
 ### Stage 3: Decision (Gate G1, human)
 - **Skill:** `/decide APP-123 approve|park|reject [priority] [notes]` (human-invoked only).

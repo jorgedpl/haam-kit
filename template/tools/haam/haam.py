@@ -63,7 +63,10 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import socket
+import tempfile
 import time
 import signal
 import subprocess
@@ -4772,7 +4775,15 @@ def cmd_worktree(args):
 # ----------------------------------------------------------------------------- exclusive (one heavy run at a time)
 
 EXCLUSIVE_LOCK = "haam-exclusive.lock"
+EXCLUSIVE_QUEUE = "haam-exclusive.lock.queue"   # one ticket per waiter, so the lock goes to the longest-waiting
 EXCLUSIVE_SELF = re.compile(r"haam\.py['\"]?\s+exclusive(\s|$)")
+REMOTE_RUNNER_ENV = "HAAM_REMOTE_RUNNER"         # an ssh host this machine may hand heavy `make` runs to
+REMOTE_REPO_ENV = "HAAM_REMOTE_REPO"             # the clone's path there (default: this clone's path under ~)
+REMOTE_CHECK_SECONDS = 60.0
+
+
+class RemoteTurn(Exception):
+    """Raised inside `MachineTurn` when the remote runner is free before this machine's turn comes."""
 
 
 def process_table():
@@ -4847,14 +4858,24 @@ def exclusive_lock_path(cwd=None):
 
 class MachineTurn:
     """`with MachineTurn(who, patterns):` waits for the machine-wide lock, then for a quiet spell with no other heavy
-    run, and always releases the lock on the way out (success, failure, Ctrl-C, kill)."""
+    run, and always releases the lock on the way out (success, failure, Ctrl-C, kill).
 
-    def __init__(self, who, patterns, timeout_min=60.0, quiet_s=10.0, say=print, cwd=None):
+    Waiters take turns in order: each writes a ticket in `<common git dir>/haam-exclusive.lock.queue/` and tries the
+    lock only when its ticket is the oldest one whose process is still alive. A copy of haam.py from before tickets
+    (no ticket) still takes the lock whenever it is free; the ticket order holds among the others.
+
+    `remote_free`, when given, is asked every REMOTE_CHECK_SECONDS while this machine's lock is busy; when it says
+    yes, the wait ends with `RemoteTurn` (the ticket is withdrawn first)."""
+
+    def __init__(self, who, patterns, timeout_min=60.0, quiet_s=10.0, say=print, cwd=None, remote_free=None):
         self.who, self.patterns, self.say = who, patterns, say
         self.deadline = time.time() + timeout_min * 60
         self.quiet = quiet_s
         self.poll = min(2.0, max(0.2, quiet_s / 4)) if quiet_s else 0.5
         self.lock = exclusive_lock_path(cwd)
+        self.queue = self.lock.with_name(EXCLUSIVE_QUEUE)
+        self.ticket = None
+        self.remote_free = remote_free
         self.held = False
         self._old = {}
 
@@ -4864,9 +4885,65 @@ class MachineTurn:
         except (OSError, ValueError):
             return None
 
+    def _enqueue(self):
+        try:
+            self.queue.mkdir(exist_ok=True)
+            t = self.queue / f"{time.time_ns():020d}-{os.getpid()}"
+            t.write_text(json.dumps({"who": self.who, "pid": os.getpid(),
+                                     "since": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
+            self.ticket = t
+        except OSError:
+            self.ticket = None      # no ticket: fall back to taking the lock whenever it is free
+
+    def _dequeue(self):
+        if self.ticket is not None:
+            try:
+                self.ticket.unlink()
+            except OSError:
+                pass
+            self.ticket = None
+
+    def _ahead(self):
+        """Live tickets older than this one, oldest first; a dead process's ticket is removed on the way."""
+        if self.ticket is None:
+            return []
+        try:
+            names = sorted(p.name for p in self.queue.iterdir())
+        except OSError:
+            return []
+        ahead = []
+        for name in names:
+            if name == self.ticket.name:
+                break
+            pid = name.rsplit("-", 1)[-1]
+            if pid.isdigit() and not pid_alive(int(pid)):
+                try:
+                    (self.queue / name).unlink()
+                except OSError:
+                    pass
+                continue
+            ahead.append(name)
+        return ahead
+
     def _acquire(self):
-        told = False
+        told, told_ahead, next_remote = False, None, 0.0
+        self._enqueue()
         while True:
+            ahead = self._ahead()
+            if ahead:
+                if len(ahead) != told_ahead:
+                    self.say(f"{INFO} In line for the machine: {len(ahead)} run(s) ahead of {self.who}.")
+                    told_ahead = len(ahead)
+                if self.remote_free is not None and time.time() >= next_remote:
+                    next_remote = time.time() + REMOTE_CHECK_SECONDS
+                    if self.remote_free():
+                        self._dequeue()
+                        raise RemoteTurn()
+                if time.time() > self.deadline:
+                    self._dequeue()
+                    return False
+                time.sleep(self.poll)
+                continue
             try:
                 os.mkdir(self.lock)
             except FileExistsError:
@@ -4891,7 +4968,13 @@ class MachineTurn:
                     self.say(f"{INFO} Waiting for {owner.get('who', '?')} (running since {owner.get('since', '?')}, "
                              f"pid {owner.get('pid', '?')}) to finish…")
                     told = True
+                if self.remote_free is not None and time.time() >= next_remote:
+                    next_remote = time.time() + REMOTE_CHECK_SECONDS
+                    if self.remote_free():
+                        self._dequeue()
+                        raise RemoteTurn()
                 if time.time() > self.deadline:
+                    self._dequeue()
                     return False
                 time.sleep(self.poll)
                 continue
@@ -4899,6 +4982,7 @@ class MachineTurn:
                 "who": self.who, "pid": os.getpid(), "host": os.uname().nodename if hasattr(os, "uname") else "",
                 "since": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
             self.held = True
+            self._dequeue()     # holding the lock now: the next ticket in line waits for it
             return True
 
     def _wait_quiet(self):
@@ -4923,6 +5007,7 @@ class MachineTurn:
             time.sleep(self.poll)
 
     def release(self):
+        self._dequeue()
         if self.held:
             owner = self._owner()
             if not owner or owner.get("pid") == os.getpid():
@@ -4952,6 +5037,121 @@ class MachineTurn:
         return False
 
 
+def remote_eligible(command):
+    """Only `make <targets>` goes to another machine: a chat's own script may name paths that exist only here."""
+    if not command or Path(command[0]).name not in ("make", "gmake"):
+        return False
+    return all(not (a.startswith(("/", "~", "-C", "--directory", "-f", "--file")) or "/" in a.split("=", 1)[0])
+               for a in command[1:])
+
+
+def remote_repo_default(root):
+    """This clone's main folder, written relative to ~ so the same layout works on the other machine."""
+    common = git_out(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    main = Path(common).parent if common else root
+    try:
+        return str(main.relative_to(Path.home()))
+    except ValueError:
+        return str(main)
+
+
+def ssh_args(host):
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=60", host]
+
+
+def remote_lock_free(host, repo):
+    """True when the other machine's clone has no heavy run holding or waiting for its lock."""
+    script = (f'cd {shlex.quote(repo)} 2>/dev/null || exit 3\n'
+              'd=$(git rev-parse --git-common-dir) || exit 3\n'
+              f'[ -d "$d/{EXCLUSIVE_LOCK}" ] && exit 1\n'
+              f'[ -n "$(ls -A "$d/{EXCLUSIVE_QUEUE}" 2>/dev/null)" ] && exit 1\n'
+              'exit 0\n')
+    try:
+        p = subprocess.run(ssh_args(host) + ["sh -s"], input=script, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0
+
+
+def snapshot_commit(root):
+    """The commit to run elsewhere: HEAD when the tree is clean, else a commit of the tree as it is now (staged,
+    unstaged and untracked files, .gitignore respected). No branch, index or stash is touched."""
+    head = git_out(root, "rev-parse", "HEAD")
+    if not head:
+        return None
+    if not git_out(root, "status", "--porcelain"):
+        return head
+    fd, index = tempfile.mkstemp(prefix="haam-remote-index-")
+    os.close(fd)
+    env = dict(os.environ, GIT_INDEX_FILE=index)
+    try:
+        for step in (["git", "read-tree", "HEAD"], ["git", "add", "-A"]):
+            if subprocess.run(step, cwd=root, env=env, capture_output=True).returncode != 0:
+                return None
+        tree = subprocess.run(["git", "write-tree"], cwd=root, env=env, capture_output=True, text=True).stdout.strip()
+        if not tree:
+            return None
+        c = subprocess.run(["git", "commit-tree", tree, "-p", head, "-m", "haam exclusive: snapshot for a remote run"],
+                           cwd=root, capture_output=True, text=True)
+        return c.stdout.strip() or None
+    finally:
+        try:
+            os.unlink(index)
+        except OSError:
+            pass
+
+
+REMOTE_SETUP_FAILED = 97
+
+
+def run_remote(host, repo, command, who, root, say):
+    """Run `command` on `host` in a temporary worktree of the same commit, through that host's own `exclusive`.
+    Returns the command's exit code, or None when the run could not start there (the caller waits here instead)."""
+    sha = snapshot_commit(root)
+    if not sha:
+        say(f"{WARN} Couldn't make a commit of this tree to send to {host}; staying here.")
+        return None
+    run_id = f"{socket.gethostname().split('.')[0]}-{os.getpid()}-{int(time.time())}"
+    ref = f"refs/haam-remote/{run_id}"
+    # The clone's own core.sshCommand may pin a GitHub key the other machine doesn't accept: use plain ssh there.
+    ssh_cmd = " ".join(shlex.quote(a) for a in ssh_args(host)[:-1])
+    push = subprocess.run(["git", "-c", f"core.sshCommand={ssh_cmd}", "push", "--quiet", f"{host}:{repo}", f"{sha}:{ref}"],
+                          cwd=root, capture_output=True, text=True)
+    if push.returncode != 0:
+        say(f"{WARN} Couldn't send commit {sha[:9]} to {host} ({(push.stderr or push.stdout).strip()[:200]}); staying here.")
+        return None
+    remote_cmd = " ".join(shlex.quote(c) for c in command)
+    remote_who = shlex.quote(f"{who} (from {socket.gethostname().split('.')[0]})")
+    script = f"""set -u
+repo={shlex.quote(repo)}
+case "$repo" in /*) ;; *) repo="$HOME/$repo" ;; esac
+ref={shlex.quote(ref)}
+wt="$(dirname "$repo")/connect-wt/haam-remote-{run_id}"
+mkdir -p "$(dirname "$wt")"
+cleanup() {{ cd "$HOME"; git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1; git -C "$repo" update-ref -d "$ref" >/dev/null 2>&1; }}
+trap cleanup EXIT
+git -C "$repo" worktree add --quiet --detach "$wt" "$ref" < /dev/null || exit {REMOTE_SETUP_FAILED}
+cd "$wt" || exit {REMOTE_SETUP_FAILED}
+echo "▶ $(hostname -s): {sha[:9]} in a temporary worktree"
+python3 tools/haam/haam.py worktree prep < /dev/null > /dev/null 2>&1
+if [ -f Makefile ] && grep -qE '^setup:' Makefile; then
+  make setup < /dev/null > .haam-remote-setup.log 2>&1 || {{ tail -20 .haam-remote-setup.log; exit {REMOTE_SETUP_FAILED}; }}
+fi
+python3 tools/haam/haam.py exclusive {remote_who} -- {remote_cmd} < /dev/null
+"""
+    say(f"{INFO} {host} is free: running {remote_cmd} there on {sha[:9]}.")
+    try:
+        p = subprocess.run(ssh_args(host) + ["zsh -l -s"], input=script, text=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        say(f"{WARN} ssh to {host} failed ({e}); staying here.")
+        return None
+    if p.returncode in (REMOTE_SETUP_FAILED, 124, 255):
+        say(f"{WARN} The run didn't start on {host} (exit {p.returncode}); staying here.")
+        return None
+    say(f"{INFO} {who}: finished on {host} with exit {p.returncode}.")
+    return p.returncode
+
+
 def cmd_exclusive(args):
     """Run a heavy command (one that uses a machine-wide resource) when no other one is running on this machine."""
     command = list(args.command or [])
@@ -4971,14 +5171,32 @@ def cmd_exclusive(args):
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     patterns = cfg.get("heavy_runs") or []
+    say = lambda m: print(m, file=sys.stderr, flush=True)  # noqa: E731
+    host = os.environ.get(REMOTE_RUNNER_ENV, "").strip()
+    remote_free = None
+    if host and remote_eligible(command):
+        repo = os.environ.get(REMOTE_REPO_ENV, "").strip() or remote_repo_default(root)
+        remote_free = lambda: remote_lock_free(host, repo)  # noqa: E731
     child = None
     try:
-        with MachineTurn(args.who, patterns, args.timeout, args.quiet, say=lambda m: print(m, file=sys.stderr, flush=True)):
-            print(f"{INFO} {args.who}: running {' '.join(command)}", file=sys.stderr, flush=True)
-            child = subprocess.Popen(command)
-            code = child.wait()
-            child = None
-            sys.exit(code)
+        try:
+            turn = MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say, remote_free=remote_free)
+            with turn:
+                say(f"{INFO} {args.who}: running {' '.join(command)}")
+                child = subprocess.Popen(command)
+                code = child.wait()
+                child = None
+                sys.exit(code)
+        except RemoteTurn:
+            code = run_remote(host, repo, command, args.who, root, say)
+            if code is not None:
+                sys.exit(code)
+            with MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say):
+                say(f"{INFO} {args.who}: running {' '.join(command)}")
+                child = subprocess.Popen(command)
+                code = child.wait()
+                child = None
+                sys.exit(code)
     except TimeoutError:
         print(f"✘ Gave up after {args.timeout:g} minutes: the machine was still busy. Nothing was run.", file=sys.stderr)
         sys.exit(124)

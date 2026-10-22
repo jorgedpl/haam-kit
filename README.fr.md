@@ -71,7 +71,7 @@ Les fichiers que vous n'avez jamais modifiés sont mis à jour ; ceux que vous a
 | `agents [--apply]` | admin | Branche les skills et Linear pour Claude Code, Cursor, Codex, Grok, Gemini, Copilot |
 | `github [--apply]` | admin | Labels, ruleset de branche avec vérifications requises, approbation de production, fonctions de sécurité |
 | `github-project [--apply]` | admin | Tableau GitHub Projects : 12 statuts, champ Priority, labels, lien vers le dépôt |
-| `linear [--apply]` | admin, dans son propre terminal | Équipe Linear, triage, 12 statuts, 9 labels |
+| `linear [--apply]` | admin, dans son propre terminal | Équipe Linear, triage, 12 statuts, 14 labels |
 | `issue list\|create\|claim\|release\|status\|fields\|…` | agents | Travailler sur le tableau GitHub Projects depuis n'importe quel outil d'agent |
 | `exclusive "<who>" -- <command>` | agents | Lancer une exécution de tests lourde (qui utilise une ressource partagée par toute la machine) quand aucune autre ne tourne sur cette machine |
 | `capacity` | agents | Retenir le nouveau travail quand trop de PR sont ouvertes ou attendent votre test (limites dans `haam.config.json`) |

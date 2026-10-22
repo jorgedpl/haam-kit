@@ -20,6 +20,6 @@ Il lavoro su questo prodotto è svolto sempre più da agenti di coding (Claude C
 - Richiede un tracker (una board di GitHub Projects, o un workspace Linear con la sua integrazione GitHub) e la protezione dei branch di GitHub su `main`.
 
 ## Alternative considerate
-- **Solo GitHub Issues + Projects:** meno strumenti, ma triage, priorità e viste di pianificazione più deboli.
+- **Semplici GitHub Issues, senza board né stati:** meno parti in movimento, ma niente da cui gli agenti possano prendere il lavoro in ordine, e nessuna traccia di dove si trovi ogni elemento.
 - **Jira:** più potente, ma più pesante di quanto serva a un piccolo team.
 - **Nessun processo formale:** il più veloce oggi, non scala con agenti in parallelo o un secondo sviluppatore.

@@ -10,6 +10,8 @@ Tra un'idea e la produzione ci sono cinque gate. Ognuno ha un responsabile chiar
 | **G4 Accepted** | UAT → merge | Persona che testa | Controllo obbligatorio `release-gate` (richiede l'etichetta di PR `uat-passed` o `gate-override`) |
 | **G5 Released** | merge → produzione | Persona (PO) | Environment GitHub `production` con revisore obbligatorio |
 
+La tabella mostra l'ordine checks-first. Nel flusso predefinito test-first, il G4 viene prima del G3: prima testi il branch dell'agente, poi i controlli girano una volta su ciò che hai approvato (vedi la checklist del G4).
+
 ---
 
 ## Checklist del G1 Decision

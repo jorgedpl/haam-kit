@@ -71,7 +71,7 @@ I file che non hai mai modificato vengono aggiornati; quelli che hai personalizz
 | `agents [--apply]` | admin | Collega skill e Linear per Claude Code, Cursor, Codex, Grok, Gemini, Copilot |
 | `github [--apply]` | admin | Etichette, ruleset dei branch con controlli obbligatori, approvazione per la produzione, funzionalità di sicurezza |
 | `github-project [--apply]` | admin | Board di GitHub Projects: 12 stati, campo Priority, etichette, collegamento al repo |
-| `linear [--apply]` | admin, nel proprio terminale | Team Linear, triage, 12 stati, 9 etichette |
+| `linear [--apply]` | admin, nel proprio terminale | Team Linear, triage, 12 stati, 14 etichette |
 | `issue list\|create\|claim\|release\|status\|fields\|…` | agenti | Lavora sulla board di GitHub Projects da qualsiasi strumento agente |
 | `exclusive "<who>" -- <command>` | agenti | Esegue una sessione di test pesante (che usa una risorsa condivisa da tutta la macchina) quando su questa macchina non ne gira un'altra |
 | `capacity` | agenti | Ferma il nuovo lavoro quando ci sono troppe PR aperte o in attesa del tuo test (limiti in `haam.config.json`) |

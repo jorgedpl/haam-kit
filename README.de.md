@@ -71,7 +71,7 @@ Dateien, die du nie geändert hast, werden aktualisiert. Dateien, die du angepas
 | `agents [--apply]` | Admin | Bindet Skills und Linear für Claude Code, Cursor, Codex, Grok, Gemini, Copilot an |
 | `github [--apply]` | Admin | Labels, Branch-Ruleset mit erforderlichen Checks, Freigabe für die Produktion, Sicherheitsfunktionen |
 | `github-project [--apply]` | Admin | GitHub-Projects-Board: 12 Status, Feld Priority, Labels, Verknüpfung mit dem Repo |
-| `linear [--apply]` | Admin, im eigenen Terminal | Linear-Team, Triage, 12 Status, 9 Labels |
+| `linear [--apply]` | Admin, im eigenen Terminal | Linear-Team, Triage, 12 Status, 14 Labels |
 | `issue list\|create\|claim\|release\|status\|fields\|…` | Agenten | Arbeiten am GitHub-Projects-Board aus jedem Agenten-Tool |
 | `exclusive "<who>" -- <command>` | Agenten | Startet einen schweren Testlauf (einen, der eine maschinenweite Ressource nutzt), wenn auf dieser Maschine kein anderer läuft |
 | `capacity` | Agenten | Hält neue Arbeit zurück, wenn zu viele PRs offen sind oder auf deinen Test warten (Limits in `haam.config.json`) |

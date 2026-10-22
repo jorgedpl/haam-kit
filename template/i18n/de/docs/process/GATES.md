@@ -10,6 +10,8 @@ Zwischen einer Idee und der Produktion stehen fünf Gates. Jedes hat eine klare 
 | **G4 Accepted** | UAT → Merge | Testende Person | Erforderlicher Check `release-gate` (braucht das PR-Label `uat-passed` oder `gate-override`) |
 | **G5 Released** | Merge → Produktion | Mensch (PO) | GitHub-Environment `production` mit verpflichtendem Reviewer |
 
+Die Tabelle zeigt die Reihenfolge bei checks-first. Im Standardablauf test-first kommt G4 vor G3: Du testest zuerst den Branch des Agenten, dann laufen die Checks einmal auf dem, was du bestanden hast (siehe die Checkliste für G4).
+
 ---
 
 ## Checkliste für G1 Decision

@@ -20,6 +20,6 @@ Werk aan dit product wordt steeds vaker gedaan door coding agents (Claude Code, 
 - Vereist een tracker (een GitHub Projects-board, of een Linear-workspace met de GitHub-integratie) en GitHub-branchbescherming op `main`.
 
 ## Overwogen alternatieven
-- **Alleen GitHub Issues + Projects:** minder tools, maar zwakkere triage, prioriteiten en planningsweergaven.
+- **Gewone GitHub Issues, zonder board of statussen:** minder onderdelen, maar niets waaruit agents op volgorde werk kunnen halen, en geen overzicht van waar elk item staat.
 - **Jira:** krachtiger, maar zwaarder dan een klein team nodig heeft.
 - **Geen formeel proces:** vandaag het snelst, maar schaalt niet naar parallelle agents of een tweede developer.

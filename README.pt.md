@@ -71,7 +71,7 @@ Os arquivos que você nunca alterou são atualizados; os que você personalizou 
 | `agents [--apply]` | admin | Conecta as skills e o Linear para Claude Code, Cursor, Codex, Grok, Gemini, Copilot |
 | `github [--apply]` | admin | Labels, ruleset de branch com verificações obrigatórias, aprovação para produção, recursos de segurança |
 | `github-project [--apply]` | admin | Quadro do GitHub Projects: 12 status, campo Priority, labels, vínculo com o repo |
-| `linear [--apply]` | admin, no próprio terminal | Time do Linear, triagem, 12 status, 9 labels |
+| `linear [--apply]` | admin, no próprio terminal | Time do Linear, triagem, 12 status, 14 labels |
 | `issue list\|create\|claim\|release\|status\|fields\|…` | agentes | Trabalha no quadro do GitHub Projects a partir de qualquer ferramenta de agente |
 | `exclusive "<who>" -- <command>` | agentes | Roda uma execução de testes pesada (que usa um recurso compartilhado por toda a máquina) quando nenhuma outra está rodando nesta máquina |
 | `capacity` | agentes | Segura trabalho novo quando há PRs demais abertos ou esperando o seu teste (limites em `haam.config.json`) |

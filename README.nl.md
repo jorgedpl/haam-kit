@@ -71,7 +71,7 @@ Bestanden die je nooit hebt gewijzigd, worden bijgewerkt; bestanden die je hebt 
 | `agents [--apply]` | admin | Koppelt skills en Linear voor Claude Code, Cursor, Codex, Grok, Gemini, Copilot |
 | `github [--apply]` | admin | Labels, branch-ruleset met verplichte checks, goedkeuring voor productie, security-functies |
 | `github-project [--apply]` | admin | GitHub Projects-board: 12 statussen, Priority-veld, labels, koppeling met de repo |
-| `linear [--apply]` | admin, in de eigen terminal | Linear-team, triage, 12 statussen, 9 labels |
+| `linear [--apply]` | admin, in de eigen terminal | Linear-team, triage, 12 statussen, 14 labels |
 | `issue list\|create\|claim\|release\|status\|fields\|…` | agents | Werken met het GitHub Projects-board vanuit elke agent-tool |
 | `exclusive "<who>" -- <command>` | agents | Draait een zware testrun (een die een resource van de hele machine gebruikt) als er op deze machine geen andere draait |
 | `capacity` | agents | Houdt nieuw werk tegen als er te veel PR's open staan of op jouw test wachten (limieten in `haam.config.json`) |

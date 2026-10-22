@@ -58,8 +58,8 @@ scripts/scan-secrets.sh       Secret scan (gitleaks) shared by all commit hooks
   workflows/ci.yml            Gate G3: tests on every PR
   workflows/security.yml      Gate G3: secret scan of every commit + dependency audit
   workflows/review.yml        Gate G3: independent AI reviewers (spec/quality + security)
-  workflows/tracker-sync.yml    Moves GitHub Projects cards when PRs open and merge
-  ISSUE_TEMPLATE/              Idea and bug forms (GitHub Projects)
+  workflows/tracker-sync.yml  Moves GitHub Projects cards when PRs open and merge
+  ISSUE_TEMPLATE/             Idea and bug forms (GitHub Projects)
   workflows/gates.yml         Gate G4: blocks merge until UAT passed or overridden
   workflows/deploy.yml        Gate G5: production deploy waits for human approval
   review/REVIEWER.md          Instructions for the reviewer agent
@@ -269,7 +269,7 @@ Les agents utilisent `python3 tools/haam/haam.py issue …` pour toutes les opé
    python3 tools/haam/haam.py linear           # plan; asks for the key securely
    python3 tools/haam/haam.py linear --apply
    ```
-   Cela crée l'équipe si nécessaire, active Triage, crée les 12 statuts (en renommant le statut par défaut « Todo » de Linear en « Ready ») et les 9 labels. Cela ne supprime jamais rien ; les statuts en trop sont listés pour que vous les archiviez.
+   Cela crée l'équipe si nécessaire, active Triage, crée les 12 statuts (en renommant le statut par défaut « Todo » de Linear en « Ready ») et les 14 labels. Cela ne supprime jamais rien ; les statuts en trop sont listés pour que vous les archiviez.
 2. **Paramètres disponibles seulement dans le navigateur** `[YOU, in the browser]` : connecter GitHub, automatisations des PR (PR brouillon → In Progress, PR prête pour la revue → In Review, fusionnée → Deploying), format de nom de branche `{issue-identifier}-{issue-title}`, vues enregistrées. Voir `docs/setup/LINEAR-SETUP.md`.
 3. **Connectez votre agent** à Linear (`docs/setup/AGENTS-SETUP.md`) et testez : *« Listez les issues de l'équipe Linear ACM. »*
 

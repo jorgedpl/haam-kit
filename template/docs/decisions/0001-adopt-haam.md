@@ -20,6 +20,6 @@ Work on this product is increasingly done by coding agents (Claude Code, Cursor,
 - Requires a tracker (a GitHub Projects board, or a Linear workspace with its GitHub integration) and GitHub branch protection on `main`.
 
 ## Alternatives considered
-- **GitHub Issues + Projects only:** fewer tools, but weaker triage, priorities and planning views.
+- **Plain GitHub Issues, without a board or statuses:** fewer moving parts, but nothing for agents to pull work from in order, and no record of where each item stands.
 - **Jira:** more powerful, but heavier than a small team needs.
 - **No formal process:** fastest today, doesn't scale to parallel agents or a second developer.

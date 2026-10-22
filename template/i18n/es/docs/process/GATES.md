@@ -10,6 +10,8 @@ Entre una idea y producción hay cinco puertas. Cada una tiene un responsable cl
 | **G4 Accepted** | UAT → fusión | Persona que prueba | Comprobación obligatoria `release-gate` (necesita la etiqueta de PR `uat-passed` o `gate-override`) |
 | **G5 Released** | fusión → producción | Persona (PO) | Entorno de GitHub `production` con revisor obligatorio |
 
+La tabla muestra el orden checks-first. En el flujo predeterminado test-first, G4 va antes que G3: primero pruebas la rama del agente y después las comprobaciones se ejecutan una vez sobre lo que aprobaste (ver la lista de comprobación de G4).
+
 ---
 
 ## Lista de comprobación de G1 Decision

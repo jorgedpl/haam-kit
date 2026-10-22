@@ -58,8 +58,8 @@ scripts/scan-secrets.sh       Secret scan (gitleaks) shared by all commit hooks
   workflows/ci.yml            Gate G3: tests on every PR
   workflows/security.yml      Gate G3: secret scan of every commit + dependency audit
   workflows/review.yml        Gate G3: independent AI reviewers (spec/quality + security)
-  workflows/tracker-sync.yml    Moves GitHub Projects cards when PRs open and merge
-  ISSUE_TEMPLATE/              Idea and bug forms (GitHub Projects)
+  workflows/tracker-sync.yml  Moves GitHub Projects cards when PRs open and merge
+  ISSUE_TEMPLATE/             Idea and bug forms (GitHub Projects)
   workflows/gates.yml         Gate G4: blocks merge until UAT passed or overridden
   workflows/deploy.yml        Gate G5: production deploy waits for human approval
   review/REVIEWER.md          Instructions for the reviewer agent
@@ -269,7 +269,7 @@ Agents gebruiken `python3 tools/haam/haam.py issue …` voor elke handeling op h
    python3 tools/haam/haam.py linear           # plan; asks for the key securely
    python3 tools/haam/haam.py linear --apply
    ```
-   Het maakt het team aan als dat nodig is, zet Triage aan, maakt de 12 statussen aan (de standaardstatus "Todo" van Linear wordt hernoemd naar "Ready"), en de 9 labels. Het verwijdert nooit iets; het noemt extra statussen die je zelf kunt archiveren.
+   Het maakt het team aan als dat nodig is, zet Triage aan, maakt de 12 statussen aan (de standaardstatus "Todo" van Linear wordt hernoemd naar "Ready"), en de 14 labels. Het verwijdert nooit iets; het noemt extra statussen die je zelf kunt archiveren.
 2. **Instellingen die alleen in de browser kunnen** `[YOU, in the browser]`: GitHub koppelen, PR-automatiseringen (draft-PR → In Progress, PR klaar voor review → In Review, gemerged → Deploying), het formaat voor branchnamen `{issue-identifier}-{issue-title}`, opgeslagen weergaven. Zie `docs/setup/LINEAR-SETUP.md`.
 3. **Koppel je agent** aan Linear (`docs/setup/AGENTS-SETUP.md`) en test: *"Toon de issues in het Linear-team ACM."*
 

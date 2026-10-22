@@ -20,6 +20,6 @@ Cada vez más trabajo de este producto lo hacen agentes de programación (Claude
 - Requiere un tracker (un tablero de GitHub Projects, o un espacio de trabajo de Linear con su integración con GitHub) y protección de rama en `main` en GitHub.
 
 ## Alternativas consideradas
-- **Solo GitHub Issues + Projects:** menos herramientas, pero triaje, prioridades y vistas de planificación más pobres.
+- **GitHub Issues a secas, sin tablero ni estados:** menos piezas móviles, pero los agentes no tienen de dónde tomar el trabajo por orden y no queda registro de en qué punto está cada elemento.
 - **Jira:** más potente, pero más pesado de lo que necesita un equipo pequeño.
 - **Sin proceso formal:** lo más rápido hoy, pero no escala a agentes en paralelo ni a un segundo desarrollador.

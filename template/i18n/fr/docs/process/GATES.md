@@ -10,6 +10,8 @@ Cinq portes séparent une idée de la production. Chacune a un responsable clair
 | **G4 Accepted** | UAT → fusion | Testeur humain | Vérification requise `release-gate` (demande le label de PR `uat-passed` ou `gate-override`) |
 | **G5 Released** | fusion → production | Humain (PO) | Environnement GitHub `production` avec relecteur obligatoire |
 
+Le tableau montre l'ordre « vérifications d'abord ». Dans le flux par défaut « test d'abord », G4 vient avant G3 : vous testez d'abord la branche de l'agent, puis les vérifications tournent une seule fois sur ce que vous avez validé (voir la liste de contrôle de G4).
+
 ---
 
 ## Liste de contrôle de G1 Decision

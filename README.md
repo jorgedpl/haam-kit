@@ -71,7 +71,7 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `agents [--apply]` | admin | Wire up skills and Linear for Claude Code, Cursor, Codex, Grok, Gemini, Copilot |
 | `github [--apply]` | admin | Labels, branch ruleset with required checks, production approval, security features |
 | `github-project [--apply]` | admin | GitHub Projects board: 12 statuses, Priority field, labels, repo link |
-| `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 9 labels |
+| `linear [--apply]` | admin, in own terminal | Linear team, triage, 12 statuses, 14 labels |
 | `issue list\|create\|claim\|release\|status\|fields\|…` | agents | Work the GitHub Projects board from any agent tool |
 | `exclusive "<who>" -- <command>` | agents | Run a heavy test run (one that uses a machine-wide resource) when no other one is running on this machine |
 | `capacity` | agents | Hold new work when too many PRs are open or waiting for your test (limits in `haam.config.json`) |

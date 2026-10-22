@@ -58,8 +58,8 @@ scripts/scan-secrets.sh       Secret scan (gitleaks) shared by all commit hooks
   workflows/ci.yml            Gate G3: tests on every PR
   workflows/security.yml      Gate G3: secret scan of every commit + dependency audit
   workflows/review.yml        Gate G3: independent AI reviewers (spec/quality + security)
-  workflows/tracker-sync.yml    Moves GitHub Projects cards when PRs open and merge
-  ISSUE_TEMPLATE/              Idea and bug forms (GitHub Projects)
+  workflows/tracker-sync.yml  Moves GitHub Projects cards when PRs open and merge
+  ISSUE_TEMPLATE/             Idea and bug forms (GitHub Projects)
   workflows/gates.yml         Gate G4: blocks merge until UAT passed or overridden
   workflows/deploy.yml        Gate G5: production deploy waits for human approval
   review/REVIEWER.md          Instructions for the reviewer agent
@@ -269,7 +269,7 @@ Gli agenti usano `python3 tools/haam/haam.py issue …` per ogni operazione sull
    python3 tools/haam/haam.py linear           # plan; asks for the key securely
    python3 tools/haam/haam.py linear --apply
    ```
-   Crea il team se serve, attiva il Triage, crea i 12 stati (rinominando lo stato predefinito di Linear "Todo" in "Ready") e le 9 etichette. Non cancella mai nulla; elenca gli stati in più perché tu li archivi.
+   Crea il team se serve, attiva il Triage, crea i 12 stati (rinominando lo stato predefinito di Linear "Todo" in "Ready") e le 14 etichette. Non cancella mai nulla; elenca gli stati in più perché tu li archivi.
 2. **Impostazioni solo da browser** `[YOU, in the browser]`: collega GitHub, automazioni delle PR (PR in bozza → In Progress, PR pronta per la revisione → In Review, merge → Deploying), formato dei nomi dei branch `{issue-identifier}-{issue-title}`, viste salvate. Vedi `docs/setup/LINEAR-SETUP.md`.
 3. **Collega il tuo agente** a Linear (`docs/setup/AGENTS-SETUP.md`) e prova: *"Elenca le issue del team Linear ACM."*
 

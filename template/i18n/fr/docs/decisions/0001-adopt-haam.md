@@ -20,6 +20,6 @@ Le travail sur ce produit est de plus en plus fait par des agents de code (Claud
 - Demande un outil de suivi (un tableau GitHub Projects, ou un espace de travail Linear avec son intégration GitHub) et une protection de branche GitHub sur `main`.
 
 ## Alternatives envisagées
-- **GitHub Issues + Projects uniquement :** moins d'outils, mais un tri, des priorités et des vues de planification plus faibles.
+- **De simples GitHub Issues, sans tableau ni statuts :** moins de pièces mobiles, mais rien où les agents puissent puiser le travail dans l'ordre, et aucune trace de l'état d'avancement de chaque élément.
 - **Jira :** plus puissant, mais plus lourd que ce dont une petite équipe a besoin.
 - **Pas de processus formel :** le plus rapide aujourd'hui, mais ne tient pas à l'échelle avec des agents en parallèle ou un deuxième développeur.

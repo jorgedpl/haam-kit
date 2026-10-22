@@ -5,7 +5,7 @@ HAAM funktioniert mit beiden Trackern gleich. `haam.config.json` → `"tracker"`
 - **`github`**: Issues in diesem GitHub-Repository, auf einem GitHub-Projects-Board. Kostenlos in jedem GitHub-Plan. Agenten nutzen `python3 tools/haam/haam.py issue …` (siehe unten), das aus jedem Agenten-Tool funktioniert.
 - **`linear`**: Issues in einem Linear-Team. Agenten nutzen die Linear-Verbindung (MCP).
 
-Skills sagen „im Tracker“; diese Seite sagt, wie jede Operation in jedem Tracker geht. **Agenten: Prüft `tracker` in `haam.config.json` einmal pro Sitzung und nutzt dann die passende Spalte.**
+Skills sagen „im Tracker“; diese Seite sagt, wie jede Operation in jedem Tracker geht. **Agenten: Prüf `tracker` in `haam.config.json` einmal pro Sitzung und nutz dann die passende Spalte.**
 
 ## Begriffe
 

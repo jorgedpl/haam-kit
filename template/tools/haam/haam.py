@@ -251,6 +251,10 @@ LINEAR_LABELS = [
     ("epic", "#3E4B9E", "Groups the issues that make up one feature (its sub-issues)"),
     ("uat-failed", "#D93F0B", "Failed the human test: rework first, then test again"),
     ("uat:skip", "#C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
+    ("claimed", "#FBCA04", "An agent chat is assessing it, writing its spec or building a prototype"),
+    ("mode:prototype", "#D4C5F9", "Owner decided: an agent builds a throwaway prototype first (/spike)"),
+    ("mode:epic-build", "#3E4B9E", "Owner decided: one lead agent builds this whole epic, slice by slice"),
+    ("spike-ready", "#D4C5F9", "A prototype is ready for the owner to try (/test)"),
 ]
 
 # Files the rename step rewrites (team key / product name)

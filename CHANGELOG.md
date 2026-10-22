@@ -14,6 +14,10 @@ Each release lists **Migration** steps when a project needs to do more than run 
 - Translations live in `template/i18n/<language>/` at the same paths as the English files; each language has a `GLOSSARY.md` of the terms it uses. Agent instructions (`AGENTS.md`, `CLAUDE.md`, skills, reviewer prompts) stay in English: agents read English best, and one source keeps them identical everywhere.
 - `tests/i18n_check.py` checks that every translation keeps the code blocks, inline code, link targets and headings of the English file. It runs in the test suite.
 
+### Fixed
+- **`haam.py linear --apply` creates all 14 labels.** It missed `claimed`, `mode:prototype`, `mode:epic-build` and `spike-ready`, which the skills use on Linear too. Linear projects: run `haam.py linear --apply` again to add them (it never deletes anything).
+- Doc fixes found while translating: when the no-UAT lane auto-merges (`GATES.md`), the two settings that save Actions minutes (`GITHUB-SETUP.md` §8), the automation token's scopes (the adoption guide now matches `TRACKER.md`), where an assessment is committed (`LIFECYCLE.md`: on the issue's branch, no PR), the gates table's order in the test-first flow, and an outdated alternative in ADR 0001.
+
 ### Migration
 - Nothing to do to stay in English.
 - To switch an existing project: `python3 tools/haam/haam.py config --language es`, then the new kit's `update --target . --apply`. Docs you never edited switch to the new language; edited ones are kept as they are (translate those by hand or ask an agent).

@@ -10,6 +10,8 @@ Tussen een idee en productie staan vijf gates. Elke gate heeft een duidelijke ei
 | **G4 Accepted** | UAT → merge | Menselijke tester | Verplichte check `release-gate` (vereist het PR-label `uat-passed` of `gate-override`) |
 | **G5 Released** | merge → productie | Mens (PO) | GitHub-environment `production` met verplichte reviewer |
 
+De tabel toont de volgorde van checks-first. In de standaardflow test-first komt G4 vóór G3: je test eerst de branch van de agent, en daarna draaien de checks één keer op wat je hebt goedgekeurd (zie de checklist van G4).
+
 ---
 
 ## Checklist voor G1 Decision

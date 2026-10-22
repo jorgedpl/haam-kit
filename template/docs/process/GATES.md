@@ -10,6 +10,8 @@ Five gates stand between an idea and production. Each one has a clear owner, a c
 | **G4 Accepted** | UAT → merge | Human tester | Required check `release-gate` (needs PR label `uat-passed` or `gate-override`) |
 | **G5 Released** | merge → production | Human (PO) | GitHub environment `production` with required reviewer |
 
+The table shows the checks-first order. In the default test-first flow, G4 comes before G3: you test the agent's branch first, then the checks run once on what you passed (see the G4 checklist).
+
 ---
 
 ## G1 Decision checklist

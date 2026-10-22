@@ -20,6 +20,6 @@ O trabalho neste produto é feito cada vez mais por agentes de programação (Cl
 - Exige um tracker (um quadro do GitHub Projects, ou um workspace do Linear com a integração com o GitHub) e a proteção de branch do GitHub na `main`.
 
 ## Alternativas consideradas
-- **Só GitHub Issues + Projects:** menos ferramentas, mas triagem, prioridades e visualizações de planejamento mais fracas.
+- **Só GitHub Issues, sem quadro nem status:** menos peças móveis, mas nada de onde os agentes possam puxar trabalho em ordem, e nenhum registro de em que ponto está cada item.
 - **Jira:** mais poderoso, mas mais pesado do que uma equipe pequena precisa.
 - **Nenhum processo formal:** o mais rápido hoje, mas não escala para agentes em paralelo nem para um segundo desenvolvedor.

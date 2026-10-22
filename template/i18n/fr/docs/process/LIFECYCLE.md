@@ -100,7 +100,7 @@ Les bugs sautent Discovery et Decision : **Triage → Ready → In Progress → 
   - Faisabilité technique : quelles parties du code changent, les inconnues, et **un spike facultatif** sur une branche jetable `spike/app-123-<slug>` qui n'est **jamais fusionnée**.
   - Options : au moins deux façons de faire, plus « ne rien faire ».
   - Recommandation : approuver / mettre de côté / rejeter, avec une suggestion de priorité.
-- L'évaluation est commitée (via une petite PR ou directement sur une branche `docs/`, voir §8) et liée depuis l'issue. Le statut passe en **Decision**.
+- L'évaluation est commitée sur la branche propre à l'issue (sans PR ; voir §8) et liée depuis l'issue. Le statut passe en **Decision**.
 
 ### Étape 3 : décision (porte G1, humain)
 - **Skill :** `/decide APP-123 approve|park|reject [priority] [notes]` (lancé uniquement par un humain).

@@ -85,7 +85,7 @@ Private Repositories bekommen ein monatliches Kontingent an Actions-Minuten; Age
 
 Finde heraus, wofür die Minuten draufgehen: `python3 tools/haam/haam.py ci-usage` (letzte 7 Tage, nach Workflow, Job, Auslöser und Tag).
 
-Zwei der Einstellungen (`/haam-settings` oder `python3 tools/haam/haam.py settings --set … --apply --human`; sie werden zu Repository-Variablen, die die Workflows lesen). Die anderen (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) sparen mehr: siehe `settings --explain`.
+Zwei Einstellungen in der Tabelle unten sparen Minuten, ohne dass du viel aufgibst. Ändere sie mit `/haam-settings` oder `python3 tools/haam/haam.py settings --set … --apply --human`; sie werden zu Repository-Variablen, die die Workflows lesen. Die anderen (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) sparen mehr: siehe `settings --explain`.
 
 | Schalter | Was sich ändert | Abwägung |
 |---|---|---|

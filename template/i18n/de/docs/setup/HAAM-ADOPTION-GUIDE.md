@@ -181,7 +181,7 @@ So führst du die üblichen Konflikte zusammen:
 | `.claude/skills/`, `.claude/commands/` | `haam.py agents --apply` verschiebt deine Skills nach `.agents/skills/` und verlinkt den Ordner. Benenne vorher alle um, deren Namen mit HAAM-Skills kollidieren |
 | `Makefile` | Füge deinem die Targets des Kits hinzu |
 | `.github/workflows/` mit CI | Behalte deine CI, aber sorg dafür, dass ein Job namens **`ci`** bei PRs deine ganze Testsuite ausführt. Füge `gates.yml`, `security.yml`, `review.yml` hinzu. Vergleiche deinen Deploy mit `deploy.yml` (Phase 4) |
-| `.github/pull_request_template.md` | Übernimm „Built with“, „Acceptance criteria → tests“ und „Checklist (G3)“ |
+| `.github/pull_request_template.md` | Übernimm „Erstellt mit (Built with)“, „Akzeptanzkriterien → Tests“ und „Checkliste (G3)“ |
 | `.pre-commit-config.yaml` oder Husky | Behalte es und ruf von dort `scripts/scan-secrets.sh` auf, statt `.githooks/` zu nutzen |
 | `CHANGELOG.md`, `.github/dependabot.yml` | Behalte deine (füge Dependabot das Ökosystem `github-actions` hinzu, falls es fehlt) |
 
@@ -257,7 +257,7 @@ Details und die manuellen Entsprechungen: `docs/setup/GITHUB-SETUP.md`.
    python3 tools/haam/haam.py github-project           # plan
    python3 tools/haam/haam.py github-project --apply   # creates the board, links the repo, 12 statuses, Priority, labels
    ```
-3. `[YOU, in your terminal]` Token für die Automatisierung, damit sich Karten bewegen, wenn PRs geöffnet und gemergt werden: Erstelle unter github.com/settings/tokens einen klassischen Token mit dem Scope `project` (plus `repo`, wenn das Repository privat ist), dann `gh secret set HAAM_PROJECT_TOKEN -R owner/repo`.
+3. `[YOU, in your terminal]` Token für die Automatisierung, damit sich Karten bewegen, wenn PRs geöffnet und gemergt werden: Erstelle unter github.com/settings/tokens einen klassischen Token mit den Scopes `project` und `repo` (`public_repo` reicht für ein öffentliches Repository), dann `gh secret set HAAM_PROJECT_TOKEN -R owner/repo`.
 4. `[YOU, in the browser]` Lege auf dem Board die Ansichten an, die das Tool auflistet: Board grouped by Status, **Agent queue**, **Waiting on me**, **Ideas inbox**, **Bugs**.
 5. Test: `python3 tools/haam/haam.py issue list`.
 

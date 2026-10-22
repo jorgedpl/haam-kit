@@ -85,7 +85,7 @@ Les dépôts privés ont un quota mensuel de minutes Actions ; des agents qui ou
 
 Découvrez où passent les minutes : `python3 tools/haam/haam.py ci-usage` (7 derniers jours, par workflow, job, déclencheur et jour).
 
-Deux des paramètres (`/haam-settings`, ou `python3 tools/haam/haam.py settings --set … --apply --human` ; ils deviennent des variables du dépôt que les workflows lisent) sont décrits ci-dessous. Les autres (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) font économiser davantage : voir `settings --explain`.
+Deux paramètres du tableau ci-dessous font économiser des minutes avec peu de compromis. Changez-les avec `/haam-settings`, ou `python3 tools/haam/haam.py settings --set … --apply --human` ; ils deviennent des variables du dépôt que les workflows lisent. Les autres (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) font économiser davantage : voir `settings --explain`.
 
 | Option | Ce qui change | Compromis |
 |---|---|---|

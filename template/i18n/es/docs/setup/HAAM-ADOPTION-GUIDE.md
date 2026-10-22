@@ -257,7 +257,7 @@ Detalles y equivalentes manuales: `docs/setup/GITHUB-SETUP.md`.
    python3 tools/haam/haam.py github-project           # plan
    python3 tools/haam/haam.py github-project --apply   # creates the board, links the repo, 12 statuses, Priority, labels
    ```
-3. `[YOU, in your terminal]` token de automatización, para que las tarjetas se muevan cuando se abren y se fusionan las PR: crea un token clásico en github.com/settings/tokens con el permiso `project` (más `repo` si el repositorio es privado) y después `gh secret set HAAM_PROJECT_TOKEN -R owner/repo`.
+3. `[YOU, in your terminal]` token de automatización, para que las tarjetas se muevan cuando se abren y se fusionan las PR: crea un token clásico en github.com/settings/tokens con los permisos `project` y `repo` (`public_repo` basta para un repositorio público) y después `gh secret set HAAM_PROJECT_TOKEN -R owner/repo`.
 4. `[YOU, in the browser]` en el tablero, crea las vistas que enumera la herramienta: Board agrupado por Status, **Agent queue**, **Waiting on me**, **Ideas inbox**, **Bugs**.
 5. Prueba: `python3 tools/haam/haam.py issue list`.
 

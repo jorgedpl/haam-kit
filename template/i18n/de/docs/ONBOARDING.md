@@ -98,7 +98,7 @@ Jeder PR wird durch Tests, einen Secret-Scan, eine Prüfung der Abhängigkeiten 
 - Keine Pushes auf `main`, keine Merges, keine Deploys durch Agenten.
 - Keine Secrets oder echten personenbezogenen Daten in Code, Tests, Fixtures, im Tracker oder im Chat. Personenbezogene Daten sind gesetzlich geschützt (z. B. DSGVO).
 - Ein Issue → ein Branch → ein PR, klein genug, um ihn in 15 Minuten zu prüfen.
-- Fülle bei jedem PR **Built with** aus (dein Tool und Modell).
+- Fülle bei jedem PR **Erstellt mit (Built with)** aus (dein Tool und Modell).
 - Was nicht in Git oder im Tracker steht, existiert für die nächste Person nicht.
 
 ## 10. Hilfe bekommen

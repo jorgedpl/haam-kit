@@ -100,7 +100,7 @@ Bugs überspringen Discovery und Decision: **Triage → Ready → In Progress �
   - Technische Machbarkeit: welche Teile der Codebasis sich ändern, Unbekannte und **ein optionaler Spike** auf einem Wegwerf-Branch `spike/app-123-<slug>`, der **nie gemergt wird**.
   - Optionen: mindestens zwei Wege, es umzusetzen, plus „nichts tun“.
   - Empfehlung: freigeben / parken / ablehnen, mit einem Vorschlag zur Priorität.
-- Die Bewertung wird committet (über einen kleinen PR oder direkt auf einem Branch `docs/`, siehe §8) und im Issue verlinkt. Der Status wechselt zu **Decision**.
+- Die Bewertung wird auf dem eigenen Branch des Issues committet (ohne PR; siehe §8) und im Issue verlinkt. Der Status wechselt zu **Decision**.
 
 ### Phase 3: Entscheidung (Gate G1, Mensch)
 - **Skill:** `/decide APP-123 approve|park|reject [priority] [notes]` (nur von Menschen aufgerufen).

@@ -100,7 +100,7 @@ Bugs slaan Discovery en Decision over: **Triage → Ready → In Progress → UA
   - Technische haalbaarheid: welke delen van de codebase veranderen, onbekenden, en **een optionele spike** op een wegwerpbranch `spike/app-123-<slug>` die **nooit gemerged** wordt.
   - Opties: minstens twee manieren om het te doen, plus "niets doen".
   - Aanbeveling: goedkeuren / parkeren / afwijzen, met een voorstel voor de prioriteit.
-- De beoordeling wordt gecommit (via een kleine PR of direct op een `docs/`-branch, zie §8) en vanuit het issue gelinkt. De status gaat naar **Decision**.
+- De beoordeling wordt gecommit op de eigen branch van het issue (geen PR; zie §8) en vanuit het issue gelinkt. De status gaat naar **Decision**.
 
 ### Fase 3: Beslissing (Gate G1, mens)
 - **Skill:** `/decide APP-123 approve|park|reject [priority] [notes]` (alleen door een mens aan te roepen).

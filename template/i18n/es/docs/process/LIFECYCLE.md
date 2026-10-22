@@ -100,7 +100,7 @@ Los bugs se saltan Discovery y Decision: **Triage → Ready → In Progress → 
   - Viabilidad técnica: qué partes del código cambian, incógnitas y **un spike opcional** en una rama desechable `spike/app-123-<slug>` que **nunca se fusiona**.
   - Opciones: al menos dos formas de hacerlo, más "no hacer nada".
   - Recomendación: aprobar / aparcar / rechazar, con una prioridad sugerida.
-- La evaluación se sube con un commit (mediante una PR pequeña o directamente en una rama `docs/`, ver §8) y se enlaza desde el issue. El estado pasa a **Decision**.
+- La evaluación se sube con un commit en la propia rama del issue (sin PR; ver §8) y se enlaza desde el issue. El estado pasa a **Decision**.
 
 ### Etapa 3: Decisión (puerta G1, humana)
 - **Skill:** `/decide APP-123 approve|park|reject [priority] [notes]` (solo la invoca una persona).

@@ -66,7 +66,7 @@ Frag den Agenten, im Repo:
 3. *„Liste die Ready-Issues im Linear-Team APP auf.“* Das prüft die Linear-Verbindung.
 
 ## Festhalten, welches Tool die Arbeit gemacht hat
-Der Claim-Kommentar im Issue und das Feld **Built with** im PR halten Tool und Modell fest. Nach ein paar Wochen kannst du Review-Befunde und fehlgeschlagene UATs nach Tool vergleichen.
+Der Claim-Kommentar im Issue und das Feld **Erstellt mit (Built with)** im PR halten Tool und Modell fest. Nach ein paar Wochen kannst du Review-Befunde und fehlgeschlagene UATs nach Tool vergleichen.
 
 ## Modellübergreifendes Review
 Die Reviewer-Agenten in der CI nutzen Claude. Wird Code mit einem anderen Tool geschrieben (Codex, Grok, Cursor mit einem anderen Modell), ist das Review auch modellübergreifend, was eine nützliche zusätzliche Prüfung ist.

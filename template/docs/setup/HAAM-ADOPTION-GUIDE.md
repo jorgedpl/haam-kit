@@ -11,7 +11,7 @@ This guide applies HAAM to an existing repository in **six phases, about half a 
 
 The kit is the `template/` folder of https://github.com/jorgedpl/haam-kit. Always use a released version:
 ```bash
-git clone --depth 1 --branch v1.15.1 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
+git clone --depth 1 --branch v1.16.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit   # kit = ~/haam-kit/template
 ```
 or download the zip from the Releases page. Below, `<path-to-kit>` means that `template/` folder.
 
@@ -164,6 +164,8 @@ git switch main && git pull && git switch -c chore/adopt-haam
 python3 <path-to-kit>/tools/haam/haam.py install --target . --dry-run   # see what will happen
 python3 <path-to-kit>/tools/haam/haam.py install --target .
 ```
+
+The docs are in English unless you add `--language es` (or `fr`, `de`, `it`, `nl`, `pt`) to both commands. Agents then write specs, issues, UAT plans and messages in that language too; commands, labels and code stay in English. Change it later with `haam.py config --language <code>`, then the kit's `update --target . --apply`.
 
 The installer **never overwrites** your files:
 - New files are added.

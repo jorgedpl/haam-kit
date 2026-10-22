@@ -6,6 +6,18 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-10-22
+
+### Added
+- **The docs in seven languages.** Every doc people read (the process, setup and decision guides, onboarding, the templates, the product files, the PR template, the README) now comes in English, Spanish, French, German, Italian, Dutch and Portuguese. Choose one at install: `haam.py install --target . --language es` (`en`, `es`, `fr`, `de`, `it`, `nl`, `pt`). `/haam-setup` proposes the language you write to it in.
+- **Agents write in the project's language.** `language` in `haam.config.json`: specs, assessments, issues, comments, UAT plans, PR descriptions and messages are written in it (`AGENTS.md` §10). Commands, labels, statuses, setting names, file names and code stay in English, so the tools, the board and CI work the same in every language.
+- Translations live in `template/i18n/<language>/` at the same paths as the English files; each language has a `GLOSSARY.md` of the terms it uses. Agent instructions (`AGENTS.md`, `CLAUDE.md`, skills, reviewer prompts) stay in English: agents read English best, and one source keeps them identical everywhere.
+- `tests/i18n_check.py` checks that every translation keeps the code blocks, inline code, link targets and headings of the English file. It runs in the test suite.
+
+### Migration
+- Nothing to do to stay in English.
+- To switch an existing project: `python3 tools/haam/haam.py config --language es`, then the new kit's `update --target . --apply`. Docs you never edited switch to the new language; edited ones are kept as they are (translate those by hand or ask an agent).
+
 ## [1.15.1] - 2026-10-22
 
 ### Fixed
@@ -439,7 +451,16 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.16.0...HEAD
+[1.16.0]: https://github.com/jorgedpl/haam-kit/compare/v1.15.1...v1.16.0
+[1.15.1]: https://github.com/jorgedpl/haam-kit/compare/v1.15.0...v1.15.1
+[1.15.0]: https://github.com/jorgedpl/haam-kit/compare/v1.14.0...v1.15.0
+[1.14.0]: https://github.com/jorgedpl/haam-kit/compare/v1.13.0...v1.14.0
+[1.13.0]: https://github.com/jorgedpl/haam-kit/compare/v1.12.0...v1.13.0
+[1.12.0]: https://github.com/jorgedpl/haam-kit/compare/v1.11.0...v1.12.0
+[1.11.0]: https://github.com/jorgedpl/haam-kit/compare/v1.10.0...v1.11.0
+[1.10.0]: https://github.com/jorgedpl/haam-kit/compare/v1.9.1...v1.10.0
+[1.9.1]: https://github.com/jorgedpl/haam-kit/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/jorgedpl/haam-kit/compare/v1.8.1...v1.9.0
 [1.8.1]: https://github.com/jorgedpl/haam-kit/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/jorgedpl/haam-kit/compare/v1.7.2...v1.8.0

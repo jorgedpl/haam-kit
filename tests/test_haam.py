@@ -502,6 +502,48 @@ class TestUpdate(ToolTestCase):
         self.assertNotEqual(p.returncode, 0)
 
 
+class TestLanguage(ToolTestCase):
+    def kit_with_spanish(self):
+        kit = self.tmp / "kit" / "template"
+        shutil.copytree(KIT, kit, symlinks=True)
+        es = kit / "i18n/es/docs/process"
+        es.mkdir(parents=True, exist_ok=True)
+        (es / "GATES.md").write_text("# Puertas\n")
+        return kit / "tools/haam/haam.py"
+
+    def test_install_in_spanish(self):
+        tool = self.kit_with_spanish()
+        self.run_tool("install", "--target", str(self.proj), "--language", "es", tool=tool)
+        self.assertEqual((self.proj / "docs/process/GATES.md").read_text(), "# Puertas\n")
+        self.assertIn("HAAM", (self.proj / "docs/process/LIFECYCLE.md").read_text())   # untranslated: English
+        self.assertFalse((self.proj / "i18n").exists())
+        self.assertEqual(self.lock()["language"], "es")
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", tool=self.installed_tool())
+        self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["language"], "es")
+
+    def test_english_by_default_and_unknown_refused(self):
+        tool = self.kit_with_spanish()
+        self.run_tool("install", "--target", str(self.proj), tool=tool)
+        self.assertNotEqual((self.proj / "docs/process/GATES.md").read_text(), "# Puertas\n")
+        self.assertEqual(self.lock()["language"], "en")
+        p = self.run_tool("install", "--target", str(self.proj), "--language", "xx", tool=tool, check=False)
+        self.assertNotEqual(p.returncode, 0)
+
+    def test_switch_language_with_update(self):
+        tool = self.kit_with_spanish()
+        self.run_tool("install", "--target", str(self.proj), tool=tool)
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--language", "es", tool=self.installed_tool())
+        self.run_tool("update", "--target", str(self.proj), "--apply", tool=tool)
+        self.assertEqual((self.proj / "docs/process/GATES.md").read_text(), "# Puertas\n")
+        self.assertEqual(self.lock()["language"], "es")
+
+
+class TestTranslations(unittest.TestCase):
+    def test_translations_keep_code_links_and_headings(self):
+        p = subprocess.run([sys.executable, str(Path(__file__).parent / "i18n_check.py")], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout[-3000:])
+
+
 class TestAgentsDoctorDev(ToolTestCase):
     def test_agents_links_and_moves_existing_skills(self):
         (self.proj / ".claude/skills/my-skill").mkdir(parents=True)

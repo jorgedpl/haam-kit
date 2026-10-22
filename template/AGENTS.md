@@ -167,7 +167,8 @@ Project-specific test skills: `TODO(setup): list any extra test skills or script
 
 - Lead with the outcome: what changed, what's waiting on them, links (issue, PR, UAT plan).
 - When you need a decision, give options and a recommendation in a few lines.
-- Plain English. Assume the product owner is technical but not a full-time developer.
+- Plain language. Assume the product owner is technical but not a full-time developer.
+- **Language:** write to people in the project's language (`language` in `haam.config.json`; `en` if unset): chat, tracker issues and comments, specs, assessments, UAT plans, PR descriptions and docs. Keep commands, labels, statuses, setting names, file names, branch names and code exactly as they are, in English. These agent rules stay in English whatever the language.
 
 ## 11. Tool-specific notes
 

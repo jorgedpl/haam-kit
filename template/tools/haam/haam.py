@@ -72,7 +72,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.15.1"
+VERSION = "1.16.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -542,9 +542,20 @@ def save_lock(root, lock):
     (root / LOCK_NAME).write_text(json.dumps(lock, indent=2) + "\n")
 
 
-def make_renderer(target):
+def project_language(target, override=None):
+    """The language of the project's docs: --language, then haam.config.json, then the lock, then English."""
+    tcfg = load_config(target) if (target / CONFIG_NAME).exists() else {}
+    lang = override or tcfg.get("language") or load_lock(target).get("language") or "en"
+    if lang not in LANGUAGES:
+        sys.exit(f"Unknown language '{lang}'. Choose one of: {', '.join(LANGUAGES)}")
+    return lang
+
+
+def make_renderer(target, language=None):
     """Return render(path, rel) -> bytes: kit file content as it should look in this project."""
     tcfg = load_config(target) if (target / CONFIG_NAME).exists() else None
+    lang = project_language(target, language)
+    i18n = kit_root() / I18N_DIR / lang
     applied_key = (tcfg or {}).get("_applied", {}).get("team_key", PLACEHOLDER_KEY)
     applied_product = (tcfg or {}).get("_applied", {}).get("product_name", "")
     github_tracker = (tcfg or {}).get("tracker") == "github"
@@ -552,6 +563,8 @@ def make_renderer(target):
     mcp_removed = ".mcp.json" in (load_lock(target).get("files") or {}) and not (target / ".mcp.json").exists()
 
     def render(path, rel_s):
+        if lang != "en" and (i18n / rel_s).is_file():
+            path = i18n / rel_s            # this project's language
         data = path.read_bytes()
         if github_tracker and rel_s in LINEAR_FILES:
             kit = without_linear(json.loads(data))
@@ -584,7 +597,7 @@ def kit_files(src):
     for p in sorted(src.rglob("*")):
         rel = p.relative_to(src)
         rel_s = rel.as_posix()
-        if rel.parts[0] in (".git", ".haam") or rel_s in INSTALL_SKIP or "__pycache__" in rel.parts:
+        if rel.parts[0] in (".git", ".haam", I18N_DIR) or rel_s in INSTALL_SKIP or "__pycache__" in rel.parts:
             continue
         if p.is_symlink() or p.is_dir():
             continue  # links are created by `agents`; dirs are created as needed
@@ -680,6 +693,11 @@ def unignore_lines(target, rels):
 
 
 INSTALL_SKIP = {".gitignore.additions", "START-HERE.md"}
+# Translations of the human-facing docs: i18n/<language>/<the same path>. A project gets the English file, or its
+# language's version where one exists. Agent instructions (AGENTS.md, skills, reviewer prompts) stay in English.
+I18N_DIR = "i18n"
+LANGUAGES = {"en": "English", "es": "Español", "fr": "Français", "de": "Deutsch", "it": "Italiano",
+             "nl": "Nederlands", "pt": "Português"}
 UNHIDE_MARK = "# >>> HAAM: kit files your own rules would hide (kept last so they win; every machine needs them)"
 UNHIDE_END = "# <<< HAAM re-include"
 
@@ -699,7 +717,8 @@ def cmd_install(args):
 
     rep = Report()
     rep.section(f"Installing HAAM {VERSION} into {target}")
-    render = make_renderer(target)
+    lang = project_language(target, args.language)
+    render = make_renderer(target, lang)
     lock = load_lock(target)
     incoming = target / ".haam" / "incoming"
     created, same, merged, conflicts = [], [], [], []
@@ -740,6 +759,7 @@ def cmd_install(args):
         make_executable(target)
         lock["kit_version"] = VERSION
         lock["kit_repo"] = KIT_REPO
+        lock["language"] = lang
         save_lock(target, lock)
 
     rep.add("ok", f"{len(created)} files added")
@@ -787,7 +807,10 @@ def cmd_update(args):
         rep.add("warn", f"Major version change ({old} → {VERSION})",
                 "read the migration notes in the kit's CHANGELOG before applying")
 
-    render = make_renderer(target)
+    lang = project_language(target)
+    render = make_renderer(target, lang)
+    if lang != (lock.get("language") or "en"):
+        rep.add("info", f"Docs language: {LANGUAGES[lang]}", "the docs you haven't changed switch to it")
     incoming = target / ".haam" / "incoming"
     added, updated, kept, conflicts, merged, same, skipped = [], [], [], [], [], [], []
     hidden = ignored_paths(target, [r for _, r in kit_files(src)])
@@ -878,6 +901,7 @@ def cmd_update(args):
         lock["files"] = new_lock
         lock["kit_version"] = VERSION
         lock["kit_repo"] = KIT_REPO
+        lock["language"] = lang
         save_lock(target, lock)
         rep.add("ok", f"{LOCK_NAME} now records {VERSION}")
     else:
@@ -1044,6 +1068,13 @@ def cmd_config(args):
         cur += [x.strip() for x in (args.not_production or "").split(",") if x.strip() and x.strip() not in cur]
         drop = {x.strip() for x in (args.remove_not_production or "").split(",") if x.strip()}
         cfg["non_production_paths"] = [x for x in cur if x not in drop]
+    if args.language:
+        if args.language != cfg.get("language") and (root / CONFIG_NAME).exists():
+            rep.add("info", f"Language: {LANGUAGES[args.language]}", "to switch the installed docs, run the kit's "
+                    "update: python3 <kit>/template/tools/haam/haam.py update --target . --apply")
+        cfg["language"] = args.language
+    elif not cfg.get("language"):
+        cfg["language"] = load_lock(root).get("language") or "en"
     if args.clear_heavy_runs:
         cfg["heavy_runs"] = []
     for x in args.heavy_run or []:
@@ -1084,7 +1115,7 @@ def cmd_config(args):
     missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
     for k in ("product_name", "tracker", "team_key", "github_repo", "product_owner_github",
               "production_url", "agents", "deploy", "flow", "max_open_prs", "max_in_uat", "protected_paths",
-              "production_paths", "non_production_paths", "heavy_runs") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
+              "production_paths", "non_production_paths", "heavy_runs", "language") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
         v = cfg.get(k)
         rep.add("ok" if v else ("info" if k == "heavy_runs" else "warn"), f"{k}: {v if v else '(not set)'}")
     if missing:
@@ -5546,6 +5577,8 @@ def main():
 
     p = common(sub.add_parser("install", help="copy the kit into a repository"))
     p.add_argument("--target", required=True)
+    p.add_argument("--language", choices=list(LANGUAGES), help="language of the docs for people (default en); agent "
+                   "instructions stay in English")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_install)
 
@@ -5562,6 +5595,8 @@ def main():
     p = common(sub.add_parser("config", help="create/update haam.config.json"))
     p.add_argument("--human", action="store_true", help="the owner chose these settings in this session")
     p.add_argument("--product")
+    p.add_argument("--language", choices=list(LANGUAGES), help="the language agents use with people, in the tracker "
+                   "and in docs; then run the kit's update to switch the installed docs")
     p.add_argument("--team-key")
     p.add_argument("--linear-team")
     p.add_argument("--github-repo")

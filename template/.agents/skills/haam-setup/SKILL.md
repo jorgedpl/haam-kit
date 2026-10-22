@@ -36,12 +36,13 @@ You are guiding the **project admin** through adopting HAAM. The tool `tools/haa
 
 ## Phase 1: Install the kit
 1. `git switch -c chore/adopt-haam` (from an up-to-date default branch).
-2. `python3 <kit-path>/tools/haam/haam.py install --target . --dry-run`, then show the summary, then run it without `--dry-run`. This records the kit version in `haam.lock.json` (commit it: it's how future upgrades know what was installed).
-3. For each conflict reported, merge the kit version from `.haam/incoming/` into the existing file, following the table in `docs/setup/HAAM-ADOPTION-GUIDE.md` (Phase 1). Key cases:
+2. **Language:** the kit's docs come in English (`en`), Spanish (`es`), French (`fr`), German (`de`), Italian (`it`), Dutch (`nl`) and Portuguese (`pt`). If the human writes to you in one of these other than English, propose it; otherwise use `en`. Agents then write specs, issues, UAT plans and messages in that language; commands, labels and code stay in English.
+3. `python3 <kit-path>/tools/haam/haam.py install --target . --language <code> --dry-run`, then show the summary, then run it without `--dry-run`. This records the kit version in `haam.lock.json` (commit it: it's how future upgrades know what was installed).
+4. For each conflict reported, merge the kit version from `.haam/incoming/` into the existing file, following the table in `docs/setup/HAAM-ADOPTION-GUIDE.md` (Phase 1). Key cases:
    - **Existing `CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.cursor/rules`**: move project-specific knowledge (conventions, commands, gotchas) into `docs/product/ARCHITECTURE.md` or a "Project specifics" section at the end of `AGENTS.md`; then replace the file with the kit version. Show the human what you moved.
    - **Existing CI**: keep it, make sure a job called `ci` runs the full test suite on PRs; add the kit's other workflows.
    - **Existing `Makefile`**: add the kit's targets.
-4. Delete `.haam/incoming/` when everything is merged.
+5. Delete `.haam/incoming/` when everything is merged.
 
 ## Phase 2: The decisions, in four short rounds
 Each round is one message, with a recommendation per question (`DECISIONS.md` has them). Wait for the answers before the next round.
@@ -53,6 +54,7 @@ Each round is one message, with a recommendation per question (`DECISIONS.md` ha
 - **Tracker:** GitHub Projects or Linear. Recommend GitHub Projects unless they already work in Linear every day. Mention Linear's free cap and what's automatic only on GitHub Projects (§2's table).
 - Which agent tools the team uses (Claude Code, Cursor, Codex, Grok, Gemini, Copilot).
 - The production URL, or none yet.
+- Confirm the language chosen in Phase 1. To change it: `python3 tools/haam/haam.py config --language <code>`, then `python3 <kit-path>/tools/haam/haam.py update --target . --apply` switches the kit's docs.
 
 **Round 2: how work flows** (`DECISIONS.md` §4)
 - **Testing order** (`flow`): `test-first` (recommended: they test the agent's branch, then the PR and checks run once) or `checks-first`.

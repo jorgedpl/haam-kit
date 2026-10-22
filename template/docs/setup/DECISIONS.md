@@ -17,6 +17,7 @@ The product owner makes these, with the project admin. `/haam-setup` walks throu
 | GitHub account and plan | An organization. Public repository: Free. Private: Team | The repository is private and you need an approver on deploys: Enterprise Cloud | §1 |
 | Tracker | GitHub Projects | The team already works in Linear every day | §2 |
 | Who's who | One product owner, one backup approver | Several products or owners | §3 |
+| Language (`language`) | The language your team writes in | The team changes | §3 |
 | Testing order (`flow`) | `test-first` | You test on a shared staging site rather than locally | §4 |
 | What you test (`uat`) | `owner-decides` | Regulated product: `always`. Many small, well-tested fixes: `bugs-skip` | §4 |
 | Grouping (`grouping`) | `per-issue` | Epics made of small items: `per-epic`. Actions minutes are scarce: `release` | §4 |
@@ -80,6 +81,7 @@ The two AI reviews run with one repository secret, added by the owner in their o
 - **Builders:** everyone who runs agent chats. Each needs their own GitHub account with write access, and their own agent tool. The admin runs `haam.py invite --github USER` to see the plan, then the same with `--apply`. Each builder then runs `/haam-onboard`.
 - **Admin:** sets up GitHub, the tracker and the secrets. Often the owner.
 - **Once two people work on the code,** require one approval in the branch rules (`GITHUB-SETUP.md` §2).
+- **Language:** the kit's docs come in English, Spanish, French, German, Italian, Dutch and Portuguese (`en`, `es`, `fr`, `de`, `it`, `nl`, `pt`). Agents write specs, issues, UAT plans and messages in the language you choose; commands, labels, statuses and code stay in English. Choose it at install (`install --language es`). To change it later: `haam.py config --language fr`, then the kit's `update --target . --apply` switches the docs you haven't edited.
 
 ## 4. How work flows: the settings
 `python3 tools/haam/haam.py settings --explain` prints every option with its trade-off. The choices that matter:

@@ -1,5 +1,7 @@
 # HAAM: Human-Agent Agile Methodology
 
+**English** · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Nederlands](README.nl.md) · [Português](README.pt.md)
+
 **Humans decide. Agents execute. Everything lives in Git and your tracker.**
 
 HAAM is an open methodology and kit for building software with AI coding agents, from idea to production, without losing control. It gives every agent the same rules, the same commands and the same gates, whatever tool it runs in: **Claude Code, Cursor, Codex, Grok Build, Gemini CLI or GitHub Copilot**. Work is tracked on a **GitHub Projects** board (free) or in **Linear**, your choice. Several people, each with their own agent and account, can work on the same product in parallel.
@@ -27,6 +29,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 - **Parallel agents without collisions**: open a new chat window, type `/work bugs`, and the agent gets its own copy of the project (a git worktree), picks the top bug and works it through to your test. Run as many as you like, on one computer or several.
 - **Code review where no one marks their own homework**: a secret scan before every commit and in CI, dependency audit, and two independent AI reviewers (spec/quality and security) that never saw the code being written. Humans review protected areas and can overrule.
 - **Gates enforced by GitHub**, not by trust: branch rules, required checks, a UAT label gate and deploy approvals, so they hold whatever agent or person is pushing.
+- **Docs in seven languages:** English, Spanish, French, German, Italian, Dutch and Portuguese. Choose one at install (`install --language es`) and agents write specs, issues, UAT plans and messages in it too; commands, labels and code stay in English.
 - **A setup tool** (`haam.py`, Python 3, no dependencies) that installs the kit into an existing repo without overwriting anything, configures GitHub and the tracker (GitHub Projects or Linear), gives agents one command set for the board, onboards developers, checks the setup and upgrades projects to new kit versions.
 
 ## Quick start
@@ -35,7 +38,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Get a released version of the kit:
    ```bash
-   git clone --depth 1 --branch v1.15.1 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.16.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (or download the zip from [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Open your coding agent **in your project's root folder** and say:
@@ -135,6 +138,7 @@ template/        Everything that gets installed into a project (the kit)
   .agents/skills Shared skills
   tools/haam/    The setup tool
   docs/          Methodology, gates, setup guides, templates
+  i18n/          The same docs in other languages
   .github/       CI, security, AI review, UAT gate, deploy workflows
 tests/           Tests for the setup tool
 install.sh       Optional bootstrap: fetch a released version and run the tool

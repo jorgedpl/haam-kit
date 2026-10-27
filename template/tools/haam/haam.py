@@ -75,7 +75,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.16.0"
+VERSION = "1.17.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -2181,6 +2181,14 @@ def cmd_github_project(args):
                 rep.add("ok", "Priority field created: Urgent, High, Medium, Low")
             else:
                 rep.add("warn", "Priority field missing", "will create: Urgent, High, Medium, Low")
+
+            # Built-in workflows (browser only). "Item closed → Done" fights Canceled: ship sets Done itself.
+            rep.section("Board workflows")
+            rep.add("warn", 'Turn off the built-in "Item closed → Status: Done" workflow',
+                    "it overwrites Canceled after `issue status … Canceled` closes the issue. "
+                    "`ship` sets Done itself. Board → … → Workflows → Item closed → off. "
+                    "Keep Auto-add to project on for this repository.")
+            rep.action(WHO_BROWSER, "Board → … → Workflows: turn Item closed off; leave Auto-add on")
     except RuntimeError as e:
         rep.add("fail", "GitHub Projects error", str(e))
         if "gh auth refresh" in str(e):
@@ -2492,6 +2500,13 @@ def issue_action(args, cfg, board):
             if code != 0:
                 raise RuntimeError(err or out)
             msg += " (closed as not planned)"
+            # GitHub's built-in board workflow "Item closed → Status: Done" (on by default) runs after
+            # the close and can overwrite Canceled. Wait briefly, then set Canceled again so it sticks.
+            settle = min(poll_seconds(), 2.0)
+            if settle:
+                time.sleep(settle)
+            board.set_option(iss, "Status", "Canceled")
+            msg += "; Canceled re-applied after close"
         return {"number": number, "status": canon, "message": msg}
 
     if a == "priority":
@@ -3813,13 +3828,37 @@ def cmd_ship(args):
 
 
 def limits_config(root):
-    """The limits come from the owner's copy of haam.config.json in the main folder, so a change (a batch window,
-    say) counts at once for every agent chat on this computer, in whatever worktree."""
+    """The limits come from the main folder's default-branch copy of haam.config.json (`main` / `origin/main`),
+    so a feature branch checked out there during `/test` doesn't silently lower them. A batch window or limit
+    just written in that folder's working tree still counts when the folder is on the default branch, so a
+    settings change takes effect for every agent chat before it's committed."""
     _, main, _ = git_paths(root)
+    wt = None
     try:
-        return load_config(main)
+        wt = load_config(main)
     except SystemExit:
+        pass
+    base = (wt or {}).get("default_branch") or "main"
+    cfg = None
+    for spec in (f"{base}:{CONFIG_NAME}", f"origin/{base}:{CONFIG_NAME}"):
+        raw = git_out(main, "show", spec)
+        if not raw:
+            continue
+        try:
+            cfg = json.loads(raw)
+            break
+        except json.JSONDecodeError:
+            continue
+    if cfg is None:
+        if wt is not None:
+            return wt
         return load_config(root)
+    branch = (git_out(main, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+    if wt is not None and branch in (base, "HEAD"):
+        for k in ("max_open_prs", "max_in_uat", "batch_window"):
+            if k in wt:
+                cfg[k] = wt[k]
+    return cfg
 
 
 def effective_limits(cfg, today=None):

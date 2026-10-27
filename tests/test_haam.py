@@ -1148,6 +1148,28 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("config", "--max-open-prs", "20", "--human")
         self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
 
+    def test_capacity_reads_limits_from_main_not_a_checked_out_branch(self):
+        # Raised limits live on main; /test often leaves an older branch checked out in the main
+        # folder. capacity must use main's limits, not that branch's working tree (comment on #3).
+        self.setup_board()
+        self.tool("config", "--max-open-prs", "50", "--max-in-uat", "30", "--human")
+        git(self.proj, "add", "haam.config.json")
+        git(self.proj, "commit", "-qm", "raise limits on main")
+        st = self.gh_state()
+        st["prs"] = {str(k): {"title": f"PR {k}", "headRefName": f"b{k}", "state": "OPEN", "labels": [], "url": "u",
+                              "isDraft": False, "files": [{"path": f"src/f{k}.py"}]} for k in range(1, 16)}
+        self.state.write_text(json.dumps(st))
+        git(self.proj, "switch", "-qc", "old-limits")
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        cfg["max_open_prs"], cfg["max_in_uat"] = 10, 10
+        (self.proj / "haam.config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+        git(self.proj, "add", "haam.config.json")
+        git(self.proj, "commit", "-qm", "old limits on branch")
+        res = json.loads(self.tool("capacity", "--json").stdout)
+        self.assertEqual((res["max_open_prs"], res["max_in_uat"]), (50, 30))
+        self.assertFalse(res["hold"])
+        git(self.proj, "switch", "-q", "main")
+
     def test_capacity_counts_ready_prs_and_the_uat_queue_with_a_batch_window(self):
         self.setup_board()
         st = self.gh_state()
@@ -1377,8 +1399,14 @@ class TestGitHubProjects(ToolTestCase):
         n = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Dark mode", "--json").stdout)["number"]
         self.assertNotEqual(self.tool("issue", "status", str(n), "Canceled", check=False).returncode, 0)
         self.assertEqual(self.gh_state()["issues"][str(n)]["state"], "OPEN")
-        self.tool("issue", "status", str(n), "Canceled", "--human")
+        # HAAM_POLL_SECONDS=0: no wait; Canceled is still re-applied after close so a board
+        # "Item closed → Done" workflow can't leave the card as Done (#4).
+        out = self.tool("issue", "status", str(n), "Canceled", "--human",
+                        env={**self.env, "HAAM_POLL_SECONDS": "0"}).stdout
         self.assertEqual(self.gh_state()["issues"][str(n)]["state"], "CLOSED")
+        self.assertIn("Canceled re-applied after close", out)
+        self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"],
+                         "Canceled")
         m = json.loads(self.tool("issue", "create", "--stream", "idea", "--title", "Later", "--json").stdout)["number"]
         self.tool("issue", "status", str(m), "Parked", "--human")
         self.assertEqual(self.gh_state()["issues"][str(m)]["state"], "OPEN")

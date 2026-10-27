@@ -6,6 +6,8 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-10-27
+
 ### Added
 - **`exclusive` takes turns in order** (issue #5). Each waiter writes a ticket in `<common git dir>/haam-exclusive.lock.queue/`, and the lock goes to the oldest ticket whose process is still alive. Dead tickets are removed as they're found, and a waiter's own ticket goes when it gets the lock, gives up or is interrupted. A copy of `haam.py` from before tickets still takes the lock whenever it's free, so mixed versions keep working. Before, whoever polled first when the lock freed won, and one project saw a run give up after three hours without a turn.
 - **A waiting heavy run can move to another machine** (issue #5). With `HAAM_REMOTE_RUNNER=<ssh host>` set on a machine (optionally `HAAM_REMOTE_REPO=<clone path there>`), a waiting `make …` run goes to that host as soon as the host's own lock is free:
@@ -14,6 +16,14 @@ Each release lists **Migration** steps when a project needs to do more than run 
   - output and the exit code come back as if it ran locally;
   - the worktree and the ref are removed afterwards, whatever the result.
   Without the variable nothing changes. `AGENTS.md` §7 says so. Tests: `tests/test_exclusive.py`.
+
+### Fixed
+- **`Canceled` stays Canceled** (issue #4). Closing an issue as not planned used to lose to GitHub's built-in board workflow "Item closed → Status: Done", so rejected work showed as delivered. After the close, the tool waits briefly and sets Status to Canceled again. `github-project` and `TRACKER.md` tell you to turn that workflow off (`ship` already sets Done).
+- **`capacity` reads the limits from `main`** (follow-up on #3). When the main folder has an older branch checked out (normal during `/test`), it no longer reports that branch's lower limits. A batch window or raised limit just written while the folder is on `main` still counts at once, before the commit.
+
+### Migration
+- `haam.py update`.
+- On GitHub Projects boards: turn off **Item closed → Status: Done** (board → … → Workflows). Keep **Auto-add to project** on.
 
 ## [1.16.0] - 2026-10-22
 

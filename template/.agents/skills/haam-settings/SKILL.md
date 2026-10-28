@@ -41,11 +41,13 @@ The areas and their settings:
 - **Protected areas:** `protected_paths`. Show the list. To add: `config --protected "src/auth/**" --human`. To remove: `config --unprotected "…" --human`.
 - **Production code** (`DECISIONS.md` §8): `production_paths` minus `non_production_paths`. It tells agents and the owner what runs for users, and what a prototype must not reach without the gates. Change it with `config --production "src/**,…" --human`, `--not-production "…" --human` and `--remove-not-production "…" --human`.
 - **Language:** `language` (`en`, `es`, `fr`, `de`, `it`, `nl`, `pt`): the language of the docs and of what agents write for people (specs, issues, UAT plans, messages). Change it with `config --language <code>`, then `python3 <kit-path>/tools/haam/haam.py update --target . --apply` with the kit at the project's version: docs nobody edited switch; edited ones stay as they are.
-- **Housekeeping:** `worktree_cleanup` (after-ship | manual). After-ship never removes a worktree a program (an agent chat, a terminal) is still running in.
+- **Housekeeping:** `worktree_cleanup` (after-ship | manual). After-ship never removes a worktree a program (an agent chat, a terminal) is still running in. `worktree_dir` (default `.claude/worktrees`): where agents' worktrees live; a sibling like `../connect-wt` keeps them outside the repo (`settings --set worktree_dir=../connect-wt --human`, or `config --worktree-dir … --human`).
+- **Required board fields** (GitHub Projects): `required_issue_fields` — names every new issue must get on create (e.g. Area, Kind, Code check). Set with `config --required-fields "Area,Kind,Code check" --human`. Epics use `config --required-epic-fields "…"` or, if unset, the same list without `Code check`. Empty (default): agents set a field only when the text clearly answers it.
 - **Shared test resources:** `heavy_runs`. If tests use something the whole machine shares (a local database they clone, a simulator, a device), two chats running them at once break each other. List those commands as patterns: `config --heavy-run "make (check|test-integration)"` (`--clear-heavy-runs` empties the list). Agents then run them through `haam.py exclusive`, one at a time, and so does `local-ci`. Empty (the default): nothing waits.
 
 Point out combinations that undo each other's safety, in one line each, and let them decide:
 - `ci off` with `review off`: nothing checks the code before your test;
+- `ci off` without a release-time full check: Linux-only failures can reach production; keep secret scanning, the AI reviews and release-gate, and run `make check` (or the full CI workflow) on the commit you ship;
 - `deploy_approval automatic` with `uat bugs-skip`: an agent's bug fix can reach production with no human looking at it;
 - anything but `ci every-pr` with `review github` (or a Linear tracker, or no `HAAM_PROJECT_TOKEN` secret): the no-UAT lane stops merging by itself, and you ship those PRs (local results aren't tamper-proof; reduced checks aren't enough on their own);
 - `grouping release`: one failing release check holds every change in it.
@@ -55,7 +57,7 @@ Point out combinations that undo each other's safety, in one line each, and let 
 2. Show the summary: `python3 tools/haam/haam.py settings`.
 3. On their OK, sync GitHub with `python3 tools/haam/haam.py settings --apply --human`. This needs repository admin. It sets:
    - the repository variables the workflows read;
-   - the required checks (for example `ci-local` instead of `ci`);
+   - the required checks (for example `ci-local` instead of `ci`, or dropping `ci` when `ci` is `off`);
    - the production approval.
 4. The settings take effect for agents and the gate once `haam.config.json` is on `main`. Commit it on a branch (`chore/haam-settings`) and open the PR. `haam.config.json` is a protected file, so the human reviews and merges it: with `/test` and `ship`, or in GitHub.
 

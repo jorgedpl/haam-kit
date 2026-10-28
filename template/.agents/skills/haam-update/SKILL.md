@@ -31,6 +31,7 @@ Open `/tmp/haam-kit-<target-version>/CHANGELOG.md`. Summarise for the human, in 
 
 ## 5. Merge and tidy
 1. For each file in `.haam/incoming/`: merge the kit's changes into the project's version, keeping the project's customisations (project knowledge, protected-area paths, filled-in commands). Show the human a short summary per file. Then delete `.haam/incoming/`.
+   - Skills and docs the project marked with `<!-- HAAM:project-patch -->` … `<!-- /HAAM:project-patch -->` (optional name: `HAAM:project-patch:deploy`) are folded into the kit version automatically on update — they shouldn't appear as merge conflicts. Prefer that marker for project-only skill paragraphs so future updates stay quiet.
 2. Files no longer in the kit: tell the human which they can delete; delete only with their OK.
 3. `python3 tools/haam/haam.py agents --apply`
 

@@ -425,6 +425,28 @@ class TestUpdate(ToolTestCase):
         self.assertIn("0 files updated (you hadn't changed them)", texts)
         self.assertFalse([t for t in texts if t.startswith("Needs a merge")])
 
+    def test_project_patch_survives_update(self):
+        self.install()
+        self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
+                      "--owner", "octocat", tool=self.installed_tool())
+        skill = self.proj / ".agents/skills/idea/SKILL.md"
+        skill.write_text(skill.read_text() + "\n<!-- HAAM:project-patch:acme -->\nAcme: always set Area.\n"
+                         "<!-- /HAAM:project-patch:acme -->\n")
+        new = self.make_new_kit()
+        (new / ".agents/skills/idea/SKILL.md").write_text(
+            (new / ".agents/skills/idea/SKILL.md").read_text() + "\n## Kit tip\nNew kit advice.\n")
+        new_tool = new / "tools/haam/haam.py"
+        plan = self.run_json("update", "--target", str(self.proj), tool=new_tool)
+        texts = [i["text"] for s in plan["sections"] for i in s["items"]]
+        self.assertTrue(any("project-patch" in t for t in texts), texts)
+        self.assertFalse([t for t in texts if t.startswith("Needs a merge")])
+        self.run_tool("update", "--target", str(self.proj), "--apply", tool=new_tool)
+        body = skill.read_text()
+        self.assertIn("Kit tip", body)
+        self.assertIn("Acme: always set Area.", body)
+        self.assertIn("HAAM:project-patch:acme", body)
+        self.assertFalse((self.proj / ".haam/incoming/.agents/skills/idea/SKILL.md").exists())
+
     def test_github_tracker_never_gets_the_linear_connection(self):
         self.install()
         settings = self.proj / ".claude/settings.json"
@@ -596,7 +618,7 @@ class TestAgentsDoctorDev(ToolTestCase):
         res = json.loads(self.run_tool("settings", "--json", tool=tool).stdout)
         keys = {r["key"]: r for r in res["settings"]}
         for k in ("flow", "uat", "grouping", "ci", "nightly", "review", "runner", "deploy", "deploy_approval",
-                  "max_open_prs", "max_in_uat", "max_review_rounds", "max_pr_lines", "worktree_cleanup"):
+                  "max_open_prs", "max_in_uat", "max_review_rounds", "max_pr_lines", "worktree_cleanup", "worktree_dir"):
             self.assertIn(k, keys)
             self.assertTrue(keys[k]["what"])
             for o in keys[k]["options"]:
@@ -613,6 +635,9 @@ class TestAgentsDoctorDev(ToolTestCase):
         self.assertEqual((cfg["ci"], cfg["max_in_uat"]), ("local", 4))
         res = json.loads(self.run_tool("settings", "--set", "ci=off", "--human", "--json", tool=tool).stdout)
         self.assertNotIn("ci", res["required_checks"])
+        self.assertNotIn("ci-local", res["required_checks"])
+        self.run_tool("settings", "--set", "worktree_dir=../agent-wt", "--human", tool=tool)
+        self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["worktree_dir"], "../agent-wt")
         for bad in ("ci=sometimes", "max_in_uat=0", "nosuch=1"):
             self.assertNotEqual(self.run_tool("settings", "--set", bad, "--human", tool=tool, check=False).returncode, 0, bad)
         self.assertNotEqual(self.run_tool("settings", "--set", "grouping=release", "--set", "flow=checks-first",
@@ -955,6 +980,35 @@ class TestGitHubProjects(ToolTestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("a moment earlier", p.stderr)
         self.assertTrue(any("withdrawn" in c["body"] for c in self.gh_state()["comments"]))
+
+    def test_required_issue_fields_on_create(self):
+        self.setup_board()
+        st = self.gh_state()
+        st["projects"][0]["fields"] += [
+            {"id": "F_area", "name": "Area", "options": [{"id": "O_b", "name": "Billing"}, {"id": "O_w", "name": "Wallet"}]},
+            {"id": "F_kind", "name": "Kind", "options": [{"id": "O_f", "name": "Feature"}, {"id": "O_x", "name": "Fix"}]},
+            {"id": "F_code", "name": "Code check", "options": [{"id": "O_y", "name": "Yes"}, {"id": "O_n", "name": "No"}]}]
+        self.state.write_text(json.dumps(st))
+        self.assertNotEqual(self.tool("config", "--required-fields", "Area,Kind,Code check", check=False).returncode, 0)
+        self.tool("config", "--required-fields", "Area,Kind,Code check", "--human")
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual(cfg["required_issue_fields"], ["Area", "Kind", "Code check"])
+        before = len(self.gh_state()["issues"])
+        p = self.tool("issue", "create", "--stream", "bug", "--title", "Missing fields", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Area", p.stderr)
+        self.assertEqual(len(self.gh_state()["issues"]), before)
+        r = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "With fields",
+                                 "--field", "Area=Billing", "--field", "Kind=Fix", "--field", "Code check=Yes",
+                                 "--json").stdout)
+        self.assertEqual(r["fields"]["Area"], "Billing")
+        # Epics drop Code check unless required_epic_fields says otherwise
+        epic = json.loads(self.tool("issue", "create", "--epic", "--stream", "idea", "--title", "Epic",
+                                    "--field", "Area=Wallet", "--field", "Kind=Feature", "--json").stdout)
+        self.assertNotIn("Code check", epic.get("fields") or {})
+        p = self.tool("issue", "create", "--epic", "--stream", "idea", "--title", "No area", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Area", p.stderr)
 
     def test_custom_board_fields(self):
         self.setup_board()
@@ -1495,6 +1549,63 @@ class TestLinkedIssues(unittest.TestCase):
         self.assertEqual(mod.branch_issue("12-epic-x", 13), 12)
         self.assertIsNone(mod.branch_issue("spike/12-x", 13))
 
+
+class TestHelpers(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("haam_mod", TOOL)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def test_required_fields_for(self):
+        cfg = {"required_issue_fields": ["Area", "Kind", "Code check"]}
+        self.assertEqual(self.mod.required_fields_for(cfg), ["Area", "Kind", "Code check"])
+        self.assertEqual(self.mod.required_fields_for(cfg, epic=True), ["Area", "Kind"])
+        cfg["required_epic_fields"] = ["Area"]
+        self.assertEqual(self.mod.required_fields_for(cfg, epic=True), ["Area"])
+        cfg["required_epic_fields"] = []
+        self.assertEqual(self.mod.required_fields_for(cfg, epic=True), [])
+
+    def test_merge_ruleset_drops_obsolete_haam_checks(self):
+        wanted = self.mod.ruleset_body({"ci": "off", "backup_approvers_github": []})
+        current = {
+            "name": "HAAM main protection", "target": "branch", "enforcement": "active",
+            "conditions": wanted["conditions"], "bypass_actors": [],
+            "rules": [
+                {"type": "deletion"},
+                {"type": "non_fast_forward"},
+                {"type": "pull_request", "parameters": wanted["rules"][2]["parameters"]},
+                {"type": "required_status_checks", "parameters": {
+                    "strict_required_status_checks_policy": False,
+                    "required_status_checks": [{"context": c} for c in
+                                              ["ci", "secrets", "dependencies", "ai-review", "security-review",
+                                               "release-gate", "project-lint"]]}},
+            ],
+        }
+        body, changes, _ = self.mod.merge_ruleset(current, wanted)
+        checks = next(r for r in body["rules"] if r["type"] == "required_status_checks")
+        ctx = [c["context"] for c in checks["parameters"]["required_status_checks"]]
+        self.assertNotIn("ci", ctx)
+        self.assertIn("secrets", ctx)
+        self.assertIn("project-lint", ctx)  # project's own check kept
+        self.assertTrue(any("Stop requiring" in c and "ci" in c for c in changes))
+
+    def test_project_patch_named_and_leftover(self):
+        kit = (b"# Skill\n\nKit body.\n\n<!-- HAAM:project-patch:deploy -->\n"
+               b"<!-- /HAAM:project-patch:deploy -->\n")
+        cur = (b"# Skill\n\nOld body.\n\n<!-- HAAM:project-patch:deploy -->\nDeploy: use fly.\n"
+               b"<!-- /HAAM:project-patch:deploy -->\n\n<!-- HAAM:project-patch -->\nExtra note.\n"
+               b"<!-- /HAAM:project-patch -->\n")
+        patches = self.mod.extract_project_patches(cur)
+        self.assertEqual([(n.decode() if n else None, b.decode()) for n, b in patches],
+                         [("deploy", "Deploy: use fly."), (None, "Extra note.")])
+        out = self.mod.apply_project_patches(kit, patches).decode()
+        self.assertIn("Deploy: use fly.", out)
+        self.assertIn("Extra note.", out)
+        self.assertIn("Project additions", out)
+        self.assertIn("Kit body.", out)
+
+
 class TestWorktrees(ToolTestCase):
     def setUp(self):
         super().setUp()
@@ -1524,6 +1635,18 @@ class TestWorktrees(ToolTestCase):
         self.assertEqual(json.loads(self.wt("prep", "--json", cwd=w1).stdout)["copied"], [".env"])
         self.assertEqual(json.loads(self.wt("prep", "--json", cwd=w1).stdout)["copied"], [])
         self.assertNotEqual(self.wt("new", "w1", check=False).returncode, 0)
+
+    def test_custom_worktree_dir(self):
+        area = self.tmp / "agent-wt"
+        self.run_tool("config", "--worktree-dir", str(area), "--human", tool=self.installed_tool())
+        res = json.loads(self.wt("new", "w1", "--json").stdout)
+        w1 = Path(res["path"])
+        self.assertEqual(w1, (area / "w1").resolve())
+        st = json.loads(self.wt("status", "--json", cwd=w1).stdout)
+        self.assertTrue(st["in_worktree"])
+        self.assertEqual(Path(st["worktree_path"]).resolve(), area.resolve())
+        listed = json.loads(self.wt("list", "--json").stdout)
+        self.assertIn(w1, [Path(w["path"]).resolve() for w in listed])
 
     def test_tracked_files_are_never_copied(self):
         (self.proj / ".worktreeinclude").write_text("README.md\n.env\n")

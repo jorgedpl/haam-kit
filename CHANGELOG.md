@@ -6,6 +6,19 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+### Added
+- **Required board fields on create.** `required_issue_fields` in `haam.config.json` (set with `config --required-fields "Area,Kind,Code check" --human`): `issue create` refuses without those GitHub Projects fields. Epics use `required_epic_fields`, or the same list without `Code check`. `/idea`, `/bug`, `/epic` and `/haam-settings` say so.
+- **Configurable worktree folder.** `worktree_dir` (default `.claude/worktrees`; e.g. `../connect-wt`). `worktree new|list|status|prep|clean`, `/work` and `doctor` follow it. Change with `settings --set worktree_dir=… --human` or `config --worktree-dir … --human`.
+- **`HAAM:project-patch` blocks survive `haam.py update`.** Mark project-only skill or doc paragraphs with `<!-- HAAM:project-patch -->` … `<!-- /HAAM:project-patch -->` (optional name: `HAAM:project-patch:deploy`). When both the kit and the project changed the file, update folds those bodies into the kit version instead of a merge conflict.
+
+### Fixed
+- **`ci: off` drops the required `ci` check.** `github --apply` / `settings --apply` remove HAAM-managed checks the settings no longer want (and still add the ones they do). Before, switching to `off` left a dead `ci` requirement that blocked merges. Documented with the release-time full-check guidance.
+
+### Migration
+- `haam.py update`.
+- If you use `ci: off`, run `settings --apply --human` (or `github --apply`) once so the ruleset drops `ci`.
+- Optional: set `required_issue_fields` / `worktree_dir` for your board and machine layout.
+
 ## [1.17.0] - 2026-10-27
 
 ### Added

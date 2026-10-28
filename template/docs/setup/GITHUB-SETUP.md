@@ -21,7 +21,7 @@ Settings → **Rules → Rulesets** → New branch ruleset (or classic Branch pr
   - Required approvals: **1** once you have a second human; **0** while you're solo (UAT label is your approval)
   - ✅ Dismiss stale approvals when new commits are pushed
 - ✅ Require status checks to pass (leave "require branches to be up to date" off: it re-runs CI on every open PR after each merge)
-  - Required checks: **`ci`**, **`secrets`**, **`dependencies`**, **`ai-review`**, **`security-review`** and **`release-gate`** (they appear in the list after the workflows have run once on a PR)
+  - Required checks: **`ci`** (or **`ci-local`** when `ci` is `local`; omit when `ci` is `off`), **`secrets`**, **`dependencies`**, **`ai-review`**, **`security-review`** and **`release-gate`** (they appear in the list after the workflows have run once on a PR). `haam.py settings --apply` / `github --apply` adds what the settings want and drops HAAM checks they no longer want (e.g. `ci` when you switch to `off`)
 - ✅ Require linear history (optional, keeps history clean)
 - **Bypass list:** repository admins only, **for pull requests only** (never "always": agents work under a human's login, often an admin's, and could otherwise push straight to `main`). This is the Level 2 emergency bypass in `docs/process/GATES.md`.
 
@@ -85,7 +85,7 @@ Private repositories get a monthly allowance of Actions minutes; agents opening 
 
 Find out where the minutes go: `python3 tools/haam/haam.py ci-usage` (last 7 days, by workflow, job, trigger and day).
 
-Two settings in the table below save minutes with little trade-off. Change them with `/haam-settings`, or `python3 tools/haam/haam.py settings --set … --apply --human`; they become repository variables the workflows read. The others (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) save more: see `settings --explain`.
+Two settings in the table below save minutes with little trade-off. Change them with `/haam-settings`, or `python3 tools/haam/haam.py settings --set … --apply --human`; they become repository variables the workflows read. The others (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) save more: see `settings --explain`. With `ci: off`, the branch rules stop requiring the `ci` check; keep secret scanning, the AI reviews and release-gate, and run a full check at release time (your deploy script or the CI workflow on the commit you ship) so Linux-only failures are still caught.
 
 | Switch | What changes | Trade-off |
 |---|---|---|

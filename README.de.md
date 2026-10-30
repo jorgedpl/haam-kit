@@ -76,6 +76,7 @@ Dateien, die du nie geändert hast, werden aktualisiert. Dateien, die du angepas
 | `exclusive "<who>" -- <command>` | Agenten | Startet einen schweren Testlauf (einen, der eine maschinenweite Ressource nutzt), wenn auf dieser Maschine kein anderer läuft |
 | `capacity` | Agenten | Hält neue Arbeit zurück, wenn zu viele PRs offen sind oder auf deinen Test warten (Limits in `haam.config.json`) |
 | `ci-usage [--days 7]` | Admin | Wofür die GitHub-Actions-Minuten draufgegangen sind, nach Workflow, Job, Auslöser und Tag |
+| `metrics [--days 30] [--save]` | Owner | Wie die Arbeit fließt: Zeit bis Done, Zeit in jeder Warteschlange (Entscheidung, Spec, Bau, dein Test, Auslieferung), Wiederholungen, in der UAT gefundene Fehler gegenüber später gefundenen, Reverts. `--save` legt die Zahlen in `docs/metrics/` ab |
 | `settings [--explain] [--set key=value] [--apply]` | Owner/Admin | Deine Entscheidungen: wann CI und die KI-Reviews laufen, was du testest, Bündelung, Ausliefern, Limits (`/haam-settings` führt dich durch) |
 | `local-ci ISSUE` | Owner | Mit `ci: local`: führt `make check` hier auf dem Commit des PR aus und meldet das Ergebnis (`ship` erledigt das für dich) |
 | `review ISSUE` | Agenten | Die beiden KI-Reviews in frischen lokalen Sitzungen, gemeldet als Status des PR (wenn die Reviews lokal laufen) |

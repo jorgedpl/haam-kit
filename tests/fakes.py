@@ -388,6 +388,20 @@ if a[:2] == ["api", "graphql"]:
         out({"data": {"addSubIssue": {"issue": {"number": pn}, "subIssue": {"number": cn}}}})
     if "issue(number:" in q:
         out({"data": {"repository": {"issue": issue_view(v["n"]) if str(v["n"]) in st["issues"] else None}}})
+    if "issues(first:30" in q:
+        # Issue histories for `metrics`: label events from an issue's "events" (tests set them), comments as they are
+        nodes = []
+        for k, i in st["issues"].items():
+            ev = [{"__typename": "LabeledEvent", "createdAt": e["at"], "label": {"name": e["label"]}}
+                  for e in i.get("events", []) if e.get("label")]
+            ev += [{"__typename": "ClosedEvent", "createdAt": e["at"]} for e in i.get("events", []) if e.get("closed")]
+            ev += [{"__typename": "IssueComment", "createdAt": c.get("createdAt", "2026-01-01T00:00:00Z"), "body": c["body"]}
+                   for c in st["comments"] if c["issue"] == int(k)]
+            ev.sort(key=lambda e: e["createdAt"])
+            nodes.append({"number": int(k), "title": i["title"], "body": i.get("body", ""), "state": i["state"], "createdAt": i["created"],
+                          "closedAt": i.get("closedAt"), "labels": {"nodes": [{"name": x} for x in i["labels"]]},
+                          "timelineItems": {"nodes": ev}})
+        out({"data": {"repository": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}})
     if "repository(owner:$o,name:$r){ id }" in q:
         out({"data": {"repository": {"id": "R1"}}})
     if "addProjectV2ItemById" in q:

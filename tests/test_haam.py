@@ -1188,6 +1188,63 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("issue", "status", str(m), "In Review")
         git(self.proj, "switch", "-q", "main")
 
+    def test_metrics_measures_the_queues_reruns_defects_and_reverts(self):
+        self.setup_board()
+        st = self.gh_state()
+        proj = st["projects"][0]
+        status_f = next(f for f in proj["fields"] if f["name"] == "Status")
+        done_o = next(o["id"] for o in status_f["options"] if o["name"] == "Done")
+        base = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(microsecond=0) - \
+            __import__("datetime").timedelta(days=20)
+        at = lambda days, hours=0: (base + __import__("datetime").timedelta(days=days, hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        iss = lambda n, title, labels, state="OPEN", **kw: {"id": f"I{n}", "title": title, "body": "", "state": state, "url": "u",
+                                                           "labels": labels, "assignees": [], "created": at(0), **kw}
+        st["issues"] = {
+            # An idea: decided after 2 days, Ready a day later, built in a day, failed once, passed, shipped 12 hours later
+            "1": iss(1, "Export CSV", ["stream:feature"], "CLOSED", closedAt=at(5, 12),
+                     events=[{"label": "stream:idea", "at": at(0)}, {"label": "stream:feature", "at": at(2)},
+                             {"label": "agent-ready", "at": at(3)}]),
+            # A bug being built now: in the test queue, no verdict yet
+            "2": iss(2, "Button misaligned", ["stream:bug"], created=at(6)),
+            # A bug found after #1 shipped: a defect that got past the owner's test
+            "3": iss(3, "Export loses the header row (#1)", ["stream:bug"], "CLOSED", created=at(8), closedAt=at(9)),
+            # Epics are skipped
+            "4": iss(4, "Epic: reporting", ["epic"]),
+        }
+        st["comments"] = [
+            {"issue": 1, "body": "🤖 Claimed by @tester via Claude Code · branch `1-export-csv` · claim abc123", "createdAt": at(3, 2)},
+            {"issue": 1, "body": "Plan: docs/uat/GH-1-export-csv.md. How to test: …", "createdAt": at(4)},
+            {"issue": 1, "body": "❌ UAT failed by @tester: header missing", "createdAt": at(4, 6)},
+            {"issue": 1, "body": "✅ UAT passed by @tester on 2026-10-05", "createdAt": at(5)},
+            {"issue": 2, "body": "🤖 Claimed by @tester via Claude Code · branch `2-button` · claim def456", "createdAt": at(6, 1)},
+            {"issue": 2, "body": "Plan: docs/uat/GH-2-button.md", "createdAt": at(6, 5)},
+            {"issue": 3, "body": "⚖️ Decided from AGENTS.md §12: keep the header row", "createdAt": at(8, 1)},
+        ]
+        st["items"] = [{"id": "PVTI1", "project": proj["id"], "issue": 1, "values": {status_f["id"]: done_o}},
+                       {"id": "PVTI3", "project": proj["id"], "issue": 3, "values": {status_f["id"]: done_o}}]
+        self.state.write_text(json.dumps(st))
+        git(self.proj, "commit", "-q", "--allow-empty", "-m", 'Revert "#7: slow query"')
+        res = json.loads(self.tool("metrics", "--days", "60", "--json", "--save").stdout)
+        self.assertEqual(res["issues"], 3)                                  # the epic isn't counted
+        self.assertEqual(res["time_to_done_days"]["all"]["n"], 2)
+        self.assertEqual(res["time_to_done_days"]["stream:bug"]["n"], 1)
+        q = res["queues_hours"]
+        self.assertEqual((q["decision"]["n"], q["decision"]["median"]), (1, 48.0))     # idea → approved
+        self.assertEqual((q["spec"]["n"], q["spec"]["median"]), (1, 24.0))             # approved → Ready
+        self.assertEqual((q["build"]["n"], q["build"]["median"]), (2, 14.0))            # Ready → UAT plan: 24 h and 4 h
+        self.assertEqual(sorted(r["queues_h"].get("build") for r in res["rows"] if "build" in r["queues_h"]), [4.0, 24.0])
+        self.assertEqual((q["test"]["n"], q["test"]["median"]), (1, 6.0))              # UAT plan → the owner's verdict
+        self.assertEqual((q["ship"]["n"], q["ship"]["median"]), (1, 12.0))             # pass → Done
+        self.assertEqual(res["reruns"], {"issues": 1, "failed_tests": 1, "issue_numbers": [1]})
+        self.assertEqual((res["defects"]["found_in_uat"], res["defects"]["found_later"]), (1, 1))
+        self.assertEqual(res["defects"]["later"], [{"bug": 3, "after": [1]}])
+        self.assertEqual(res["reverts"]["count"], 1)
+        self.assertEqual(res["judge"], {"decided": 1, "malformed": 0, "escalated": 0})
+        self.assertTrue((self.proj / res["saved"]).exists())
+        text = self.tool("metrics", "--days", "60").stdout
+        self.assertIn("UAT plan → your verdict", text)
+        self.assertIn("1 issue(s) came back from your test", text)
+
     def test_capacity_holds_new_work(self):
         self.setup_board()
         st = self.gh_state()

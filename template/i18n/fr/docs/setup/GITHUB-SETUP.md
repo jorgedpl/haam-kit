@@ -21,7 +21,7 @@ Settings → **Rules → Rulesets** → New branch ruleset (ou la protection de 
   - Approbations requises : **1** dès qu'il y a une deuxième personne ; **0** tant que vous êtes seul (le label UAT vaut approbation)
   - ✅ Annuler les approbations périmées quand de nouveaux commits sont poussés
 - ✅ Exiger que les vérifications d'état passent (laissez « require branches to be up to date » désactivé : sinon la CI se relance sur chaque PR ouverte après chaque fusion)
-  - Vérifications requises : **`ci`**, **`secrets`**, **`dependencies`**, **`ai-review`**, **`security-review`** et **`release-gate`** (elles apparaissent dans la liste une fois que les workflows ont tourné au moins une fois sur une PR)
+  - Vérifications requises : **`ci`** (ou **`ci-local`** quand `ci` vaut `local` ; omettez-la quand `ci` vaut `off`), **`secrets`**, **`dependencies`**, **`ai-review`**, **`security-review`** et **`release-gate`** (elles apparaissent dans la liste une fois que les workflows ont tourné au moins une fois sur une PR). `haam.py settings --apply` / `github --apply` ajoute les vérifications que les paramètres demandent et retire celles de HAAM qu'ils ne demandent plus (p. ex. `ci` quand vous passez à `off`)
 - ✅ Exiger un historique linéaire (facultatif, garde l'historique propre)
 - **Liste de contournement :** admins du dépôt uniquement, **pour les pull requests uniquement** (jamais « always » : les agents travaillent sous la connexion d'un humain, souvent un admin, et pourraient sinon pousser directement sur `main`). C'est le contournement d'urgence de niveau 2 décrit dans `docs/process/GATES.md`.
 
@@ -85,7 +85,7 @@ Les dépôts privés ont un quota mensuel de minutes Actions ; des agents qui ou
 
 Découvrez où passent les minutes : `python3 tools/haam/haam.py ci-usage` (7 derniers jours, par workflow, job, déclencheur et jour).
 
-Deux paramètres du tableau ci-dessous font économiser des minutes avec peu de compromis. Changez-les avec `/haam-settings`, ou `python3 tools/haam/haam.py settings --set … --apply --human` ; ils deviennent des variables du dépôt que les workflows lisent. Les autres (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) font économiser davantage : voir `settings --explain`.
+Deux paramètres du tableau ci-dessous font économiser des minutes avec peu de compromis. Changez-les avec `/haam-settings`, ou `python3 tools/haam/haam.py settings --set … --apply --human` ; ils deviennent des variables du dépôt que les workflows lisent. Les autres (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) font économiser davantage : voir `settings --explain`. Avec `ci: off`, les règles de branche n'exigent plus la vérification `ci` ; gardez l'analyse des secrets, les relectures IA et release-gate, et lancez une vérification complète au moment de livrer (votre script de déploiement ou le workflow CI sur le commit que vous livrez) pour continuer à attraper les échecs qui n'apparaissent que sous Linux.
 
 | Option | Ce qui change | Compromis |
 |---|---|---|

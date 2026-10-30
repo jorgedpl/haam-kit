@@ -76,6 +76,7 @@ Bestanden die je nooit hebt gewijzigd, worden bijgewerkt; bestanden die je hebt 
 | `exclusive "<who>" -- <command>` | agents | Draait een zware testrun (een die een resource van de hele machine gebruikt) als er op deze machine geen andere draait |
 | `capacity` | agents | Houdt nieuw werk tegen als er te veel PR's open staan of op jouw test wachten (limieten in `haam.config.json`) |
 | `ci-usage [--days 7]` | admin | Waar de GitHub Actions-minuten naartoe gingen, per workflow, job, trigger en dag |
+| `metrics [--days 30] [--save]` | owner | Hoe het werk stroomt: tijd tot Done, tijd in elke wachtrij (beslissing, spec, bouw, jouw test, uitrol), herhalingen, in UAT gevonden fouten tegenover later gevonden, reverts. `--save` bewaart de cijfers in `docs/metrics/` |
 | `settings [--explain] [--set key=value] [--apply]` | owner/admin | Jouw keuzes: wanneer CI en de AI-reviews draaien, wat je test, groeperen, uitrollen, limieten (`/haam-settings` loopt ze met je door) |
 | `local-ci ISSUE` | owner | Met `ci: local`: draait hier `make check` op de commit van de PR en post het resultaat (ship doet het voor je) |
 | `review ISSUE` | agents | De twee AI-reviews in nieuwe lokale sessies, gepost als statussen van de PR (als de reviews lokaal zijn) |

@@ -91,13 +91,14 @@ Les deux revues IA tournent avec un seul secret du dépôt, ajouté par le produ
 | `flow` | `test-first` : vous testez la branche de l'agent, puis la PR et les vérifications tournent une fois | `checks-first` : vous ne voulez tester que du code qui a passé les vérifications, ou vous testez sur un site de préproduction partagé | Chaque tour de reprise relance les vérifications |
 | `uat` | `owner-decides` : vous testez tout sauf ce que vous marquez `uat:skip` | `always` : produits réglementés ou critiques pour la sécurité. `bugs-skip` : beaucoup de petites corrections avec de bons tests | `bugs-skip` : une mauvaise correction peut être livrée sans que vous l'ayez vue |
 | `grouping` | `per-issue` : une PR par issue | `per-epic` : des epics faites de petits éléments. `release` (test d'abord uniquement) : minutes rares et releases par lots | Un élément en échec retient tout le lot |
-| `ci` | `every-pr`, sur GitHub | `local` : les minutes s'épuisent et votre ordinateur sait tout construire. `off` : prototypes en solo uniquement | `local` n'est pas infalsifiable |
+| `ci` | `every-pr`, sur GitHub | `local` : les minutes s'épuisent et votre ordinateur sait tout construire. `off` : pas de vérification `ci` sur la PR (les agents lancent toujours `make check` ; associez-la à une vérification complète à la livraison) | `local` n'est pas infalsifiable ; `off` demande une barrière de livraison ailleurs |
 | `review` | `github` : deux revues IA indépendantes par PR | `protected-only` : économise l'essentiel du coût des revues. `local` : économise des minutes | Moins de vérifications indépendantes |
 | `nightly` | `on` | `off` : quand les minutes sont très rares | Vous découvrez plus tard les régressions et les nouvelles vulnérabilités |
 | `runner` | `github` | `self-hosted` : un dépôt privé avec des builds lourds et une machine qui reste allumée | De l'entretien. Jamais pour les dépôts publics |
 | `deploy` | `github` : `deploy.yml` déploie à la fusion | `manual` : vous déployez autrement | `ship` attend que vous disiez « live » |
 | `deploy_approval` | `each` : chaque déploiement attend votre approbation | `automatic` : votre plan ne permet pas de retenir les déploiements (§1), ou vous avez choisi `uat: always` | Une modification fusionnée est mise en ligne sans dernier coup d'œil |
 | `worktree_cleanup` | `after-ship` | `manual` : vous préférez ranger les worktrees vous-même | Espace disque |
+| `worktree_dir` | `.claude/worktrees` | un dossier voisin (p. ex. `../connect-wt`) quand vous voulez les copies des agents hors du dépôt | Les chemins dans `/work` et `doctor` le suivent |
 
 La voie sans UAT ne fusionne toute seule que sur GitHub Projects, avec le secret `HAAM_PROJECT_TOKEN`, `ci: every-pr` et `review: github`. Sinon, c'est vous qui livrez ces PR.
 

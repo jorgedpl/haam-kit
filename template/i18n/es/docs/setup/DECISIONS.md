@@ -91,13 +91,14 @@ Las dos revisiones de IA se ejecutan con un único secreto del repositorio, que 
 | `flow` | `test-first`: pruebas la rama del agente y después la PR y las comprobaciones se ejecutan una vez | `checks-first`: solo quieres probar código que haya pasado las comprobaciones, o pruebas en un entorno de staging compartido | Cada ronda de retoques vuelve a ejecutar las comprobaciones |
 | `uat` | `owner-decides`: lo pruebas todo salvo lo que marques con `uat:skip` | `always`: productos regulados o críticos para la seguridad. `bugs-skip`: muchas correcciones pequeñas con buenas pruebas | `bugs-skip`: una corrección errónea puede llegar a producción sin que la veas |
 | `grouping` | `per-issue`: una PR por issue | `per-epic`: epics formados por elementos pequeños. `release` (solo test-first): pocos minutos y releases por lotes | Un elemento que falla retiene todo el lote |
-| `ci` | `every-pr`, en GitHub | `local`: se acaban los minutos y tu máquina compila todo. `off`: solo prototipos de una persona | `local` no es a prueba de manipulaciones |
+| `ci` | `every-pr`, en GitHub | `local`: se acaban los minutos y tu máquina compila todo. `off`: sin comprobación `ci` en la PR (los agentes siguen ejecutando `make check`; combínalo con una comprobación completa al publicar) | `local` no es a prueba de manipulaciones; `off` necesita una puerta de publicación en otro sitio |
 | `review` | `github`: dos revisiones de IA independientes por PR | `protected-only`: ahorra la mayor parte del coste de revisión. `local`: ahorra minutos | Menos comprobaciones independientes |
 | `nightly` | `on` | `off`: cuando los minutos escasean mucho | Descubres más tarde las roturas y las vulnerabilidades nuevas |
 | `runner` | `github` | `self-hosted`: un repositorio privado con builds pesados y una máquina siempre encendida | Mantenimiento. Nunca para repositorios públicos |
 | `deploy` | `github`: `deploy.yml` despliega al fusionar | `manual`: despliegas de otra forma | `ship` espera a que digas "live" |
 | `deploy_approval` | `each`: cada despliegue espera tu aprobación | `automatic`: tu plan no puede retener los despliegues (§1), o elegiste `uat: always` | Un cambio fusionado sale a producción sin un último vistazo |
 | `worktree_cleanup` | `after-ship` | `manual`: prefieres ordenar tú los worktrees | Espacio en disco |
+| `worktree_dir` | `.claude/worktrees` | una carpeta hermana (p. ej. `../connect-wt`) cuando quieres las copias de los agentes fuera del repositorio | Las rutas en `/work` y `doctor` la siguen |
 
 El carril sin UAT solo se fusiona solo en GitHub Projects, con el secreto `HAAM_PROJECT_TOKEN`, `ci: every-pr` y `review: github`. Si no, esas PR las llevas tú a producción.
 

@@ -27,6 +27,7 @@ Testing and shipping (inside /test, after the human's verdict):
 
 CI cost:
     ci-usage [--days 7]                     Where the Actions minutes went (by workflow, job, trigger, day)
+    metrics  [--days 30] [--save]           How the work flows: time to Done, time in each queue, reruns, defects, reverts
     ci-settings --runner X --review Y       Run CI on your own runner; run the AI reviews locally
     review ISSUE                            Local AI reviews in fresh sessions, posted as the PR's statuses
 
@@ -4170,6 +4171,221 @@ def cmd_ci_usage(args):
     print(c("2", "\nEstimate from job durations (rounded up per job; macOS counts 10x, Windows 2x). GitHub's billing page is the exact figure."))
 
 
+# ----------------------------------------------------------------------------- Numbers: how the work flows
+
+# HAAM leaves a trail on every issue (labels, the skills' comments, the close), so the queues can be measured without a
+# status history, which GitHub Projects doesn't keep. Each marker is the first (or every) match in the issue's timeline.
+ISSUE_TIMELINE = """query($o:String!,$r:String!,$s:DateTime!,$a:String){ repository(owner:$o,name:$r){
+  issues(first:30, after:$a, orderBy:{field:UPDATED_AT, direction:DESC}, filterBy:{since:$s}){
+    pageInfo{ hasNextPage endCursor }
+    nodes{ number title body state createdAt closedAt labels(first:30){ nodes{ name } }
+      timelineItems(first:250, itemTypes:[LABELED_EVENT, CLOSED_EVENT, REOPENED_EVENT, ISSUE_COMMENT]){ nodes{ __typename
+        ... on LabeledEvent { createdAt label{ name } }
+        ... on ClosedEvent { createdAt }
+        ... on ReopenedEvent { createdAt }
+        ... on IssueComment { createdAt body } } } } } } }"""
+QUEUES = [   # key, what it measures, (from marker, to marker)
+    ("decision", "Idea → approved (G1: assessment and your decision)", "created", "decided"),
+    ("spec", "Approved → Ready (G2: the spec and your approval)", "decided", "ready"),
+    ("build", "Ready → UAT plan (the agents' build)", "ready", "uat"),
+    ("test", "UAT plan → your verdict (G4: waiting for your test)", "uat", "verdict"),
+    ("ship", "Pass → Done (G5: checks, merge, deploy)", "passed", "done"),
+]
+
+
+def issue_markers(iss):
+    """When each HAAM step happened on one issue, from its labels, the skills' comments and its close."""
+    created = iso_time(iss["createdAt"])
+    m = {"created": created, "failed": [], "passed": None, "uat": None, "ready": None, "decided": None,
+         "claimed": None, "verdict": None, "done": None}
+    labels = {l["name"] for l in (iss.get("labels") or {}).get("nodes") or []}
+    for ev in (iss.get("timelineItems") or {}).get("nodes") or []:
+        if not ev or not ev.get("createdAt"):
+            continue
+        at = iso_time(ev["createdAt"])
+        kind = ev.get("__typename")
+        if kind == "LabeledEvent":
+            name = (ev.get("label") or {}).get("name")
+            # stream:feature set well after creation is a G1 approval; set at creation, it was never an idea
+            if name == "stream:feature" and not m["decided"] and (at - created).total_seconds() > 120:
+                m["decided"] = at
+            elif name == "agent-ready" and not m["ready"]:
+                m["ready"] = at
+        elif kind == "IssueComment":
+            body = ev.get("body") or ""
+            if "Approved at G1" in body and not m["decided"]:
+                m["decided"] = at
+            elif body.startswith("🤖 Claimed by") and not re.search(r"\bto (assess|write|prototype)\b", body) and not m["claimed"]:
+                m["claimed"] = at
+            elif ("docs/uat/" in body or "Fully verified by the agent" in body) and not m["uat"]:
+                m["uat"] = at
+            elif "✅ UAT passed" in body:
+                m["passed"] = at                      # the last pass: the one that shipped
+                m["verdict"] = m["verdict"] or at
+            elif "❌ UAT failed" in body:
+                m["failed"].append(at)
+                m["verdict"] = m["verdict"] or at
+    if iss.get("state") == "CLOSED" and iss.get("closedAt"):
+        m["done"] = iso_time(iss["closedAt"])
+    if "stream:bug" in labels and not m["ready"]:
+        m["ready"] = m["claimed"]                     # bugs skip G1 and G2: the claim is where the build starts
+    was_idea = any((e.get("label") or {}).get("name") == "stream:idea"
+                   for e in (iss.get("timelineItems") or {}).get("nodes") or [] if e and e.get("__typename") == "LabeledEvent")
+    if "stream:feature" in labels and not m["decided"] and not was_idea:
+        m["decided"] = created                        # born a feature (roadmap item): no decision to wait for
+        m["created"] = None                           # so it isn't counted as a 0-hour decision
+    return m
+
+
+def percentiles(values):
+    """Median and 90th percentile of a list of numbers (None when empty)."""
+    if not values:
+        return {"n": 0, "median": None, "p90": None}
+    import statistics
+    xs = sorted(values)
+    p90 = xs[min(len(xs) - 1, int(round(0.9 * (len(xs) - 1))))]
+    return {"n": len(xs), "median": round(statistics.median(xs), 1), "p90": round(p90, 1)}
+
+
+def revert_commits(root, since):
+    """Revert commits on main (origin/main when it exists) since a date: the production rollbacks."""
+    ref = next((r for r in ("origin/main", "main") if run(["git", "rev-parse", "--verify", "-q", r], cwd=root)[0] == 0), "HEAD")
+    code, out, _ = run(["git", "log", ref, f"--since={since}", "--format=%h %s"], cwd=root)
+    return [l for l in (out or "").splitlines() if re.match(r"^\S+ Revert \"", l)] if code == 0 else []
+
+
+def cmd_metrics(args):
+    """How the work flows: time to Done, time in each queue, reruns, defects found in UAT against later, reverts."""
+    from datetime import datetime, timedelta, timezone
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if cfg.get("tracker") == "linear":
+        sys.exit("metrics reads the issues' history on GitHub. On Linear, use Linear's insights for now (cycle time, "
+                 "time in status); the HAAM markers (uat-failed, UAT passed) are in the issues' comments there.")
+    repo = cfg.get("github_repo")
+    if not repo:
+        sys.exit("Set github_repo first: python3 tools/haam/haam.py config --github-repo owner/name")
+    owner, name = repo.split("/", 1)
+    since_dt = datetime.now(timezone.utc) - timedelta(days=args.days)
+    since = since_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    issues, after = [], None
+    while True:
+        try:
+            d = gql(ISSUE_TIMELINE, {"o": owner, "r": name, "s": since, "a": after})
+        except RuntimeError as e:
+            sys.exit(f"Couldn't read the issues: {e}")
+        page = ((d.get("repository") or {}).get("issues")) or {"nodes": [], "pageInfo": {}}
+        issues += [i for i in page["nodes"] if i]
+        if not page["pageInfo"].get("hasNextPage") or len(issues) >= args.max_issues:
+            break
+        after = page["pageInfo"].get("endCursor")
+    # The board tells Done from Canceled or Parked; without it, a closed issue counts as done.
+    status = {}
+    if cfg.get("github_project_number"):
+        try:
+            board = GHProject(cfg)
+            board.load()
+            status = {i["number"]: i.get("status") for i in board.items()}
+        except RuntimeError:
+            status = {}
+    hours = lambda a, b: round((b - a).total_seconds() / 3600, 1)
+    rows, queues = [], {k: [] for k, _, _, _ in QUEUES}
+    to_done = {"all": [], "stream:bug": [], "stream:feature": [], "stream:idea": []}
+    reruns, failures, found_in_uat, bugs_later, judge = [], 0, 0, [], {"decided": 0, "malformed": 0, "escalated": 0}
+    closed_at = {i["number"]: iso_time(i["closedAt"]) for i in issues if i.get("closedAt")}
+    for iss in issues:
+        labels = [l["name"] for l in (iss.get("labels") or {}).get("nodes") or []]
+        if "epic" in labels:
+            continue                                  # an epic's dates follow its sub-issues
+        m = issue_markers(iss)
+        opened = iso_time(iss["createdAt"])
+        st = status.get(iss["number"])
+        done = m["done"] if st in (None, "Done") else None
+        row = {"number": iss["number"], "title": iss.get("title", ""), "labels": labels, "status": st,
+               "created": iss["createdAt"], "done": iss.get("closedAt") if done else None, "failed_tests": len(m["failed"]),
+               "queues_h": {}}
+        if done:
+            d_days = (done - opened).total_seconds() / 86400
+            to_done["all"].append(d_days)
+            for s in ("stream:bug", "stream:feature", "stream:idea"):
+                if s in labels:
+                    to_done[s].append(d_days)
+        for key, _, a, b in QUEUES:
+            start, end = m.get(a), m.get(b) if b != "done" else done
+            if start and end and end >= start:
+                h = hours(start, end)
+                queues[key].append(h)
+                row["queues_h"][key] = h
+        if m["failed"]:
+            reruns.append(iss["number"])
+            failures += len(m["failed"])
+        found_in_uat += len(m["failed"])
+        for ev in (iss.get("timelineItems") or {}).get("nodes") or []:
+            body = (ev or {}).get("body") or ""
+            if body.startswith("⚖️"):
+                judge["decided" if "Decided" in body else "malformed" if "alformed" in body else "escalated"] += 1
+        # A bug that names an issue already closed when the bug was opened: a defect that got past the owner's test
+        if "stream:bug" in labels:
+            text = f"{iss.get('title', '')}\n{iss.get('body') or ''}"
+            refs = {int(n) for n in re.findall(r"#(\d+)\b", text)} - {iss["number"]}
+            after_done = [n for n in refs if n in closed_at and closed_at[n] < opened and status.get(n) in (None, "Done")]
+            if after_done:
+                bugs_later.append({"bug": iss["number"], "after": sorted(after_done)})
+        rows.append(row)
+    reverts = revert_commits(root, since_dt.date().isoformat())
+    res = {"repo": repo, "days": args.days, "since": since, "issues": len(rows),
+           "time_to_done_days": {k: percentiles(v) for k, v in to_done.items()},
+           "queues_hours": {k: dict(percentiles(v), what=w) for k, w, _, _ in QUEUES for v in [queues[k]]},
+           "reruns": {"issues": len(reruns), "failed_tests": failures, "issue_numbers": sorted(reruns)},
+           "defects": {"found_in_uat": found_in_uat, "found_later": len(bugs_later), "later": bugs_later},
+           "reverts": {"count": len(reverts), "commits": reverts}, "judge": judge, "rows": rows}
+    text = metrics_text(res)
+    if args.save:
+        folder = root / "docs" / "metrics"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{datetime.now(timezone.utc).date().isoformat()}.md"
+        slim = {k: v for k, v in res.items() if k != "rows"}
+        path.write_text(f"# HAAM numbers, {datetime.now(timezone.utc).date().isoformat()}\n\n```\n{text}\n```\n\n"
+                        f"<details><summary>JSON</summary>\n\n```json\n{json.dumps(slim, indent=2)}\n```\n</details>\n")
+        res["saved"] = str(path.relative_to(root))
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(text)
+    if args.save:
+        print(f"\n{OK} Saved to {res['saved']}")
+
+
+def metrics_text(res):
+    def days(p):
+        return "–" if p["median"] is None else f"median {p['median']} d, p90 {p['p90']} d  (n={p['n']})"
+
+    def hrs(p):
+        if p["median"] is None:
+            return "–"
+        fmt = lambda h: f"{h / 24:.1f} d" if h >= 48 else f"{h:.0f} h"
+        return f"median {fmt(p['median'])}, p90 {fmt(p['p90'])}  (n={p['n']})"
+    lines = [c("1", f"How the work flowed in {res['repo']}, last {res['days']} day(s)") + f"  ({res['issues']} issues active)",
+             c("1", "\nTime to Done (created → closed)")]
+    for k, label in (("all", "All"), ("stream:bug", "Bugs"), ("stream:feature", "Features"), ("stream:idea", "Ideas")):
+        lines.append(f"  {label:<10} {days(res['time_to_done_days'][k])}")
+    lines.append(c("1", "\nTime in each queue"))
+    for k, _, _, _ in QUEUES:
+        q = res["queues_hours"][k]
+        lines.append(f"  {q['what']:<58} {hrs(q)}")
+    r, d, v, j = res["reruns"], res["defects"], res["reverts"], res["judge"]
+    lines += [c("1", "\nReruns"), f"  {r['issues']} issue(s) came back from your test, {r['failed_tests']} failed test(s) in all"
+              + (f": #{', #'.join(str(n) for n in r['issue_numbers'][:12])}" if r["issue_numbers"] else ""),
+              c("1", "\nDefects"), f"  Found in your test (UAT): {d['found_in_uat']}   ·   Found after Done: {d['found_later']}"
+              + (" (" + ", ".join(f"#{b['bug']} after #{b['after'][0]}" for b in d["later"][:8]) + ")" if d["later"] else ""),
+              c("1", "\nReverts on main"), f"  {v['count']}" + (": " + "; ".join(v["commits"][:5]) if v["commits"] else "")]
+    if any(j.values()):
+        lines += [c("1", "\nJudge verdicts"), f"  decided {j['decided']}  ·  malformed {j['malformed']}  ·  escalated {j['escalated']}"]
+    lines.append(c("2", "\nFrom the issues' labels, the skills' comments and closes (issues updated in the window). 'Found after Done' "
+                        "counts bugs that name an issue already closed when the bug was opened: an estimate."))
+    return "\n".join(lines)
+
+
 def cmd_ci_settings(args):
     """Older name for two of the settings (runner, review); kept so existing instructions still work."""
     sets = []
@@ -6185,6 +6401,12 @@ def main():
     p.add_argument("--max-runs", type=int, default=500)
     p.add_argument("--repo", help="owner/name (default: github_repo from haam.config.json)")
     p.set_defaults(func=cmd_ci_usage)
+
+    p = common(sub.add_parser("metrics", help="how the work flows: time to Done, time in each queue, reruns, defects, reverts"))
+    p.add_argument("--days", type=int, default=30, help="issues active in the last N days (default 30)")
+    p.add_argument("--max-issues", type=int, default=600)
+    p.add_argument("--save", action="store_true", help="also write docs/metrics/<today>.md")
+    p.set_defaults(func=cmd_metrics)
 
     p = common(sub.add_parser("settings", help="your choices for this project (CI, reviews, testing, shipping, limits)"))
     p.add_argument("--set", action="append", help="change one: key=value (repeat for more)")

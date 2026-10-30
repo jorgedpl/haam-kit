@@ -76,6 +76,7 @@ Files you never changed are updated; files you customised are kept, and where bo
 | `exclusive "<who>" -- <command>` | agents | Run a heavy test run (one that uses a machine-wide resource) when no other one is running on this machine |
 | `capacity` | agents | Hold new work when too many PRs are open or waiting for your test (limits in `haam.config.json`) |
 | `ci-usage [--days 7]` | admin | Where the GitHub Actions minutes went, by workflow, job, trigger and day |
+| `metrics [--days 30] [--save]` | owner | How the work flows: time to Done, time in each queue (decision, spec, build, your test, ship), reruns, defects found in UAT against later, reverts. `--save` keeps the numbers in `docs/metrics/` |
 | `settings [--explain] [--set key=value] [--apply]` | owner/admin | Your choices: when CI and the AI reviews run, what you test, grouping, shipping, limits (`/haam-settings` walks you through them) |
 | `local-ci ISSUE` | owner | With `ci: local`: run `make check` on the PR's commit here and post it (ship does it for you) |
 | `review ISSUE` | agents | The two AI reviews in fresh local sessions, posted as the PR's statuses (when reviews are local) |

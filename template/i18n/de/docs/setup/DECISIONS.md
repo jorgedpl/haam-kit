@@ -91,13 +91,14 @@ Die beiden KI-Reviews laufen mit einem Repository-Secret, das der Product Owner 
 | `flow` | `test-first`: Du testest den Branch des Agenten, dann laufen PR und Checks einmal | `checks-first`: Du willst nur Code testen, der die Checks bestanden hat, oder du testest auf einer gemeinsamen Staging-Seite | Jede Nacharbeitsrunde lässt die Checks erneut laufen |
 | `uat` | `owner-decides`: Du testest alles außer dem, was du mit `uat:skip` markierst | `always`: regulierte oder sicherheitskritische Produkte. `bugs-skip`: viele kleine Fixes mit guten Tests | `bugs-skip`: Ein falscher Fix kann ausgeliefert werden, ohne dass du ihn gesehen hast |
 | `grouping` | `per-issue`: ein PR pro Issue | `per-epic`: Epics aus kleinen Einträgen. `release` (nur test-first): knappe Minuten und gebündelte Releases | Ein fehlschlagender Eintrag hält das ganze Paket auf |
-| `ci` | `every-pr`, auf GitHub | `local`: Die Minuten gehen aus, und dein Computer baut alles. `off`: nur für Prototypen, an denen du allein arbeitest | `local` ist nicht manipulationssicher |
+| `ci` | `every-pr`, auf GitHub | `local`: Die Minuten gehen aus, und dein Computer baut alles. `off`: kein `ci`-Check am PR (Agenten führen weiterhin `make check` aus; kombiniere es mit einem vollständigen Check beim Release) | `local` ist nicht manipulationssicher; `off` braucht ein Release-Gate an anderer Stelle |
 | `review` | `github`: zwei unabhängige KI-Reviews pro PR | `protected-only`: spart den Großteil der Review-Kosten. `local`: spart Minuten | Weniger unabhängige Prüfungen |
 | `nightly` | `on` | `off`: wenn Minuten sehr knapp sind | Du findest Fehler und neue Schwachstellen später |
 | `runner` | `github` | `self-hosted`: ein privates Repository mit aufwendigen Builds und eine Maschine, die eingeschaltet bleibt | Wartung. Nie für öffentliche Repositories |
 | `deploy` | `github`: `deploy.yml` deployt beim Merge | `manual`: Du deployst anders | `ship` wartet, bis du „live“ sagst |
 | `deploy_approval` | `each`: Jeder Deploy wartet auf deine Freigabe | `automatic`: Dein Plan kann Deploys nicht anhalten (§1), oder du hast `uat: always` gewählt | Eine gemergte Änderung geht ohne einen letzten Blick live |
 | `worktree_cleanup` | `after-ship` | `manual`: Du räumst Worktrees lieber selbst auf | Speicherplatz |
+| `worktree_dir` | `.claude/worktrees` | ein Nachbarordner (z. B. `../connect-wt`), wenn die Kopien der Agenten außerhalb des Repositorys liegen sollen | Die Pfade in `/work` und `doctor` folgen ihm |
 
 Die Spur ohne UAT mergt nur auf GitHub Projects von selbst, mit dem Secret `HAAM_PROJECT_TOKEN`, `ci: every-pr` und `review: github`. Sonst lieferst du diese PRs selbst aus.
 

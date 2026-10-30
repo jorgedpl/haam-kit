@@ -76,6 +76,7 @@ Les fichiers que vous n'avez jamais modifiés sont mis à jour ; ceux que vous a
 | `exclusive "<who>" -- <command>` | agents | Lancer une exécution de tests lourde (qui utilise une ressource partagée par toute la machine) quand aucune autre ne tourne sur cette machine |
 | `capacity` | agents | Retenir le nouveau travail quand trop de PR sont ouvertes ou attendent votre test (limites dans `haam.config.json`) |
 | `ci-usage [--days 7]` | admin | Où sont passées les minutes GitHub Actions, par workflow, job, déclencheur et jour |
+| `metrics [--days 30] [--save]` | owner | Comment le travail circule : temps jusqu'à Done, temps dans chaque file (décision, spec, construction, votre test, livraison), reprises, défauts trouvés en UAT contre ceux trouvés après, reverts. `--save` garde les chiffres dans `docs/metrics/` |
 | `settings [--explain] [--set key=value] [--apply]` | product owner/admin | Vos choix : quand la CI et les revues IA tournent, ce que vous testez, le regroupement, la livraison, les limites (`/haam-settings` vous guide) |
 | `local-ci ISSUE` | product owner | Avec `ci: local` : lance `make check` ici sur le commit de la PR et publie le résultat (ship le fait pour vous) |
 | `review ISSUE` | agents | Les deux revues IA dans de nouvelles sessions locales, publiées comme statuts de la PR (quand les revues sont locales) |

@@ -20,7 +20,7 @@ Capture is fast and cheap. Do not assess or judge yet.
    - Status: `Triage`
    - Labels: `stream:idea`
    - Priority: none (humans set priority at G1)
-   - The board's own fields, if it has any (GitHub: `haam.py issue fields`): add `--field NAME=VALUE` for each one the idea clearly answers (e.g. `--field Area=Billing`). Leave out any you'd have to guess.
+   - The board's own fields (GitHub: `haam.py issue fields`): if `haam.config.json` lists `required_issue_fields`, set **every** name there with `--field NAME=VALUE` (pick the closest option; create refuses without them). Otherwise add `--field` only for fields the idea clearly answers; leave out any you'd have to guess.
 4. **Epics:** if an open epic clearly covers this idea, say so and offer to add it there (GitHub: `issue link <n> --parent <epic>`). If the idea is big enough to be several features, say it could be an epic and suggest `/epic "<theme>"`.
 5. **Reply** with the issue ID and link, and one line: "Run `/assess <ID>` when you want it evaluated."
 

@@ -91,13 +91,14 @@ De twee AI-reviews draaien met één repository-secret, die de product owner in 
 | `flow` | `test-first`: je test de branch van de agent, daarna draaien de PR en de checks één keer | `checks-first`: je wilt alleen code testen die door de checks is gekomen, of je test op een gedeelde stagingomgeving | Elke herstelronde draait de checks opnieuw |
 | `uat` | `owner-decides`: je test alles behalve wat je markeert met `uat:skip` | `always`: gereguleerde of veiligheidskritieke producten. `bugs-skip`: veel kleine fixes met sterke tests | `bugs-skip`: een verkeerde fix kan live gaan zonder dat jij ernaar gekeken hebt |
 | `grouping` | `per-issue`: één PR per issue | `per-epic`: epics die uit kleine items bestaan. `release` (alleen test-first): schaarse minuten en releases in batches | Eén item dat faalt, houdt de hele batch tegen |
-| `ci` | `every-pr`, op GitHub | `local`: de minuten raken op en je computer bouwt alles. `off`: alleen voor solo-prototypes | `local` is niet bestand tegen manipulatie |
+| `ci` | `every-pr`, op GitHub | `local`: de minuten raken op en je computer bouwt alles. `off`: geen `ci`-check op de PR (agents draaien nog steeds `make check`; combineer het met een volledige check bij de release) | `local` is niet bestand tegen manipulatie; `off` heeft elders een release gate nodig |
 | `review` | `github`: twee onafhankelijke AI-reviews per PR | `protected-only`: bespaart de meeste reviewkosten. `local`: bespaart minuten | Minder onafhankelijke checks |
 | `nightly` | `on` | `off`: als minuten heel schaars zijn | Je ontdekt kapotte dingen en nieuwe kwetsbaarheden later |
 | `runner` | `github` | `self-hosted`: een private repository met zware builds en een machine die aan blijft staan | Onderhoud. Nooit voor publieke repositories |
 | `deploy` | `github`: `deploy.yml` deployt bij de merge | `manual`: je deployt op een andere manier | `ship` wacht tot je "live" zegt |
 | `deploy_approval` | `each`: elke deploy wacht op je goedkeuring | `automatic`: je abonnement kan deploys niet laten wachten (§1), of je koos `uat: always` | Een gemergede wijziging gaat live zonder laatste blik |
 | `worktree_cleanup` | `after-ship` | `manual`: je ruimt worktrees liever zelf op | Schijfruimte |
+| `worktree_dir` | `.claude/worktrees` | een naastgelegen map (bijv. `../connect-wt`) wanneer je de kopieën van de agents buiten de repository wilt | De paden in `/work` en `doctor` volgen die |
 
 De route zonder UAT merget alleen vanzelf op GitHub Projects, met de secret `HAAM_PROJECT_TOKEN`, `ci: every-pr` en `review: github`. Anders zet je die PR's zelf live.
 

@@ -21,7 +21,7 @@ Settings → **Rules → Rulesets** → New branch ruleset (oder klassischer Bra
   - Erforderliche Freigaben: **1**, sobald es einen zweiten Menschen gibt; **0**, solange du allein bist (das UAT-Label ist deine Freigabe)
   - ✅ Veraltete Freigaben verwerfen, wenn neue Commits gepusht werden
 - ✅ Bestandene Status-Checks verlangen („require branches to be up to date“ aus lassen: Das lässt die CI nach jedem Merge auf jedem offenen PR erneut laufen)
-  - Erforderliche Checks: **`ci`**, **`secrets`**, **`dependencies`**, **`ai-review`**, **`security-review`** und **`release-gate`** (sie erscheinen in der Liste, nachdem die Workflows einmal auf einem PR gelaufen sind)
+  - Erforderliche Checks: **`ci`** (oder **`ci-local`**, wenn `ci` auf `local` steht; weglassen, wenn `ci` auf `off` steht), **`secrets`**, **`dependencies`**, **`ai-review`**, **`security-review`** und **`release-gate`** (sie erscheinen in der Liste, nachdem die Workflows einmal auf einem PR gelaufen sind). `haam.py settings --apply` / `github --apply` fügt die Checks hinzu, die die Einstellungen verlangen, und entfernt HAAM-Checks, die sie nicht mehr verlangen (z. B. `ci`, wenn du auf `off` wechselst)
 - ✅ Lineare Historie verlangen (optional, hält die Historie sauber)
 - **Bypass list:** nur Repository-Admins, **nur für Pull Requests** (nie „always“: Agenten arbeiten unter dem Login eines Menschen, oft eines Admins, und könnten sonst direkt auf `main` pushen). Das ist die Notfall-Umgehung der Stufe 2 in `docs/process/GATES.md`.
 
@@ -85,7 +85,7 @@ Private Repositories bekommen ein monatliches Kontingent an Actions-Minuten; Age
 
 Finde heraus, wofür die Minuten draufgehen: `python3 tools/haam/haam.py ci-usage` (letzte 7 Tage, nach Workflow, Job, Auslöser und Tag).
 
-Zwei Einstellungen in der Tabelle unten sparen Minuten, ohne dass du viel aufgibst. Ändere sie mit `/haam-settings` oder `python3 tools/haam/haam.py settings --set … --apply --human`; sie werden zu Repository-Variablen, die die Workflows lesen. Die anderen (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) sparen mehr: siehe `settings --explain`.
+Zwei Einstellungen in der Tabelle unten sparen Minuten, ohne dass du viel aufgibst. Ändere sie mit `/haam-settings` oder `python3 tools/haam/haam.py settings --set … --apply --human`; sie werden zu Repository-Variablen, die die Workflows lesen. Die anderen (`ci: local | off`, `review: protected-only | off`, `nightly: off`, `grouping: release`) sparen mehr: siehe `settings --explain`. Mit `ci: off` verlangen die Branch-Regeln den Check `ci` nicht mehr; behalte den Secret-Scan, die KI-Reviews und release-gate und lass beim Release einen vollständigen Check laufen (dein Deploy-Skript oder der CI-Workflow auf dem Commit, den du auslieferst), damit Fehler, die nur unter Linux auftreten, weiterhin gefunden werden.
 
 | Schalter | Was sich ändert | Abwägung |
 |---|---|---|

@@ -27,6 +27,7 @@ Testing and shipping (inside /test, after the human's verdict):
 
 CI cost:
     ci-usage [--days 7]                     Where the Actions minutes went (by workflow, job, trigger, day)
+    metrics  [--days 30] [--save]           How the work flows: time to Done, time in each queue, reruns, defects, reverts
     ci-settings --runner X --review Y       Run CI on your own runner; run the AI reviews locally
     review ISSUE                            Local AI reviews in fresh sessions, posted as the PR's statuses
 
@@ -75,7 +76,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.17.0"
+VERSION = "1.18.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -120,6 +121,14 @@ DEFAULT_CONFIG = {
     "deploy_approval": "each",   # each: you approve every production deploy; automatic: deploys start on merge
     "runner": "github",          # github | self-hosted
     "worktree_cleanup": "after-ship",  # after-ship | manual
+    # Where agent worktrees live, relative to the main folder (or absolute). Default matches Claude Code.
+    # A sibling folder is fine, e.g. "../connect-wt".
+    "worktree_dir": ".claude/worktrees",
+    # Board fields every new issue must get on create (GitHub Projects). Empty: agents set a field only when
+    # the text clearly answers it. Example: ["Area", "Kind", "Code check"]. Epics use required_epic_fields
+    # when set, otherwise the same list without "Code check".
+    "required_issue_fields": [],
+    "required_epic_fields": None,  # None → derived from required_issue_fields (drop "Code check")
     "max_review_rounds": 2,      # failing AI review rounds before an agent hands over to the human
     "max_pr_lines": 400,         # target size of one PR (changed lines)
     # Protected areas (AGENTS.md §4) as path patterns: the gate never lets these through the no-UAT lane and labels the
@@ -181,8 +190,11 @@ SETTINGS = [
         "local": "On your computer: `haam.py local-ci` runs it on a clean copy of the PR's commit and posts the "
                  "result. No Actions minutes; but not tamper-proof (anything using your login could post a pass), "
                  "and your machine must be able to build everything.",
-        "off": "No check on PRs: you rely on the agents running make check before handing over, and on your test. "
-               "Cheapest; risky for anything but a solo prototype. (Secret scanning still runs.)"}),
+        "off": "No `ci` check on PRs: agents still run make check before handover, and you test. Secret scanning, "
+               "dependency audit, the AI reviews and release-gate stay required. Use a release-time full check "
+               "(your deploy script runs make check / the full CI workflow on the commit it ships) so Linux-only "
+               "failures are still caught. The no-UAT lane can still auto-merge when the remaining checks pass. "
+               "`github --apply` drops the required `ci` check when you switch to off."}),
     ("Checks", "nightly", ["on", "off"], "A full check and dependency audit on main every night.", {
         "on": "Catches what PRs skipped (e.g. only the changed packages were tested) and new vulnerabilities. "
               "About one run a day. (Recommended)",
@@ -215,6 +227,8 @@ SETTINGS = [
         "after-ship": "After each ship, worktrees whose work is merged or abandoned (and that have nothing "
                       "unsaved) are removed. (Recommended)",
         "manual": "You run haam.py worktree clean yourself."}),
+    ("Housekeeping", "worktree_dir", str, "Folder for agents' worktrees, relative to the main checkout "
+     "(or absolute). Default `.claude/worktrees`. A sibling like `../connect-wt` keeps them outside the repo.", {}),
 ]
 SETTING_KEYS = {k: (g, opts, what, helps) for g, k, opts, what, helps in SETTINGS}
 
@@ -534,6 +548,64 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+# Project-owned blocks in kit files (skills, docs). Survives `haam.py update` when both sides change.
+# <!-- HAAM:project-patch --> … <!-- /HAAM:project-patch -->
+# Optional name: <!-- HAAM:project-patch:deploy --> … <!-- /HAAM:project-patch:deploy -->
+_PATCH_BLOCK = re.compile(
+    br"<!--\s*HAAM:project-patch(?::([A-Za-z0-9_.-]+))?\s*-->\s*(.*?)\s*<!--\s*/HAAM:project-patch(?:(?::\1)?)\s*-->",
+    re.S,
+)
+_PATCH_SLOT = re.compile(
+    br"(<!--\s*HAAM:project-patch(?::([A-Za-z0-9_.-]+))?\s*-->)\s*(.*?)\s*(<!--\s*/HAAM:project-patch(?:(?::\2)?)\s*-->)",
+    re.S,
+)
+
+
+def extract_project_patches(data: bytes):
+    """[(name_or_None, inner_bytes), …] from a project file."""
+    return [(m.group(1), m.group(2).strip(b"\n")) for m in _PATCH_BLOCK.finditer(data)]
+
+
+def apply_project_patches(kit: bytes, patches):
+    """Put the project's patch bodies into the kit file. Named slots in the kit are filled; unnamed /
+    leftover patches are appended under a 'Project additions' heading."""
+    if not patches:
+        return kit
+    used = set()
+
+    def fill(m):
+        name = m.group(2)
+        for i, (n, body) in enumerate(patches):
+            if i in used:
+                continue
+            if (name is None and n is None) or (name is not None and n == name):
+                used.add(i)
+                return m.group(1) + b"\n" + body + b"\n" + m.group(3)
+        return m.group(0)
+
+    out = _PATCH_SLOT.sub(fill, kit)
+    leftover = [(n, b) for i, (n, b) in enumerate(patches) if i not in used]
+    if leftover:
+        block = [b"\n\n## Project additions (kept across HAAM updates)\n"]
+        for n, body in leftover:
+            open_ = b"<!-- HAAM:project-patch" + (b":" + n if n else b"") + b" -->\n"
+            close = b"\n<!-- /HAAM:project-patch" + (b":" + n if n else b"") + b" -->\n"
+            block += [open_, body, close]
+        out = out.rstrip() + b"".join(block)
+    return out
+
+
+def required_fields_for(cfg, epic=False):
+    """Field names that issue create must set (GitHub Projects board fields)."""
+    if epic:
+        epic_req = cfg.get("required_epic_fields")
+        if epic_req is not None:
+            return list(epic_req)
+        base = list(cfg.get("required_issue_fields") or [])
+        return [f for f in base if f.lower() != "code check"]
+    return list(cfg.get("required_issue_fields") or [])
+
+
 def load_lock(root):
     p = root / LOCK_NAME
     if p.exists():
@@ -819,7 +891,7 @@ def cmd_update(args):
     if lang != (lock.get("language") or "en"):
         rep.add("info", f"Docs language: {LANGUAGES[lang]}", "the docs you haven't changed switch to it")
     incoming = target / ".haam" / "incoming"
-    added, updated, kept, conflicts, merged, same, skipped = [], [], [], [], [], [], []
+    added, updated, kept, conflicts, merged, same, skipped, patched = [], [], [], [], [], [], [], []
     hidden = ignored_paths(target, [r for _, r in kit_files(src)])
     unhidden = []
     seen = set()
@@ -864,12 +936,23 @@ def cmd_update(args):
         elif base is not None and sha(new) == base:
             kept.append(rel_s)  # project customised it; kit didn't change it
         else:
-            conflicts.append(rel_s)  # both changed (or no record): needs a merge
-            if args.apply:
-                out = incoming / rel_s
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(new)
-            new_lock[rel_s] = sha(new)
+            # Both changed. If the project marked HAAM:project-patch blocks, fold them into the kit
+            # version automatically (skills and docs agents customise without losing kit updates).
+            patches = extract_project_patches(cur)
+            if patches:
+                combined = apply_project_patches(new, patches)
+                patched.append(rel_s)
+                if args.apply:
+                    dst.write_bytes(combined)
+                    shutil.copymode(p, dst)
+                new_lock[rel_s] = sha(combined)
+            else:
+                conflicts.append(rel_s)  # both changed (or no record): needs a merge
+                if args.apply:
+                    out = incoming / rel_s
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(new)
+                new_lock[rel_s] = sha(new)
 
     removed = sorted(r for r in lock.get("files", {}) if r not in seen)
     for r in removed:
@@ -891,6 +974,9 @@ def cmd_update(args):
     rep.add("info", f"{len(same)} files already current")
     if kept:
         rep.add("info", f"{len(kept)} of your customised files kept (no kit change)", ", ".join(kept[:8]))
+    if patched:
+        rep.add("ok", f"{len(patched)} files updated with your HAAM:project-patch blocks kept",
+                ", ".join(patched[:8]) + (" …" if len(patched) > 8 else ""))
     for r in skipped:
         rep.add("info", f"Skipped {r}", "you removed it; not re-added")
     if hidden:
@@ -1007,7 +1093,10 @@ def cmd_config(args):
                                   ("--max-in-uat", args.max_in_uat), ("--until", args.until),
                                   ("--production", args.production), ("--not-production", args.not_production),
                                   ("--remove-not-production", args.remove_not_production),
-                                  ("--end-batch-window", args.end_batch_window or None)) if v is not None]
+                                  ("--end-batch-window", args.end_batch_window or None),
+                                  ("--required-fields", args.required_fields),
+                                  ("--required-epic-fields", args.required_epic_fields),
+                                  ("--worktree-dir", args.worktree_dir)) if v is not None]
     if owner_flags and (root / CONFIG_NAME).exists() and not args.human:
         sys.exit(f"{', '.join(owner_flags)}: these are the owner's settings. Change them inside /haam-settings (or "
                  "/haam-setup) after the human chose, with --human.")
@@ -1102,6 +1191,12 @@ def cmd_config(args):
         cfg.update(limits)
     if args.end_batch_window:
         cfg.pop("batch_window", None)
+    if args.required_fields is not None:
+        cfg["required_issue_fields"] = [x.strip() for x in args.required_fields.split(",") if x.strip()]
+    if args.required_epic_fields is not None:
+        cfg["required_epic_fields"] = [x.strip() for x in args.required_epic_fields.split(",") if x.strip()]
+    if args.worktree_dir is not None:
+        cfg["worktree_dir"] = args.worktree_dir.strip() or WORKTREE_DIR
 
     cfg["team_key"] = (cfg.get("team_key") or PLACEHOLDER_KEY).upper()
     if not re.fullmatch(r"[A-Z][A-Z0-9]{1,6}", cfg["team_key"]):
@@ -1122,9 +1217,11 @@ def cmd_config(args):
     missing = [k for k in ("product_name", "github_repo", "product_owner_github") if not cfg.get(k)]
     for k in ("product_name", "tracker", "team_key", "github_repo", "product_owner_github",
               "production_url", "agents", "deploy", "flow", "max_open_prs", "max_in_uat", "protected_paths",
-              "production_paths", "non_production_paths", "heavy_runs", "language") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
+              "production_paths", "non_production_paths", "heavy_runs", "language", "worktree_dir",
+              "required_issue_fields") + (("linear_team_name",) if cfg.get("tracker") == "linear" else ()):
         v = cfg.get(k)
-        rep.add("ok" if v else ("info" if k == "heavy_runs" else "warn"), f"{k}: {v if v else '(not set)'}")
+        empty_ok = k in ("heavy_runs", "required_issue_fields")
+        rep.add("ok" if v or empty_ok else "warn", f"{k}: {v if v not in (None, []) else '(not set)'}")
     if missing:
         rep.action(WHO_AGENT, "Ask the human for the missing values, then re-run with flags",
                    "python3 tools/haam/haam.py config --product NAME --tracker github --team-key KEY --github-repo owner/name --owner USER")
@@ -1312,8 +1409,13 @@ def ruleset_body(cfg):
     }
 
 
+# Status checks HAAM itself requires (project-added checks are left alone when settings change).
+HAAM_CHECK_CONTEXTS = {"ci", "ci-local", "secrets", "dependencies", "ai-review", "security-review", "release-gate"}
+
+
 def merge_ruleset(current, wanted):
     """Add what HAAM needs to an existing ruleset, keeping everything the project set itself.
+    Drops HAAM checks the current settings no longer want (e.g. `ci` when ci is off).
     Returns (body to PUT, list of changes, list of warnings)."""
     keep = {k: current.get(k) for k in ("name", "target", "enforcement", "conditions", "bypass_actors")}
     rules = [dict(r) for r in current.get("rules") or []]
@@ -1325,12 +1427,23 @@ def merge_ruleset(current, wanted):
             changes.append(f"Add the '{r['type']}' rule")
     checks_rule = next(r for r in rules if r["type"] == "required_status_checks")
     params = checks_rule.setdefault("parameters", {})
-    have = {c.get("context") for c in params.get("required_status_checks") or []}
-    missing = [c["context"] for c in wanted["rules"][-1]["parameters"]["required_status_checks"] if c["context"] not in have]
+    want = [c["context"] for c in wanted["rules"][-1]["parameters"]["required_status_checks"]]
+    want_set = set(want)
+    have_list = list(params.get("required_status_checks") or [])
+    have = {c.get("context") for c in have_list}
+    missing = [c for c in want if c not in have]
     if missing:
-        params["required_status_checks"] = list(params.get("required_status_checks") or []) + [{"context": c} for c in missing]
+        params["required_status_checks"] = have_list + [{"context": c} for c in missing]
         params.setdefault("strict_required_status_checks_policy", False)
         changes.append("Require the check(s) " + ", ".join(missing))
+        have_list = params["required_status_checks"]
+    # Drop HAAM checks the settings no longer require (ci → off removes `ci` / `ci-local`). Leave any
+    # check the project added itself.
+    drop = [c.get("context") for c in have_list
+            if c.get("context") in HAAM_CHECK_CONTEXTS and c.get("context") not in want_set]
+    if drop:
+        params["required_status_checks"] = [c for c in have_list if c.get("context") not in drop]
+        changes.append("Stop requiring the check(s) " + ", ".join(drop))
     if params.get("strict_required_status_checks_policy"):
         notes.append("'Branches must be up to date before merging' is on: every merge re-runs CI on all open PRs "
                      "(costs CI minutes). Turn it off in the ruleset, or run github --apply --reset")
@@ -2381,6 +2494,16 @@ def issue_action(args, cfg, board):
                 raise RuntimeError(f"#{parent['number']} isn't an epic (label '{EPIC_LABEL}'). Make it one first: "
                                    f"issue label {parent['number']} --add {EPIC_LABEL}")
         fields = [board.resolve_field(n, v) for n, v in parse_field_args(args.field)]    # checked before creating
+        need = required_fields_for(cfg, epic=bool(args.epic))
+        if need:
+            have = {board_field_name(board, fid).lower() for fid, _, _ in fields}
+            missing = [n for n in need if n.lower() not in have]
+            if missing:
+                raise RuntimeError(
+                    f"This project requires these board fields on every {'epic' if args.epic else 'issue'}: "
+                    + ", ".join(need) + f". Missing: {', '.join(missing)}. "
+                    + "Add --field NAME=VALUE (pick the closest option; `issue fields` lists them). "
+                    + "Change the list with config --required-fields … --human.")
         cmd = ["gh", "issue", "create", "-R", repo, "--title", args.title, "--body", body]
         for lab in labels:
             cmd += ["--label", lab]
@@ -4048,6 +4171,221 @@ def cmd_ci_usage(args):
     print(c("2", "\nEstimate from job durations (rounded up per job; macOS counts 10x, Windows 2x). GitHub's billing page is the exact figure."))
 
 
+# ----------------------------------------------------------------------------- Numbers: how the work flows
+
+# HAAM leaves a trail on every issue (labels, the skills' comments, the close), so the queues can be measured without a
+# status history, which GitHub Projects doesn't keep. Each marker is the first (or every) match in the issue's timeline.
+ISSUE_TIMELINE = """query($o:String!,$r:String!,$s:DateTime!,$a:String){ repository(owner:$o,name:$r){
+  issues(first:30, after:$a, orderBy:{field:UPDATED_AT, direction:DESC}, filterBy:{since:$s}){
+    pageInfo{ hasNextPage endCursor }
+    nodes{ number title body state createdAt closedAt labels(first:30){ nodes{ name } }
+      timelineItems(first:250, itemTypes:[LABELED_EVENT, CLOSED_EVENT, REOPENED_EVENT, ISSUE_COMMENT]){ nodes{ __typename
+        ... on LabeledEvent { createdAt label{ name } }
+        ... on ClosedEvent { createdAt }
+        ... on ReopenedEvent { createdAt }
+        ... on IssueComment { createdAt body } } } } } } }"""
+QUEUES = [   # key, what it measures, (from marker, to marker)
+    ("decision", "Idea → approved (G1: assessment and your decision)", "created", "decided"),
+    ("spec", "Approved → Ready (G2: the spec and your approval)", "decided", "ready"),
+    ("build", "Ready → UAT plan (the agents' build)", "ready", "uat"),
+    ("test", "UAT plan → your verdict (G4: waiting for your test)", "uat", "verdict"),
+    ("ship", "Pass → Done (G5: checks, merge, deploy)", "passed", "done"),
+]
+
+
+def issue_markers(iss):
+    """When each HAAM step happened on one issue, from its labels, the skills' comments and its close."""
+    created = iso_time(iss["createdAt"])
+    m = {"created": created, "failed": [], "passed": None, "uat": None, "ready": None, "decided": None,
+         "claimed": None, "verdict": None, "done": None}
+    labels = {l["name"] for l in (iss.get("labels") or {}).get("nodes") or []}
+    for ev in (iss.get("timelineItems") or {}).get("nodes") or []:
+        if not ev or not ev.get("createdAt"):
+            continue
+        at = iso_time(ev["createdAt"])
+        kind = ev.get("__typename")
+        if kind == "LabeledEvent":
+            name = (ev.get("label") or {}).get("name")
+            # stream:feature set well after creation is a G1 approval; set at creation, it was never an idea
+            if name == "stream:feature" and not m["decided"] and (at - created).total_seconds() > 120:
+                m["decided"] = at
+            elif name == "agent-ready" and not m["ready"]:
+                m["ready"] = at
+        elif kind == "IssueComment":
+            body = ev.get("body") or ""
+            if "Approved at G1" in body and not m["decided"]:
+                m["decided"] = at
+            elif body.startswith("🤖 Claimed by") and not re.search(r"\bto (assess|write|prototype)\b", body) and not m["claimed"]:
+                m["claimed"] = at
+            elif ("docs/uat/" in body or "Fully verified by the agent" in body) and not m["uat"]:
+                m["uat"] = at
+            elif "✅ UAT passed" in body:
+                m["passed"] = at                      # the last pass: the one that shipped
+                m["verdict"] = m["verdict"] or at
+            elif "❌ UAT failed" in body:
+                m["failed"].append(at)
+                m["verdict"] = m["verdict"] or at
+    if iss.get("state") == "CLOSED" and iss.get("closedAt"):
+        m["done"] = iso_time(iss["closedAt"])
+    if "stream:bug" in labels and not m["ready"]:
+        m["ready"] = m["claimed"]                     # bugs skip G1 and G2: the claim is where the build starts
+    was_idea = any((e.get("label") or {}).get("name") == "stream:idea"
+                   for e in (iss.get("timelineItems") or {}).get("nodes") or [] if e and e.get("__typename") == "LabeledEvent")
+    if "stream:feature" in labels and not m["decided"] and not was_idea:
+        m["decided"] = created                        # born a feature (roadmap item): no decision to wait for
+        m["created"] = None                           # so it isn't counted as a 0-hour decision
+    return m
+
+
+def percentiles(values):
+    """Median and 90th percentile of a list of numbers (None when empty)."""
+    if not values:
+        return {"n": 0, "median": None, "p90": None}
+    import statistics
+    xs = sorted(values)
+    p90 = xs[min(len(xs) - 1, int(round(0.9 * (len(xs) - 1))))]
+    return {"n": len(xs), "median": round(statistics.median(xs), 1), "p90": round(p90, 1)}
+
+
+def revert_commits(root, since):
+    """Revert commits on main (origin/main when it exists) since a date: the production rollbacks."""
+    ref = next((r for r in ("origin/main", "main") if run(["git", "rev-parse", "--verify", "-q", r], cwd=root)[0] == 0), "HEAD")
+    code, out, _ = run(["git", "log", ref, f"--since={since}", "--format=%h %s"], cwd=root)
+    return [l for l in (out or "").splitlines() if re.match(r"^\S+ Revert \"", l)] if code == 0 else []
+
+
+def cmd_metrics(args):
+    """How the work flows: time to Done, time in each queue, reruns, defects found in UAT against later, reverts."""
+    from datetime import datetime, timedelta, timezone
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if cfg.get("tracker") == "linear":
+        sys.exit("metrics reads the issues' history on GitHub. On Linear, use Linear's insights for now (cycle time, "
+                 "time in status); the HAAM markers (uat-failed, UAT passed) are in the issues' comments there.")
+    repo = cfg.get("github_repo")
+    if not repo:
+        sys.exit("Set github_repo first: python3 tools/haam/haam.py config --github-repo owner/name")
+    owner, name = repo.split("/", 1)
+    since_dt = datetime.now(timezone.utc) - timedelta(days=args.days)
+    since = since_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    issues, after = [], None
+    while True:
+        try:
+            d = gql(ISSUE_TIMELINE, {"o": owner, "r": name, "s": since, "a": after})
+        except RuntimeError as e:
+            sys.exit(f"Couldn't read the issues: {e}")
+        page = ((d.get("repository") or {}).get("issues")) or {"nodes": [], "pageInfo": {}}
+        issues += [i for i in page["nodes"] if i]
+        if not page["pageInfo"].get("hasNextPage") or len(issues) >= args.max_issues:
+            break
+        after = page["pageInfo"].get("endCursor")
+    # The board tells Done from Canceled or Parked; without it, a closed issue counts as done.
+    status = {}
+    if cfg.get("github_project_number"):
+        try:
+            board = GHProject(cfg)
+            board.load()
+            status = {i["number"]: i.get("status") for i in board.items()}
+        except RuntimeError:
+            status = {}
+    hours = lambda a, b: round((b - a).total_seconds() / 3600, 1)
+    rows, queues = [], {k: [] for k, _, _, _ in QUEUES}
+    to_done = {"all": [], "stream:bug": [], "stream:feature": [], "stream:idea": []}
+    reruns, failures, found_in_uat, bugs_later, judge = [], 0, 0, [], {"decided": 0, "malformed": 0, "escalated": 0}
+    closed_at = {i["number"]: iso_time(i["closedAt"]) for i in issues if i.get("closedAt")}
+    for iss in issues:
+        labels = [l["name"] for l in (iss.get("labels") or {}).get("nodes") or []]
+        if "epic" in labels:
+            continue                                  # an epic's dates follow its sub-issues
+        m = issue_markers(iss)
+        opened = iso_time(iss["createdAt"])
+        st = status.get(iss["number"])
+        done = m["done"] if st in (None, "Done") else None
+        row = {"number": iss["number"], "title": iss.get("title", ""), "labels": labels, "status": st,
+               "created": iss["createdAt"], "done": iss.get("closedAt") if done else None, "failed_tests": len(m["failed"]),
+               "queues_h": {}}
+        if done:
+            d_days = (done - opened).total_seconds() / 86400
+            to_done["all"].append(d_days)
+            for s in ("stream:bug", "stream:feature", "stream:idea"):
+                if s in labels:
+                    to_done[s].append(d_days)
+        for key, _, a, b in QUEUES:
+            start, end = m.get(a), m.get(b) if b != "done" else done
+            if start and end and end >= start:
+                h = hours(start, end)
+                queues[key].append(h)
+                row["queues_h"][key] = h
+        if m["failed"]:
+            reruns.append(iss["number"])
+            failures += len(m["failed"])
+        found_in_uat += len(m["failed"])
+        for ev in (iss.get("timelineItems") or {}).get("nodes") or []:
+            body = (ev or {}).get("body") or ""
+            if body.startswith("⚖️"):
+                judge["decided" if "Decided" in body else "malformed" if "alformed" in body else "escalated"] += 1
+        # A bug that names an issue already closed when the bug was opened: a defect that got past the owner's test
+        if "stream:bug" in labels:
+            text = f"{iss.get('title', '')}\n{iss.get('body') or ''}"
+            refs = {int(n) for n in re.findall(r"#(\d+)\b", text)} - {iss["number"]}
+            after_done = [n for n in refs if n in closed_at and closed_at[n] < opened and status.get(n) in (None, "Done")]
+            if after_done:
+                bugs_later.append({"bug": iss["number"], "after": sorted(after_done)})
+        rows.append(row)
+    reverts = revert_commits(root, since_dt.date().isoformat())
+    res = {"repo": repo, "days": args.days, "since": since, "issues": len(rows),
+           "time_to_done_days": {k: percentiles(v) for k, v in to_done.items()},
+           "queues_hours": {k: dict(percentiles(v), what=w) for k, w, _, _ in QUEUES for v in [queues[k]]},
+           "reruns": {"issues": len(reruns), "failed_tests": failures, "issue_numbers": sorted(reruns)},
+           "defects": {"found_in_uat": found_in_uat, "found_later": len(bugs_later), "later": bugs_later},
+           "reverts": {"count": len(reverts), "commits": reverts}, "judge": judge, "rows": rows}
+    text = metrics_text(res)
+    if args.save:
+        folder = root / "docs" / "metrics"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{datetime.now(timezone.utc).date().isoformat()}.md"
+        slim = {k: v for k, v in res.items() if k != "rows"}
+        path.write_text(f"# HAAM numbers, {datetime.now(timezone.utc).date().isoformat()}\n\n```\n{text}\n```\n\n"
+                        f"<details><summary>JSON</summary>\n\n```json\n{json.dumps(slim, indent=2)}\n```\n</details>\n")
+        res["saved"] = str(path.relative_to(root))
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(text)
+    if args.save:
+        print(f"\n{OK} Saved to {res['saved']}")
+
+
+def metrics_text(res):
+    def days(p):
+        return "–" if p["median"] is None else f"median {p['median']} d, p90 {p['p90']} d  (n={p['n']})"
+
+    def hrs(p):
+        if p["median"] is None:
+            return "–"
+        fmt = lambda h: f"{h / 24:.1f} d" if h >= 48 else f"{h:.0f} h"
+        return f"median {fmt(p['median'])}, p90 {fmt(p['p90'])}  (n={p['n']})"
+    lines = [c("1", f"How the work flowed in {res['repo']}, last {res['days']} day(s)") + f"  ({res['issues']} issues active)",
+             c("1", "\nTime to Done (created → closed)")]
+    for k, label in (("all", "All"), ("stream:bug", "Bugs"), ("stream:feature", "Features"), ("stream:idea", "Ideas")):
+        lines.append(f"  {label:<10} {days(res['time_to_done_days'][k])}")
+    lines.append(c("1", "\nTime in each queue"))
+    for k, _, _, _ in QUEUES:
+        q = res["queues_hours"][k]
+        lines.append(f"  {q['what']:<58} {hrs(q)}")
+    r, d, v, j = res["reruns"], res["defects"], res["reverts"], res["judge"]
+    lines += [c("1", "\nReruns"), f"  {r['issues']} issue(s) came back from your test, {r['failed_tests']} failed test(s) in all"
+              + (f": #{', #'.join(str(n) for n in r['issue_numbers'][:12])}" if r["issue_numbers"] else ""),
+              c("1", "\nDefects"), f"  Found in your test (UAT): {d['found_in_uat']}   ·   Found after Done: {d['found_later']}"
+              + (" (" + ", ".join(f"#{b['bug']} after #{b['after'][0]}" for b in d["later"][:8]) + ")" if d["later"] else ""),
+              c("1", "\nReverts on main"), f"  {v['count']}" + (": " + "; ".join(v["commits"][:5]) if v["commits"] else "")]
+    if any(j.values()):
+        lines += [c("1", "\nJudge verdicts"), f"  decided {j['decided']}  ·  malformed {j['malformed']}  ·  escalated {j['escalated']}"]
+    lines.append(c("2", "\nFrom the issues' labels, the skills' comments and closes (issues updated in the window). 'Found after Done' "
+                        "counts bugs that name an issue already closed when the bug was opened: an estimate."))
+    return "\n".join(lines)
+
+
 def cmd_ci_settings(args):
     """Older name for two of the settings (runner, review); kept so existing instructions still work."""
     sets = []
@@ -4205,6 +4543,9 @@ def cmd_settings(args):
             if not v.isdigit() or int(v) < 1:
                 sys.exit(f"{k} must be a whole number of 1 or more")
             v = int(v)
+        elif opts is str:
+            if not v:
+                sys.exit(f"{k} must not be empty")
         elif v not in opts:
             sys.exit(f"{k} must be one of: {', '.join(opts)}")
         changed[k] = v
@@ -4230,7 +4571,7 @@ def cmd_settings(args):
     for group, key, opts, what, helps in SETTINGS:
         val = setting_value(cfg, key)
         rows.append({"group": group, "key": key, "value": val, "default": DEFAULT_CONFIG.get(key),
-                     "options": [] if opts is int else list(opts), "what": what, "options_help": helps,
+                     "options": list(opts) if isinstance(opts, list) else [], "what": what, "options_help": helps,
                      "changed_now": key in changed})
     res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "heavy_runs": cfg.get("heavy_runs") or [],
            "batch_window": window, "github_variables": github_variables(cfg),
@@ -4584,6 +4925,23 @@ def git_paths(cwd):
     return top, main, git_dir != common
 
 
+def worktree_base(main, cfg=None):
+    """Absolute folder where HAAM creates agent worktrees (`worktree_dir` in config, default `.claude/worktrees`)."""
+    if cfg is None and (Path(main) / CONFIG_NAME).exists():
+        try:
+            cfg = load_config(main)
+        except SystemExit:
+            cfg = {}
+    rel = ((cfg or {}).get("worktree_dir") or WORKTREE_DIR).strip() or WORKTREE_DIR
+    p = Path(rel)
+    return p.resolve() if p.is_absolute() else (Path(main) / p).resolve()
+
+
+def worktree_dir_label(cfg=None):
+    """The configured worktree path as shown to agents (relative string from config)."""
+    return ((cfg or {}).get("worktree_dir") or WORKTREE_DIR).strip() or WORKTREE_DIR
+
+
 def default_base(root):
     ref = git_out(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
     if ref:
@@ -4600,17 +4958,23 @@ def include_patterns(main):
     return [l.strip() for l in f.read_text().splitlines() if l.strip() and not l.strip().startswith("#")]
 
 
-def copy_includes(main, dest):
+def copy_includes(main, dest, cfg=None):
     """Copy git-ignored local files listed in .worktreeinclude (e.g. .env) from the main folder into a
     worktree. Never overwrites, never copies tracked files, never prints contents. Returns (copied, skipped)."""
     copied, skipped = [], []
     if main.resolve() == dest.resolve():
         return copied, skipped
+    area = worktree_base(main, cfg)
     for pat in include_patterns(main):
         pat = pat.lstrip("/")
         for src in sorted(main.glob(pat)):
-            if not src.is_file() or WORKTREE_DIR in src.relative_to(main).as_posix():
+            if not src.is_file():
                 continue
+            try:
+                if area in src.resolve().parents or src.resolve() == area:
+                    continue
+            except ValueError:
+                pass
             rel = src.relative_to(main).as_posix()
             if run(["git", "check-ignore", "-q", rel], cwd=main)[0] != 0:
                 skipped.append(rel + " (tracked or not git-ignored)")
@@ -4624,8 +4988,14 @@ def copy_includes(main, dest):
     return copied, skipped
 
 
-def list_worktrees(root):
+def list_worktrees(root, cfg=None):
     _, main, _ = git_paths(root)
+    if cfg is None and (main / CONFIG_NAME).exists():
+        try:
+            cfg = load_config(main)
+        except SystemExit:
+            cfg = {}
+    area = worktree_base(main, cfg)
     out, cur = [], {}
     for line in git_out(main, "worktree", "list", "--porcelain").splitlines() + [""]:
         if not line:
@@ -4647,12 +5017,15 @@ def list_worktrees(root):
     for w in out:
         p = Path(w["path"])
         w["main"] = p.resolve() == main.resolve()
-        w["haam_area"] = (main / WORKTREE_DIR).resolve() in p.resolve().parents
+        try:
+            w["haam_area"] = area in p.resolve().parents or p.resolve() == area
+        except ValueError:
+            w["haam_area"] = False
         w["exists"] = p.exists()
     return out
 
 
-def worktree_finished(main, w, base, in_use=None):
+def worktree_finished(main, w, base, in_use=None, cfg=None):
     """Decide whether a worktree can be removed without losing anything. Returns (ok, reason)."""
     p = Path(w["path"])
     if w["main"]:
@@ -4662,7 +5035,8 @@ def worktree_finished(main, w, base, in_use=None):
         if any(u == here or u.startswith(here + os.sep) for u in in_use):
             return False, "a program is running in it (an agent chat or a terminal?)"
     if not w["haam_area"]:
-        return False, f"outside {WORKTREE_DIR} (created by hand; remove it yourself)"
+        label = worktree_dir_label(cfg)
+        return False, f"outside {label} (created by hand; remove it yourself)"
     if w["locked"]:
         return False, "locked (an agent is using it)"
     if not w["exists"]:
@@ -4704,12 +5078,16 @@ def worktree_finished(main, w, base, in_use=None):
 def cmd_worktree(args):
     root = find_repo_root(Path.cwd())
     top, main, linked = git_paths(root)
+    cfg = load_config(main) if (main / CONFIG_NAME).exists() else {}
     act = args.action
+    area = worktree_base(main, cfg)
+    area_label = worktree_dir_label(cfg)
 
     if act == "status":
         info = {"in_worktree": linked, "path": str(top), "main_folder": str(main),
+                "worktree_dir": area_label, "worktree_path": str(area),
                 "branch": git_out(top, "branch", "--show-current") or "(detached)",
-                "worktrees": len([w for w in list_worktrees(root) if not w["main"]]),
+                "worktrees": len([w for w in list_worktrees(root, cfg) if not w["main"]]),
                 "worktreeinclude": (main / WORKTREE_INCLUDE).exists()}
         if args.json:
             print(json.dumps(info, indent=2))
@@ -4720,14 +5098,15 @@ def cmd_worktree(args):
             print(f"{WARN} This is the main folder ({top}).")
             print("   Agent chats that change code should each get their own worktree: run /work,")
             print("   or `python3 tools/haam/haam.py worktree new` and open the folder it prints.")
-        print(f"   Branch: {info['branch']} · other worktrees: {info['worktrees']}")
+        print(f"   Branch: {info['branch']} · other worktrees: {info['worktrees']} · area: {area_label}")
         return
 
     if act == "new":
         name = args.name or f"agent-{os.urandom(2).hex()}"
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", name):
             sys.exit("Use letters, numbers, dots, dashes or underscores for the name.")
-        dest = main / WORKTREE_DIR / name
+        area.mkdir(parents=True, exist_ok=True)
+        dest = area / name
         if dest.exists():
             sys.exit(f"{dest} already exists. Open it, or pick another name.")
         run(["git", "fetch", "--quiet", "origin"], cwd=main)
@@ -4735,7 +5114,7 @@ def cmd_worktree(args):
         code, _, err = run(["git", "worktree", "add", "--quiet", "--detach", str(dest), base], cwd=main)
         if code != 0:
             sys.exit(f"Couldn't create the worktree: {err}")
-        copied, skipped = copy_includes(main, dest)
+        copied, skipped = copy_includes(main, dest, cfg)
         res = {"path": str(dest), "base": base, "copied": copied, "skipped": skipped}
         if args.json:
             print(json.dumps(res, indent=2))
@@ -4750,11 +5129,11 @@ def cmd_worktree(args):
         return
 
     if act == "prep":
-        copied, skipped = copy_includes(main, top)
+        copied, skipped = copy_includes(main, top, cfg)
         hooks_on = secret_hook_on(top)
         if args.json:
             print(json.dumps({"in_worktree": linked, "copied": copied, "skipped": skipped,
-                              "secret_hook_on": hooks_on}, indent=2))
+                              "secret_hook_on": hooks_on, "worktree_dir": area_label}, indent=2))
             return
         if not hooks_on:
             print(f"{WARN} The git secret hook is off for this repository: run `make hooks` (once per clone).")
@@ -4769,7 +5148,7 @@ def cmd_worktree(args):
         return
 
     base = default_base(main)
-    trees = list_worktrees(root)
+    trees = list_worktrees(root, cfg)
     if act == "list":
         if args.json:
             print(json.dumps(trees, indent=2))
@@ -4791,7 +5170,7 @@ def cmd_worktree(args):
         for w in trees:
             if w["main"]:
                 continue
-            ok, why = worktree_finished(main, w, base, in_use)
+            ok, why = worktree_finished(main, w, base, in_use, cfg)
             rep.add("ok" if ok else "info", f"{'remove' if ok else 'keep'}: {w['path']}", why)
             if ok:
                 remove.append(w)
@@ -5765,11 +6144,16 @@ def cmd_doctor(args):
             "" if linked else "agent chats that change code: start them with /work")
     rep.add("ok" if (main_dir / WORKTREE_INCLUDE).exists() else "warn", WORKTREE_INCLUDE,
             "lists local files (like .env) to copy into each new worktree")
-    ignored = run(["git", "check-ignore", "-q", f"{WORKTREE_DIR}/x"], cwd=main_dir)[0] == 0
-    rep.add("ok" if ignored else "warn", f"{WORKTREE_DIR}/ is git-ignored")
-    if not ignored:
-        rep.action(WHO_AGENT, f"Add `{WORKTREE_DIR}/` to .gitignore")
-    others = [w for w in list_worktrees(root) if not w["main"]]
+    wt_label = worktree_dir_label(cfg)
+    # Only the in-repo default needs a .gitignore entry; a sibling folder (../…) is outside the repo.
+    if not wt_label.startswith("..") and not Path(wt_label).is_absolute():
+        ignored = run(["git", "check-ignore", "-q", f"{wt_label}/x"], cwd=main_dir)[0] == 0
+        rep.add("ok" if ignored else "warn", f"{wt_label}/ is git-ignored")
+        if not ignored:
+            rep.action(WHO_AGENT, f"Add `{wt_label}/` to .gitignore")
+    else:
+        rep.add("info", f"Worktrees live at {wt_label}", "outside the repo (worktree_dir)")
+    others = [w for w in list_worktrees(root, cfg) if not w["main"]]
     if others:
         rep.add("info", f"{len(others)} other worktree(s)", "python3 tools/haam/haam.py worktree list")
 
@@ -5886,6 +6270,12 @@ def main():
     p.add_argument("--until", help="with --max-in-uat / --max-open-prs: a batch window, a raise that ends by itself "
                    "after this day (YYYY-MM-DD)")
     p.add_argument("--end-batch-window", action="store_true", help="end the batch window now")
+    p.add_argument("--required-fields", help="board fields every new issue must get on create, comma-separated "
+                   "(e.g. 'Area,Kind,Code check'); empty clears the requirement. Needs --human")
+    p.add_argument("--required-epic-fields", help="board fields every new epic must get (default: the issue list "
+                   "without Code check). Empty string clears to []. Needs --human")
+    p.add_argument("--worktree-dir", help="folder for agents' worktrees relative to the main checkout "
+                   "(default .claude/worktrees; e.g. ../connect-wt). Needs --human")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_config)
 
@@ -6011,6 +6401,12 @@ def main():
     p.add_argument("--max-runs", type=int, default=500)
     p.add_argument("--repo", help="owner/name (default: github_repo from haam.config.json)")
     p.set_defaults(func=cmd_ci_usage)
+
+    p = common(sub.add_parser("metrics", help="how the work flows: time to Done, time in each queue, reruns, defects, reverts"))
+    p.add_argument("--days", type=int, default=30, help="issues active in the last N days (default 30)")
+    p.add_argument("--max-issues", type=int, default=600)
+    p.add_argument("--save", action="store_true", help="also write docs/metrics/<today>.md")
+    p.set_defaults(func=cmd_metrics)
 
     p = common(sub.add_parser("settings", help="your choices for this project (CI, reviews, testing, shipping, limits)"))
     p.add_argument("--set", action="append", help="change one: key=value (repeat for more)")

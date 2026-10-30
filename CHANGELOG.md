@@ -4,7 +4,21 @@ All notable changes to the HAAM kit. The format follows [Keep a Changelog](https
 
 Each release lists **Migration** steps when a project needs to do more than run `haam.py update`.
 
-## [Unreleased]
+## [1.18.0] - 2026-10-30
+
+### Added
+- **`haam.py metrics`** (issue #9): the numbers to judge HAAM by. From the issues' own trail (labels, the skills' comments, closes), for the issues active in the last N days: time to Done (median, p90, by stream); time in each queue (idea → approved, approved → Ready, Ready → UAT plan, UAT plan → your verdict, pass → Done); reruns (issues that came back from your test); defects found in your test against bugs opened after a related issue was Done; revert commits on `main`; judge verdicts when `/judge` is in use. `--json` for the digest and spreadsheets, `--save` writes `docs/metrics/<date>.md`. GitHub Projects only for now; Linear says so and points at Linear's insights. Run it once before changing how HAAM runs, so there's a baseline.
+- **Required board fields on create.** `required_issue_fields` in `haam.config.json` (set with `config --required-fields "Area,Kind,Code check" --human`): `issue create` refuses without those GitHub Projects fields. Epics use `required_epic_fields`, or the same list without `Code check`. `/idea`, `/bug`, `/epic` and `/haam-settings` say so.
+- **Configurable worktree folder.** `worktree_dir` (default `.claude/worktrees`; e.g. `../connect-wt`). `worktree new|list|status|prep|clean`, `/work` and `doctor` follow it. Change with `settings --set worktree_dir=… --human` or `config --worktree-dir … --human`.
+- **`HAAM:project-patch` blocks survive `haam.py update`.** Mark project-only skill or doc paragraphs with `<!-- HAAM:project-patch -->` … `<!-- /HAAM:project-patch -->` (optional name: `HAAM:project-patch:deploy`). When both the kit and the project changed the file, update folds those bodies into the kit version instead of a merge conflict.
+
+### Fixed
+- **`ci: off` drops the required `ci` check.** `github --apply` / `settings --apply` remove HAAM-managed checks the settings no longer want (and still add the ones they do). Before, switching to `off` left a dead `ci` requirement that blocked merges. Documented with the release-time full-check guidance.
+
+### Migration
+- `haam.py update`.
+- If you use `ci: off`, run `settings --apply --human` (or `github --apply`) once so the ruleset drops `ci`.
+- Optional: set `required_issue_fields` / `worktree_dir` for your board and machine layout.
 
 ## [1.17.0] - 2026-10-27
 

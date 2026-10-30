@@ -91,13 +91,14 @@ The two AI reviews run with one repository secret, added by the owner in their o
 | `flow` | `test-first`: you test the agent's branch, then the PR and checks run once | `checks-first`: you only want to test code that passed the checks, or you test on a shared staging site | Each rework round runs the checks again |
 | `uat` | `owner-decides`: you test everything except what you mark `uat:skip` | `always`: regulated or safety-critical products. `bugs-skip`: many small fixes with strong tests | `bugs-skip`: a wrong fix can ship without your eyes |
 | `grouping` | `per-issue`: one PR per issue | `per-epic`: epics made of small items. `release` (test-first only): scarce minutes and batch releases | One failing item holds back the batch |
-| `ci` | `every-pr`, on GitHub | `local`: minutes run out and your computer builds everything. `off`: solo prototypes only | `local` isn't tamper-proof |
+| `ci` | `every-pr`, on GitHub | `local`: minutes run out and your computer builds everything. `off`: no PR `ci` check (agents still run `make check`; pair with a release-time full check) | `local` isn't tamper-proof; `off` needs a release gate elsewhere |
 | `review` | `github`: two independent AI reviews per PR | `protected-only`: saves most review cost. `local`: saves minutes | Fewer independent checks |
 | `nightly` | `on` | `off`: when minutes are very scarce | You find breakage and new vulnerabilities later |
 | `runner` | `github` | `self-hosted`: a private repository with heavy builds and a machine that stays on | Upkeep. Never for public repositories |
 | `deploy` | `github`: `deploy.yml` deploys on merge | `manual`: you deploy another way | `ship` waits for you to say "live" |
 | `deploy_approval` | `each`: every deploy waits for your approval | `automatic`: your plan can't hold deploys (§1), or you chose `uat: always` | A merged change goes live without a last look |
 | `worktree_cleanup` | `after-ship` | `manual`: you'd rather tidy worktrees yourself | Disk space |
+| `worktree_dir` | `.claude/worktrees` | a sibling folder (e.g. `../connect-wt`) when you want agent copies outside the repo | Paths in `/work` and `doctor` follow it |
 
 The no-UAT lane merges by itself only on GitHub Projects, with the `HAAM_PROJECT_TOKEN` secret, `ci: every-pr` and `review: github`. Otherwise you ship those PRs yourself.
 

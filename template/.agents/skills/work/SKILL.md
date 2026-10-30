@@ -10,7 +10,7 @@ argument-hint: "[bugs|features|specs|ideas|epic <ID>]  (optional: one kind of wo
 
 Stream: $ARGUMENTS (empty = all streams)
 
-Several chats working in the same folder overwrite each other's files and branches. So every agent chat that changes code gets its own copy of the repository, a **git worktree**, under `.claude/worktrees/`. The main folder stays with the human's own chat (ideas, decisions, UAT, releases).
+Several chats working in the same folder overwrite each other's files and branches. So every agent chat that changes code gets its own copy of the repository, a **git worktree**. Where they live is `worktree_dir` in `haam.config.json` (default `.claude/worktrees/`; a sibling like `../connect-wt` is fine). The main folder stays with the human's own chat (ideas, decisions, UAT, releases).
 
 ## 1. Get your own workspace
 Run `python3 tools/haam/haam.py worktree status --json`.
@@ -18,7 +18,7 @@ Run `python3 tools/haam/haam.py worktree status --json`.
 - Otherwise:
   - **Claude Code:** create and enter a new worktree yourself (the `EnterWorktree` tool, as when a human says "work in a worktree"). Then go to step 2.
   - **A tool with its own worktree or parallel-agent mode** (e.g. the Codex app, Cursor's parallel agents): if the human started this chat that way, `in_worktree` is already true. If not, tell the human to start the chat that way, or use the next option.
-  - **Any other tool:** run `python3 tools/haam/haam.py worktree new`. It prints a folder. Tell the human: *"Open `<folder>` in a new window, start your agent there and type `/work <stream>` again."* Then stop.
+  - **Any other tool:** run `python3 tools/haam/haam.py worktree new`. It prints a folder (under `worktree_dir`). Tell the human: *"Open `<folder>` in a new window, start your agent there and type `/work <stream>` again."* Then stop.
 
 ## 2. Prepare it
 1. `python3 tools/haam/haam.py worktree prep`: copies the local-only files listed in `.worktreeinclude` (such as `.env`) from the main folder. Never open, read or print those files.

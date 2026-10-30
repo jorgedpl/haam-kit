@@ -4,7 +4,7 @@ All notable changes to the HAAM kit. The format follows [Keep a Changelog](https
 
 Each release lists **Migration** steps when a project needs to do more than run `haam.py update`.
 
-## [Unreleased]
+## [1.18.0] - 2026-10-30
 
 ### Added
 - **`haam.py metrics`** (issue #9): the numbers to judge HAAM by. From the issues' own trail (labels, the skills' comments, closes), for the issues active in the last N days: time to Done (median, p90, by stream); time in each queue (idea → approved, approved → Ready, Ready → UAT plan, UAT plan → your verdict, pass → Done); reruns (issues that came back from your test); defects found in your test against bugs opened after a related issue was Done; revert commits on `main`; judge verdicts when `/judge` is in use. `--json` for the digest and spreadsheets, `--save` writes `docs/metrics/<date>.md`. GitHub Projects only for now; Linear says so and points at Linear's insights. Run it once before changing how HAAM runs, so there's a baseline.

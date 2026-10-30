@@ -76,7 +76,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.17.0"
+VERSION = "1.18.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"

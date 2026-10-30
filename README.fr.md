@@ -38,7 +38,7 @@ Idea ─► Assess ─► [G1 Decide] ─► Spec ─► [G2 Ready] ─► Build
 
 1. Récupérez une version publiée du kit :
    ```bash
-   git clone --depth 1 --branch v1.16.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
+   git clone --depth 1 --branch v1.18.0 https://github.com/jorgedpl/haam-kit.git ~/haam-kit
    ```
    (ou téléchargez le zip depuis les [Releases](https://github.com/jorgedpl/haam-kit/releases)).
 2. Ouvrez votre agent de code **dans le dossier racine de votre projet** et dites :

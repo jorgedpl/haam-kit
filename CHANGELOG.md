@@ -4,7 +4,7 @@ All notable changes to the HAAM kit. The format follows [Keep a Changelog](https
 
 Each release lists **Migration** steps when a project needs to do more than run `haam.py update`.
 
-## [Unreleased]
+## [1.19.0] - 2026-11-13
 
 Four problems one busy test-first project found, with `grouping: release` and 5–10 agent chats a day on one machine.
 
@@ -507,7 +507,10 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.16.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.19.0...HEAD
+[1.19.0]: https://github.com/jorgedpl/haam-kit/compare/v1.18.0...v1.19.0
+[1.18.0]: https://github.com/jorgedpl/haam-kit/compare/v1.17.0...v1.18.0
+[1.17.0]: https://github.com/jorgedpl/haam-kit/compare/v1.16.0...v1.17.0
 [1.16.0]: https://github.com/jorgedpl/haam-kit/compare/v1.15.1...v1.16.0
 [1.15.1]: https://github.com/jorgedpl/haam-kit/compare/v1.15.0...v1.15.1
 [1.15.0]: https://github.com/jorgedpl/haam-kit/compare/v1.14.0...v1.15.0

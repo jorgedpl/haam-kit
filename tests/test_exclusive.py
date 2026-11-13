@@ -160,5 +160,53 @@ class RunsOnTheOtherMachineWhenFree(unittest.TestCase):
         self.assertNotIn("should-not-run", p.stdout)
 
 
+# A make that refuses `--version` on the "other machine" (the fake ssh runs it with cwd $HOME), as a new Xcode with no
+# accepted licence does, and is the real make everywhere else.
+FAKE_MAKE = """#!/bin/sh
+if [ "$1" = "--version" ] && [ -f "$HOME/make-broken" ]; then
+  echo "You have not agreed to the Xcode license agreements." >&2
+  exit 69
+fi
+exec %s "$@"
+"""
+
+
+@unittest.skipUnless(shutil.which("zsh") and shutil.which("make"), "the remote script runs under zsh")
+class StaysHereWhenTheOtherMachineCannotRunTheTool(RunsOnTheOtherMachineWhenFree):
+    def setUp(self):
+        real_make = shutil.which("make")
+        super().setUp()
+        fake = self.tmp / "runner-bin"
+        fake.mkdir()
+        (fake / "make").write_text(FAKE_MAKE % real_make)
+        (fake / "make").chmod(0o755)
+        # The runner's own login shell finds it first, as a login zsh there would (macOS's /etc/zprofile rebuilds
+        # PATH before the user's .zprofile runs, so a PATH passed in from outside is not enough).
+        (self.tmp / ".zprofile").write_text(f'export PATH="{fake}:$PATH"\n')
+
+    def test_a_runner_whose_make_fails_is_never_handed_the_run(self):
+        """#20 AC1, AC2: a runner whose `make --version` fails is not free: the run stays here and waits for this
+        machine's lock (here it times out, so nothing ran anywhere), and the warning names the error once."""
+        (self.tmp / "make-broken").write_text("")
+        p = subprocess.run([sys.executable, str(HAAM), "exclusive", "remote test", "--timeout", "0.05", "--quiet", "0",
+                            "--", "make", "check"], cwd=self.local, env=self.env, capture_output=True, text=True,
+                           timeout=120)
+        self.assertEqual(p.returncode, 124, p.stdout + p.stderr)
+        self.assertNotIn("ran-on-the-other-machine", p.stdout)
+        self.assertEqual(p.stderr.count("can't run make"), 1, p.stderr)
+        self.assertIn("You have not agreed to the Xcode license agreements.", p.stderr)
+        self.assertEqual(git(self.remote, "for-each-ref", "refs/haam-remote"), "")
+
+    def test_a_runner_whose_make_works_still_gets_the_run(self):
+        """#20 AC3: the probe passes on a healthy runner, and the run goes there as before."""
+        p = subprocess.run([sys.executable, str(HAAM), "exclusive", "remote test", "--quiet", "0", "--", "make", "check"],
+                           cwd=self.local, env=self.env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("ran-on-the-other-machine", p.stdout)
+        self.assertNotIn("can't run make", p.stderr)
+
+    # The parent's own tests run here too, with the fake make: they must not change.
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

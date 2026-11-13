@@ -5668,18 +5668,44 @@ def ssh_args(host):
     return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=60", host]
 
 
-def remote_lock_free(host, repo):
-    """True when the other machine's clone has no heavy run holding or waiting for its lock."""
+REMOTE_NOT_READY = 4   # remote_lock_free's script: the other machine cannot run the command's tool
+
+
+def remote_lock_free(host, repo, tool=None, warn=None):
+    """True when the other machine's clone has no heavy run holding or waiting for its lock, and, with `tool`, when
+    that machine can run it: `<tool> --version` in the login zsh the run itself uses. A runner whose tool fails (a new
+    Xcode whose licence nobody accepted makes every `make` exit 69) is not free, because a run handed to it would fail
+    at once and, by #924, never run here again. `warn` gets the probe's first error line."""
+    probe = ''
+    if tool:
+        cmd = shlex.quote(f'{shlex.quote(tool)} --version')
+        probe = (f'out=$(zsh -l -c {cmd} 2>&1 >/dev/null) || '
+                 f'{{ printf "%s\\n" "${{out:-{tool} --version failed}}" | head -n 1 >&2; exit {REMOTE_NOT_READY}; }}\n')
     script = (f'cd {shlex.quote(repo)} 2>/dev/null || exit 3\n'
               'd=$(git rev-parse --git-common-dir) || exit 3\n'
               f'[ -d "$d/{EXCLUSIVE_LOCK}" ] && exit 1\n'
               f'[ -n "$(ls -A "$d/{EXCLUSIVE_QUEUE}" 2>/dev/null)" ] && exit 1\n'
+              + probe +
               'exit 0\n')
     try:
         p = subprocess.run(ssh_args(host) + ["sh -s"], input=script, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return False
+    if p.returncode == REMOTE_NOT_READY and warn is not None:
+        warn((p.stderr or "").strip().splitlines()[0] if (p.stderr or "").strip() else f"{tool} --version failed")
     return p.returncode == 0
+
+
+def remote_free_check(host, repo, tool, say):
+    """remote_lock_free for one wait, saying once (not on every poll) that the runner cannot run the tool."""
+    warned = []
+
+    def warn(line):
+        if not warned:
+            warned.append(line)
+            say(f"{WARN} {host} can't run {tool} ({line[:200]}); staying here.")
+
+    return lambda: remote_lock_free(host, repo, tool=tool, warn=warn)
 
 
 def snapshot_commit(root):
@@ -5785,7 +5811,7 @@ def cmd_exclusive(args):
     remote_free = None
     if host and remote_eligible(command):
         repo = os.environ.get(REMOTE_REPO_ENV, "").strip() or remote_repo_default(root)
-        remote_free = lambda: remote_lock_free(host, repo)  # noqa: E731
+        remote_free = remote_free_check(host, repo, Path(command[0]).name, say)
     child = None
     try:
         try:

@@ -6,6 +6,8 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.19.1] - 2026-11-13
+
 ### Fixed
 - **`exclusive` hands a run to the other machine only when that machine can run it.** Before handing a waiting `make` run to `HAAM_REMOTE_RUNNER`, it now runs `make --version` there, in the same login shell the run uses. A runner that fails it isn't counted as free: the run waits here instead, with one warning that names the runner and its first error line. Before, a runner that couldn't run `make` (for example a new Xcode whose licence nobody had accepted, where every `make` exits 69) failed every run it was handed at once. By design such a run is never repeated here, so each one looked like a failed check of the change.
 
@@ -512,7 +514,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.19.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.19.1...HEAD
+[1.19.1]: https://github.com/jorgedpl/haam-kit/compare/v1.19.0...v1.19.1
 [1.19.0]: https://github.com/jorgedpl/haam-kit/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/jorgedpl/haam-kit/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/jorgedpl/haam-kit/compare/v1.16.0...v1.17.0

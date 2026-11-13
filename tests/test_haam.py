@@ -1188,6 +1188,69 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("issue", "status", str(m), "In Review")
         git(self.proj, "switch", "-q", "main")
 
+    def test_a_claim_from_a_chat_that_died_is_listed_and_released_only_when_the_owner_allows(self):
+        self.setup_board()
+        origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        git(self.proj, "remote", "set-url", "origin", str(origin))
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "adopt HAAM")
+        git(self.proj, "push", "-q", "-u", "origin", "main")
+        new = lambda title: json.loads(self.tool("issue", "create", "--stream", "bug", "--title", title,  # noqa: E731
+                                                 "--status", "Ready", "--json").stdout)["number"]
+        n, fresh = new("Crash"), new("Typo")
+        self.tool("issue", "claim", str(n), "--branch", f"{n}-crash")
+        self.tool("issue", "claim", str(fresh))
+        st = self.gh_state()
+        ten_days_ago = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 10 * 86400))
+        for c in st["comments"]:
+            if c["issue"] == n:
+                c["createdAt"] = ten_days_ago                  # the chat died ten days ago
+        self.state.write_text(json.dumps(st))
+        # Its branch got a commit an hour ago: still alive
+        git(self.proj, "switch", "-q", "-c", f"{n}-crash")
+        (self.proj / "fix.txt").write_text("wip\n")
+        git(self.proj, "add", "fix.txt")
+        subprocess.run(["git", "commit", "-qm", "wip"], cwd=self.proj, check=True, capture_output=True,
+                       env={**self.env, "GIT_COMMITTER_DATE": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                                                           time.gmtime(time.time() - 3600)) + "Z"})
+        git(self.proj, "push", "-q", "origin", f"{n}-crash")
+        git(self.proj, "switch", "-q", "main")
+        self.assertEqual(json.loads(self.tool("issue", "stale", "--json").stdout)["claims"], [])
+        # The commit was old too: listed, quiet for ten days; the fresh claim isn't
+        git(self.proj, "switch", "-q", f"{n}-crash")
+        subprocess.run(["git", "commit", "-q", "--amend", "--no-edit"], cwd=self.proj, check=True,
+                       env={**self.env, "GIT_COMMITTER_DATE": ten_days_ago})
+        git(self.proj, "push", "-q", "-f", "origin", f"{n}-crash")
+        git(self.proj, "switch", "-q", "main")
+        listed = json.loads(self.tool("issue", "stale", "--json").stdout)
+        self.assertEqual([c["number"] for c in listed["claims"]], [n])
+        self.assertEqual(listed["claims"][0]["branches"], [f"{n}-crash"])
+        self.assertFalse(listed["claims"][0]["releasable"])
+        self.assertIn("tell the owner", self.tool("issue", "stale").stdout)
+        # Off by default: an agent can't release it
+        p = self.tool("issue", "release", str(n), "--stale", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("stale_claim_days is 0", p.stderr)
+        # The owner allows it after 14 days: ten isn't enough
+        self.tool("settings", "--set", "stale_claim_days=14", "--human")
+        p = self.tool("issue", "release", str(n), "--stale", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("isn't quiet long enough", p.stderr)
+        p = self.tool("issue", "release", str(fresh), "--stale", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        # After 7 days: released, back to Ready, and the next chat is told where the work is
+        self.tool("settings", "--set", "stale_claim_days=7", "--human")
+        self.assertTrue(json.loads(self.tool("issue", "stale", "--json").stdout)["claims"][0]["releasable"])
+        self.tool("issue", "release", str(n), "--stale")
+        iss = json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]
+        self.assertEqual(iss["status"], "Ready")
+        self.assertEqual(iss["assignees"], [])
+        last = [c["body"] for c in self.gh_state()["comments"] if c["issue"] == n][-1]
+        self.assertTrue(last.startswith("🔓 Claim released"))
+        self.assertIn(f"continues on branch `{n}-crash`", last)
+        self.tool("settings", "--set", "stale_claim_days=0", "--human")          # 0 (off) is a valid value
+
     def test_metrics_measures_the_queues_reruns_defects_and_reverts(self):
         self.setup_board()
         st = self.gh_state()
@@ -1733,6 +1796,115 @@ class TestWorktrees(ToolTestCase):
         self.assertFalse(done.exists())
         self.assertTrue(busy.exists() and fresh.exists())
 
+    def age(self, wt, days=3):
+        """Make a worktree look untouched for `days` (its index is what clean reads as last use)."""
+        idx = Path(subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=wt, capture_output=True,
+                                  text=True).stdout.strip()) / "index"
+        old = time.time() - days * 86400
+        os.utime(idx, (old, old))
+
+    def clean_items(self, *args, env=None):
+        plan = json.loads(self.run_tool("worktree", "clean", "--json", *args, tool=self.installed_tool(),
+                                        env=env).stdout)
+        def key(text):          # "remove: <path>" with the path resolved (temp folders sit behind a symlink)
+            verb, _, path = text.partition(": ")
+            return f"{verb}: {Path(path).resolve()}" if path.startswith("/") else text
+        return {key(i["text"]): i["detail"] for s in plan["sections"] for i in s["items"]}
+
+    def fake_gh_merged(self, prs):
+        """A `gh` that only answers `pr list --state merged` (with `prs`); anything else fails."""
+        bin_dir = self.tmp / "bin-merged"
+        bin_dir.mkdir(exist_ok=True)
+        (self.tmp / "merged.json").write_text(json.dumps(prs))
+        gh = bin_dir / "gh"
+        gh.write_text(f"#!{sys.executable}\nimport sys\n"
+                      "if sys.argv[1:3] == ['pr', 'list'] and 'merged' in sys.argv:\n"
+                      f"    print(open({str(self.tmp / 'merged.json')!r}).read()); sys.exit(0)\n"
+                      "sys.exit(1)\n")
+        gh.chmod(0o755)
+        return {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}"}
+
+    def test_clean_removes_a_worktree_shipped_in_a_release_pr(self):
+        """grouping: release: the issue branch stays on origin and has no PR of its own; its commit reached main
+        through a squash-merged release PR whose branch is gone (GitHub keeps it as pull/<n>/head)."""
+        shipped = Path(json.loads(self.wt("new", "shipped", "--json").stdout)["path"])
+        git(shipped, "switch", "-q", "-c", "7-export")
+        (shipped / "export.txt").write_text("export\n")
+        git(shipped, "add", "export.txt")
+        git(shipped, "commit", "-qm", "#7: export")
+        git(shipped, "push", "-q", "-u", "origin", "7-export")
+        tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=shipped, capture_output=True, text=True).stdout.strip()
+        open_ = Path(json.loads(self.wt("new", "open", "--json").stdout)["path"])   # pushed, not shipped
+        git(open_, "switch", "-q", "-c", "8-import")
+        (open_ / "import.txt").write_text("import\n")
+        git(open_, "add", "import.txt")
+        git(open_, "commit", "-qm", "#8: import")
+        git(open_, "push", "-q", "-u", "origin", "8-import")
+        # ship --all, done elsewhere: a release branch merges 7-export, the PR squash-merges, the branch is deleted
+        other = self.tmp / "other"
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(other)], check=True)
+        git(other, "config", "user.email", "test@example.com")
+        git(other, "config", "user.name", "Test")
+        git(other, "switch", "-q", "-c", "release/1")
+        git(other, "merge", "-q", "--no-ff", "-m", "#7: export", "origin/7-export")
+        (other / "release-note.txt").write_text("only on the release branch\n")      # an object the main folder lacks
+        git(other, "add", "-A")
+        git(other, "commit", "-qm", "release note")
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=other, capture_output=True, text=True).stdout.strip()
+        git(other, "push", "-q", "origin", f"{head}:refs/pull/9/head")
+        git(other, "switch", "-q", "main")
+        git(other, "merge", "-q", "--squash", "release/1")
+        git(other, "commit", "-qm", "Release (#9)")
+        git(other, "push", "-q", "origin", "main")
+        self.assertNotEqual(subprocess.run(["git", "cat-file", "-e", head], cwd=self.proj).returncode, 0)
+        env = self.fake_gh_merged([{"number": 9, "headRefOid": head, "mergedAt": "2026-11-01T10:00:00Z"}])
+
+        items = self.clean_items(env=env)
+        self.assertIn("its work is in PR #9 (shipped); removed once unused for 24h",
+                      items[f"keep: {shipped.resolve()}"])
+        self.assertIn("still on origin", items[f"keep: {open_.resolve()}"])
+        self.age(shipped)
+        self.age(open_)
+        items = self.clean_items(env=env)                       # aged once: clean's own git status keeps that age
+        self.assertIn(f"remove: {shipped.resolve()}", items)
+        self.assertIn("still on origin", items[f"keep: {open_.resolve()}"])    # its work isn't anywhere yet
+        self.run_tool("worktree", "clean", "--apply", tool=self.installed_tool(), env=env)
+        self.assertFalse(shipped.exists())
+        self.assertTrue(open_.exists())
+        self.assertIn(tip, subprocess.run(["git", "rev-list", head], cwd=self.proj, capture_output=True,
+                                          text=True).stdout)                    # fetched as pull/9/head
+
+    def test_clean_removes_a_pushed_worktree_whose_commit_is_in_main(self):
+        """Merged with a merge commit (or fast-forward) while its branch stays on origin: its work is in main."""
+        wt = Path(json.loads(self.wt("new", "ff", "--json").stdout)["path"])
+        git(wt, "switch", "-q", "-c", "10-docs")
+        (wt / "docs.txt").write_text("docs\n")
+        git(wt, "add", "docs.txt")
+        git(wt, "commit", "-qm", "#10: docs")
+        git(wt, "push", "-q", "-u", "origin", "10-docs")
+        git(wt, "push", "-q", "origin", "HEAD:main")
+        self.age(wt)
+        env = self.fake_gh_merged([])
+        self.assertIn(f"remove: {wt.resolve()}", self.clean_items(env=env))
+
+    def test_clean_covers_claude_code_folder_and_old_folders_on_request(self):
+        self.run_tool("config", "--worktree-dir", "../agent-wt", "--human", tool=self.installed_tool())
+        native = self.proj / ".claude/worktrees/native"          # Claude Code's own, whatever worktree_dir says
+        old = self.tmp / "old-wt" / "w1"                         # an older project rule's sibling folder
+        for w in (native, old):
+            git(self.proj, "worktree", "add", "-q", "--detach", str(w))
+            self.age(w)
+        items = self.clean_items()
+        self.assertIn(f"remove: {native.resolve()}", items)
+        self.assertIn("--also", items[f"keep: {old.resolve()}"])
+        doctor = self.run_tool("doctor", tool=self.installed_tool(), check=False).stdout
+        self.assertIn("1 worktree(s) outside ../agent-wt", doctor)
+        self.assertIn("--also", doctor)
+        self.assertIn(f"remove: {old.resolve()}", self.clean_items("--also", str(self.tmp / "old-wt")))
+        self.run_tool("worktree", "clean", "--apply", "--also", str(self.tmp / "old-wt"), tool=self.installed_tool())
+        self.assertFalse(old.exists())
+        self.assertFalse(native.exists())
+
     def test_clean_keeps_a_worktree_a_program_is_running_in(self):
         idle = Path(json.loads(self.wt("new", "idle", "--json").stdout)["path"])
         idx = Path(subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=idle, capture_output=True,
@@ -2196,12 +2368,44 @@ class TestExclusive(ToolTestCase):
         self.assertFalse(self.lock_dir.exists())
 
     def test_gives_up_after_the_timeout(self):
-        self.lock_dir.mkdir()
-        (self.lock_dir / "owner").write_text(json.dumps({"who": "chat A", "pid": os.getpid(),
-                                                         "host": os.uname().nodename, "since": "now"}))
-        p = self.run_tool("exclusive", "chat B", "--timeout", "0.02", "--", "true", check=False)
-        self.assertEqual(p.returncode, 124)
-        self.assertTrue(self.lock_dir.exists())                              # someone else's lock is left alone
+        holder = subprocess.Popen(["sleep", "60"])                          # another chat: alive, not our ancestor
+        try:
+            self.lock_dir.mkdir()
+            (self.lock_dir / "owner").write_text(json.dumps({"who": "chat A", "pid": holder.pid,
+                                                             "host": os.uname().nodename, "since": "now"}))
+            p = self.run_tool("exclusive", "chat B", "--timeout", "0.02", "--", "true", check=False)
+            self.assertEqual(p.returncode, 124)
+            self.assertTrue(self.lock_dir.exists())                          # someone else's lock is left alone
+        finally:
+            holder.kill()
+            holder.wait()
+
+    def test_nested_exclusive_runs_straight_through(self):
+        """A command run through exclusive that itself calls exclusive (a check script that takes the lock for its
+        heavy steps) must not wait for its own parent: before, it waited until the timeout, and everyone behind it."""
+        inner = (f"'{sys.executable}' '{TOOL}' exclusive inner --timeout 0.1 -- "
+                 f"'{sys.executable}' -c 'print(\"inner ran\")'")
+        for how, cmd in (("env", inner), ("ancestors", f"env -u HAAM_EXCLUSIVE_HELD {inner}")):
+            with self.subTest(how):
+                start = time.time()
+                p = self.ex("outer", "bash", "-c", cmd, check=True)
+                self.assertIn("inner ran", p.stdout)
+                self.assertIn("running straight through", p.stderr)
+                self.assertLess(time.time() - start, 5)
+                self.assertFalse(self.lock_dir.exists())                     # the outer run still releases it
+
+    def test_a_stale_held_variable_does_not_skip_the_queue(self):
+        holder = subprocess.Popen(["sleep", "60"])
+        try:
+            self.lock_dir.mkdir()
+            (self.lock_dir / "owner").write_text(json.dumps({"who": "chat A", "pid": holder.pid,
+                                                             "host": os.uname().nodename, "since": "now"}))
+            env = {**self.env, "HAAM_EXCLUSIVE_HELD": f"{os.getpid()}@{self.lock_dir.resolve()}"}
+            p = self.run_tool("exclusive", "chat B", "--timeout", "0.02", "--", "true", env=env, check=False)
+            self.assertEqual(p.returncode, 124)                              # not chat A's child: waits its turn
+        finally:
+            holder.kill()
+            holder.wait()
 
     def test_config_adds_heavy_runs(self):
         (self.proj / "haam.config.json").unlink()

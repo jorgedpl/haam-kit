@@ -18,6 +18,9 @@ Run `python3 tools/haam/haam.py capacity` (Linear: first count the issues in `UA
 ## 0b. Your own workspace
 If the item you pick will change files (build, spec, assessment), you need your own worktree when other agent chats may be open on this machine (`AGENTS.md` §7). Run `python3 tools/haam/haam.py worktree status`. In the main folder: Claude Code, move into a new worktree first (as in `/work` step 1); other tools, ask the human whether other chats are running and, if so, follow `/work` step 1.
 
+## 0c. Claims from chats that stopped
+GitHub Projects: run `python3 tools/haam/haam.py issue stale` (Linear: look for `In Progress` or `claimed` issues whose newest comment and newest commit on their branch are older than `stale_claim_days` in `haam.config.json`, or 3 days when it's 0). If the setting `stale_claim_days` is above 0, release each one it marks quiet for that long with `python3 tools/haam/haam.py issue release <number> --stale` (Linear: unassign, remove `claimed`, `In Progress` back to `Ready`, comment ``🔓 Claim released · quiet for <n> days (stale_claim_days)``). They join the queue below like any other item, and whoever builds one continues on its branch (`/build` step 2). If it's 0, don't release them: list them in your report so the owner can free them with `/triage stale`.
+
 ## 1. Build the queue (unassigned or assigned to the current user, not In Progress)
 
 GitHub Projects: `python3 tools/haam/haam.py issue list --status Ready --unassigned --open-only` (and `--status Backlog --no-label claimed`, `--status Discovery --unassigned --no-label claimed`, `--status Triage --no-label claimed` for steps 4–5). Linear: list the team's issues.

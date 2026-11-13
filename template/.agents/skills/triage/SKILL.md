@@ -20,7 +20,7 @@ This skill runs only when a human types it. You do the reading and propose; **th
 - **group:** open issues that aren't in an epic and aren't epics (GitHub: `issue list --open-only --no-parent --no-label epic --json`), plus the open epics (`--label epic`). Go to step 2a.
 - **inbox:** every open issue in `Triage`, plus any open issue with no priority outside Done, Parked and Canceled. GitHub: `python3 tools/haam/haam.py issue list --status Triage --open-only --json`.
 - **backlog:** every issue in `Ready` and `Backlog`. Look for: priorities that no longer fit the current priorities; too many Highs (more than about one in five); items larger than M that should be split; features in Backlog with no spec; Low items older than two months (suggest Park).
-- **stale:** `In Progress` with no comment or commit for 3+ days; label `claimed` (an assessment or spec under way) with no comment or commit for 1+ day; `UAT` waiting 3+ days; `Decision` waiting 7+ days; `Parked` items whose "revisit when" seems to have come true; open `override-followup` items.
+- **stale:** GitHub Projects: start from `python3 tools/haam/haam.py issue stale` (it reads the comments and the branches' commits for you). `In Progress` with no comment or commit for 3+ days; label `claimed` (an assessment or spec under way) with no comment or commit for 1+ day; `UAT` waiting 3+ days; `Decision` waiting 7+ days; `Parked` items whose "revisit when" seems to have come true; open `override-followup` items.
 
 Read each item fully (description and comments). For a bug, check whether the steps to reproduce are usable. Look for duplicates among open issues. Take at most 15 items per round; say how many are left.
 

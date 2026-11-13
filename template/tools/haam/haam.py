@@ -18,7 +18,7 @@ Admin (first-time adoption and upgrades):
     invite    --github USER [--linear-email EMAIL] [--apply]
 
 Agents, when the tracker is GitHub Projects:
-    issue create|view|list|claim|release|status|priority|label|comment|close|link|unlink|children|edit|fields ...
+    issue create|view|list|stale|claim|release|status|priority|label|comment|close|link|unlink|children|edit|fields ...
 
 Testing and shipping (inside /test, after the human's verdict):
     checkout-pr ISSUE | --back              Put a change on this machine to test it (its PR, or the agent's branch)
@@ -32,7 +32,7 @@ CI cost:
     review ISSUE                            Local AI reviews in fresh sessions, posted as the PR's statuses
 
 Parallel chats (one worktree per agent chat):
-    worktree status|new|prep|list|clean [--apply]
+    worktree status|new|prep|list|clean [--apply] [--also <old folder>]
     exclusive "WHO" -- COMMAND              Run a heavy test run when no other is running here (heavy_runs)
     capacity [--list]                       Room for new builds? ready PRs and the UAT queue vs the limits
     overlap --files a,b/                    Branches waiting for your test that change the same files
@@ -76,7 +76,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.18.0"
+VERSION = "1.19.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -124,6 +124,9 @@ DEFAULT_CONFIG = {
     # Where agent worktrees live, relative to the main folder (or absolute). Default matches Claude Code.
     # A sibling folder is fine, e.g. "../connect-wt".
     "worktree_dir": ".claude/worktrees",
+    # Days with no sign of life (no comment on the issue, no commit on its branch) after which an agent may release
+    # another chat's claim (issue release --stale) and pick the work up. 0: never; `issue stale` only lists them.
+    "stale_claim_days": 0,
     # Board fields every new issue must get on create (GitHub Projects). Empty: agents set a field only when
     # the text clearly answers it. Example: ["Area", "Kind", "Code check"]. Epics use required_epic_fields
     # when set, otherwise the same list without "Code check".
@@ -229,7 +232,11 @@ SETTINGS = [
         "manual": "You run haam.py worktree clean yourself."}),
     ("Housekeeping", "worktree_dir", str, "Folder for agents' worktrees, relative to the main checkout "
      "(or absolute). Default `.claude/worktrees`. A sibling like `../connect-wt` keeps them outside the repo.", {}),
+    ("Housekeeping", "stale_claim_days", int, "Days with no comment on a claimed issue and no commit on its branch "
+     "before an agent may release that claim and pick the work up (a chat that died: session limit, laptop asleep, "
+     "crash). 0 (default): never; /next lists them for you and /triage stale frees them.", {}),
 ]
+INT_SETTINGS_ZERO_OK = {"stale_claim_days"}     # 0 means off
 SETTING_KEYS = {k: (g, opts, what, helps) for g, k, opts, what, helps in SETTINGS}
 
 GITHUB_LABELS = [
@@ -2439,6 +2446,35 @@ def parse_when(t):
         return None
 
 
+STALE_CLAIM_LIST_DAYS = 3       # `issue stale` lists claims this quiet when stale_claim_days is 0 (as /triage stale)
+
+
+def origin_branch_times(root):
+    """{branch: time of its newest commit} for every branch on origin (as last fetched)."""
+    out = {}
+    for line in git_out(root, "for-each-ref", "--format=%(refname) %(committerdate:iso-strict)",
+                        "refs/remotes/origin/").splitlines():
+        ref, _, when = line.partition(" ")
+        name = ref[len("refs/remotes/origin/"):]
+        if name != "HEAD" and parse_when(when):
+            out[name] = parse_when(when)
+    return out
+
+
+def claim_activity(number, comments, tips):
+    """The last sign of life of an issue's claim: its newest comment, or the newest commit on a branch its claim
+    names, or one named <number>-… (or spike/<number>-…) on origin. Returns (when or None, [branches])."""
+    named = {claim_branch(c.get("body")) for c in active_claims(comments)}
+    branches = sorted(b for b in tips if b in named or re.match(rf"^(spike/)?{number}-", b))
+    times = [t for t in (parse_when(c.get("createdAt")) for c in comments) if t] + [tips[b] for b in branches]
+    return (max(times) if times else None), branches
+
+
+def quiet_days(when):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (now - when).total_seconds() / 86400 if when else None
+
+
 def issue_action(args, cfg, board):
     repo = cfg["github_repo"]
     a = args.action
@@ -2470,6 +2506,37 @@ def issue_action(args, cfg, board):
                  f"{','.join(i['assignees']) or '-':<14} {i['title']}  [{', '.join(i['labels'])}]"
                  + (f"  (epic #{i['parent']})" if i.get("parent") else "") for i in items]
         return {"items": items, "message": "\n".join(lines) or "No matching issues."}
+
+    if a == "stale":
+        limit = int(setting_value(cfg, "stale_claim_days") or 0)
+        days = args.days if args.days is not None else (limit or STALE_CLAIM_LIST_DAYS)
+        run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=Path.cwd())
+        tips = origin_branch_times(Path.cwd())
+        found = []
+        for i in board.items():
+            if i["repo"].lower() != repo.lower() or i["state"] != "OPEN" or not is_claimed(i):
+                continue
+            when, branches = claim_activity(i["number"], issue_comments(repo, i["number"]), tips)
+            q = quiet_days(when)
+            if q is None or q >= days:
+                found.append({"number": i["number"], "title": i["title"], "status": i["status"],
+                              "labels": i["labels"], "quiet_days": None if q is None else round(q, 1),
+                              "last_activity": when.isoformat() if when else None, "branches": branches,
+                              "releasable": bool(limit) and q is not None and q >= limit})
+        found.sort(key=lambda x: -(x["quiet_days"] or 0))
+        lines = [f"#{x['number']:<5} {x['status'] or '-':<12} "
+                 + (f"quiet {x['quiet_days']:g} day(s)" if x["quiet_days"] is not None else "no activity found")
+                 + f"  {x['title']}" + (f"  (branch {', '.join(x['branches'])})" if x["branches"] else "")
+                 for x in found]
+        if not found:
+            msg = f"No claim has been quiet for {days:g} day(s) or more."
+        elif limit:
+            msg = ("\n".join(lines) + f"\nstale_claim_days is {limit}: release one quiet that long with "
+                   "`issue release <number> --stale`, then pick it up (continue on its branch).")
+        else:
+            msg = ("\n".join(lines) + "\nAgents don't release these here (stale_claim_days is 0): tell the owner. "
+                   "/triage stale frees them, or /haam-settings sets stale_claim_days so agents can.")
+        return {"days": days, "stale_claim_days": limit, "claims": found, "message": msg}
 
     if a == "fields":
         fl = board.custom_fields()
@@ -2748,10 +2815,28 @@ def issue_action(args, cfg, board):
         claims = active_claims(comments)
         if not claims and not is_claimed(iss):
             return {"number": number, "message": f"#{number} isn't claimed"}
-        if not (args.human or claim_is_mine(repo, number, args, comments)):
+        stale_note = ""
+        if getattr(args, "stale", False) and not args.human and not claim_is_mine(repo, number, args, comments):
+            limit = int(setting_value(cfg, "stale_claim_days") or 0)
+            if limit <= 0:
+                raise RuntimeError("Releasing another chat's quiet claim is off here (stale_claim_days is 0). Tell "
+                                   "the owner: /triage stale frees it, or /haam-settings turns this on.")
+            if args.status:
+                raise RuntimeError("--stale releases the claim only; the status stays (In Progress goes back to Ready).")
+            run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=Path.cwd())
+            when, branches = claim_activity(number, comments, origin_branch_times(Path.cwd()))
+            q = quiet_days(when)
+            if q is None or q < limit:
+                raise RuntimeError(f"#{number} isn't quiet long enough to release: last sign of life "
+                                   + (f"{q:.1f} day(s) ago" if q is not None else "unknown")
+                                   + f", stale_claim_days is {limit}. Pick another issue.")
+            stale_note = (f"quiet for {q:.0f} day(s) (stale_claim_days {limit}), so the chat that claimed it has "
+                          "stopped; the next chat picks it up"
+                          + (f" and continues on branch `{branches[0]}`" if branches else ""))
+        elif not (args.human or claim_is_mine(repo, number, args, comments)):
             raise RuntimeError(f"#{number} is claimed by another chat. Give this chat's claim id (--claim, from your "
                                "claim's output or comment), or --human when the human asked you to release it "
-                               "(e.g. /triage stale).")
+                               "(e.g. /triage stale). A claim quiet for stale_claim_days: --stale.")
         asked = (args.status or [None])[-1]
         new = None
         if asked:
@@ -2774,7 +2859,7 @@ def issue_action(args, cfg, board):
         if new and new != iss["status"]:
             board.set_option(iss, "Status", new)
         tokens = ", ".join(t for t in (claim_token(c.get("body")) for c in claims) if t)
-        why = f" · {args.body}" if args.body else ""
+        why = "".join(f" · {x}" for x in (stale_note, args.body) if x)
         run(["gh", "issue", "comment", str(number), "-R", repo, "--body",
              f"{RELEASE_MARK}" + (f" ({tokens})" if tokens else "") + (f" · status {new}" if new else "") + why])
         return {"number": number, "status": new or iss["status"],
@@ -4540,8 +4625,9 @@ def cmd_settings(args):
             sys.exit(f"Unknown setting '{k}'. Settings: {', '.join(SETTING_KEYS)} (protected areas: config --protected)")
         opts = SETTING_KEYS[k][1]
         if opts is int:
-            if not v.isdigit() or int(v) < 1:
-                sys.exit(f"{k} must be a whole number of 1 or more")
+            low = 0 if k in INT_SETTINGS_ZERO_OK else 1
+            if not v.isdigit() or int(v) < low:
+                sys.exit(f"{k} must be a whole number of {low} or more")
             v = int(v)
         elif opts is str:
             if not v:
@@ -4907,6 +4993,7 @@ def cmd_review(args):
 WORKTREE_DIR = ".claude/worktrees"   # same place Claude Code uses, so both kinds are listed and cleaned together
 WORKTREE_INCLUDE = ".worktreeinclude"
 WORKTREE_IDLE_HOURS = 24
+WORKTREE_MERGED_PRS = 200     # merged PRs `worktree clean` reads (newest first) to tell shipped work from open work
 
 
 def git_out(cwd, *a):
@@ -4988,14 +5075,18 @@ def copy_includes(main, dest, cfg=None):
     return copied, skipped
 
 
-def list_worktrees(root, cfg=None):
+def list_worktrees(root, cfg=None, also=None):
+    """Every worktree of this clone. `haam_area` is True for one inside worktree_dir, .claude/worktrees or a folder
+    in `also` (worktree clean --also: a folder an older rule had agents use)."""
     _, main, _ = git_paths(root)
     if cfg is None and (main / CONFIG_NAME).exists():
         try:
             cfg = load_config(main)
         except SystemExit:
             cfg = {}
-    area = worktree_base(main, cfg)
+    # Claude Code makes its own worktrees in .claude/worktrees whatever worktree_dir says, so both count
+    areas = {worktree_base(main, cfg), (main / WORKTREE_DIR).resolve()}
+    areas |= {Path(a).expanduser().resolve() for a in also or []}
     out, cur = [], {}
     for line in git_out(main, "worktree", "list", "--porcelain").splitlines() + [""]:
         if not line:
@@ -5017,16 +5108,66 @@ def list_worktrees(root, cfg=None):
     for w in out:
         p = Path(w["path"])
         w["main"] = p.resolve() == main.resolve()
-        try:
-            w["haam_area"] = area in p.resolve().parents or p.resolve() == area
-        except ValueError:
-            w["haam_area"] = False
+        w["haam_area"] = any(a == p.resolve() or a in p.resolve().parents for a in areas)
         w["exists"] = p.exists()
     return out
 
 
-def worktree_finished(main, w, base, in_use=None, cfg=None):
-    """Decide whether a worktree can be removed without losing anything. Returns (ok, reason)."""
+class ShippedWork:
+    """Where a commit reached main, read once per `worktree clean`. A squash merge never makes a branch's tip an
+    ancestor of main, and with grouping: release an issue branch has no merged PR of its own (its commit went in
+    through the release PR), and its branch may stay on origin. So a commit counts as shipped when it is an
+    ancestor of main or of a merged PR's head. A merged PR's head that isn't here is fetched as pull/<n>/head."""
+
+    def __init__(self, main, base, cfg=None):
+        self.main, self.base, self.cfg = main, base, cfg or {}
+        self._commits = None
+
+    def _load(self):
+        self._commits = {}
+        cmd = ["gh", "pr", "list", "--state", "merged", "--limit", str(WORKTREE_MERGED_PRS),
+               "--json", "number,headRefOid,mergedAt"]
+        if self.cfg.get("github_repo"):
+            cmd += ["-R", self.cfg["github_repo"]]
+        code, out, _ = run(cmd, cwd=self.main)
+        try:
+            prs = [p for p in (json.loads(out or "[]") if code == 0 else []) if p.get("headRefOid")]
+        except ValueError:
+            prs = []
+        prs.sort(key=lambda p: p.get("mergedAt") or "", reverse=True)
+        missing = self._missing([p["headRefOid"] for p in prs])
+        if missing:     # deleted branches (a release branch, usually): GitHub keeps every PR's head as pull/<n>/head
+            run(["git", "fetch", "--quiet", "--no-tags", "origin"]
+                + [f"pull/{p['number']}/head" for p in prs if p["headRefOid"] in missing], cwd=self.main)
+            missing = self._missing(list(missing))
+        for p in reversed(prs):     # oldest first, so a commit in several PRs maps to the newest
+            if p["headRefOid"] in missing:
+                continue
+            for sha in git_out(self.main, "rev-list", p["headRefOid"], "--not", self.base).split():
+                self._commits[sha] = f"PR #{p['number']}"
+
+    def _missing(self, shas):
+        """The commits among `shas` this clone doesn't have (one git call for all of them)."""
+        if not shas:
+            return set()
+        _, out, _ = run(["git", "cat-file", "--batch-check"], cwd=self.main, input_text="\n".join(shas) + "\n")
+        return {line.split()[0] for line in out.splitlines() if line.endswith(" missing")}
+
+    def where(self, sha):
+        """'main', 'PR #<n>', or None when the commit isn't in main or in any recent merged PR."""
+        if not sha:
+            return None
+        if run(["git", "merge-base", "--is-ancestor", sha, self.base], cwd=self.main)[0] == 0:
+            return "main"
+        if self._commits is None:
+            self._load()
+        return self._commits.get(sha)
+
+
+def worktree_finished(main, w, base, in_use=None, cfg=None, shipped=None):
+    """Decide whether a worktree can be removed without losing anything. Returns (ok, reason).
+    `shipped` (a ShippedWork) lets a worktree whose commit already reached main through a merged PR go, even
+    while its branch is still on origin."""
     p = Path(w["path"])
     if w["main"]:
         return False, "main folder"
@@ -5036,7 +5177,8 @@ def worktree_finished(main, w, base, in_use=None, cfg=None):
             return False, "a program is running in it (an agent chat or a terminal?)"
     if not w["haam_area"]:
         label = worktree_dir_label(cfg)
-        return False, f"outside {label} (created by hand; remove it yourself)"
+        return False, (f"outside {label} (made by hand, or under an older rule: `worktree clean --also "
+                       f"{p.parent}` checks the worktrees in that folder too)")
     if w["locked"]:
         return False, "locked (an agent is using it)"
     if not w["exists"]:
@@ -5044,18 +5186,24 @@ def worktree_finished(main, w, base, in_use=None, cfg=None):
     # Last use, read before `git status` (which can rewrite the index and so reset its time)
     idx = Path(git_out(p, "rev-parse", "--absolute-git-dir") or p) / "index"
     idle = (time.time() - (idx.stat().st_mtime if idx.exists() else 0)) / 3600
-    changes = git_out(p, "status", "--porcelain")
+    changes = git_out(p, "--no-optional-locks", "status", "--porcelain")     # never rewrites the index (its time)
     if changes:
         return False, f"{len(changes.splitlines())} unsaved change(s)"
     unpushed = git_out(p, "rev-list", "--count", "HEAD", "--not", "--remotes") or "0"
     own = git_out(p, "rev-list", "--count", f"{base}..HEAD") or "0"
     pushed_before = bool(w["branch"]) and bool(git_out(p, "config", "--get", f"branch.{w['branch']}.merge"))
+    where = None
+    if shipped is not None and (own != "0" or pushed_before):
+        where = shipped.where(w.get("head") or git_out(p, "rev-parse", "HEAD"))
+        if where and idle >= WORKTREE_IDLE_HOURS:
+            return True, f"its work is in {where} (shipped) and it's been unused for {int(idle)}h"
+    waiting = f"its work is in {where} (shipped); removed once unused for {WORKTREE_IDLE_HOURS}h"
     if pushed_before:
         code, out, _ = run(["git", "ls-remote", "--heads", "origin", w["branch"]], cwd=main)
         if code != 0:
             return False, "couldn't reach origin to check the branch"
         if out:
-            return False, f"branch {w['branch']} still on origin (PR open?)"
+            return False, waiting if where else f"branch {w['branch']} still on origin (PR open?)"
         if unpushed == "0":
             return True, f"branch {w['branch']} is gone from origin (PR merged or closed)"
         code, prs, _ = run(["gh", "pr", "list", "--head", w["branch"], "--state", "all",
@@ -5072,7 +5220,7 @@ def worktree_finished(main, w, base, in_use=None, cfg=None):
         return False, f"{unpushed} commit(s) not pushed"
     if own == "0" and idle >= WORKTREE_IDLE_HOURS:
         return True, f"nothing of its own and unused for {int(idle)}h"
-    return False, "in use or recently created"
+    return False, waiting if where else "in use or recently created"
 
 
 def cmd_worktree(args):
@@ -5148,7 +5296,7 @@ def cmd_worktree(args):
         return
 
     base = default_base(main)
-    trees = list_worktrees(root, cfg)
+    trees = list_worktrees(root, cfg, getattr(args, "also", None))
     if act == "list":
         if args.json:
             print(json.dumps(trees, indent=2))
@@ -5167,10 +5315,11 @@ def cmd_worktree(args):
         rep.section("Worktrees")
         remove = []
         in_use = paths_in_use()
+        shipped = ShippedWork(main, base, cfg)
         for w in trees:
             if w["main"]:
                 continue
-            ok, why = worktree_finished(main, w, base, in_use, cfg)
+            ok, why = worktree_finished(main, w, base, in_use, cfg, shipped)
             rep.add("ok" if ok else "info", f"{'remove' if ok else 'keep'}: {w['path']}", why)
             if ok:
                 remove.append(w)
@@ -5178,7 +5327,8 @@ def cmd_worktree(args):
             rep.add("ok", "Nothing to clean")
         elif not args.apply:
             rep.action(WHO_AGENT, f"Remove {len(remove)} finished worktree(s)",
-                       "python3 tools/haam/haam.py worktree clean --apply")
+                       "python3 tools/haam/haam.py worktree clean --apply"
+                       + "".join(f" --also {shlex.quote(a)}" for a in getattr(args, "also", None) or []))
         else:
             for w in remove:
                 if Path(w["path"]).exists():
@@ -5195,6 +5345,7 @@ def cmd_worktree(args):
 EXCLUSIVE_LOCK = "haam-exclusive.lock"
 EXCLUSIVE_QUEUE = "haam-exclusive.lock.queue"   # one ticket per waiter, so the lock goes to the longest-waiting
 EXCLUSIVE_SELF = re.compile(r"haam\.py['\"]?\s+exclusive(\s|$)")
+EXCLUSIVE_HELD_ENV = "HAAM_EXCLUSIVE_HELD"       # "<pid>@<lock>", set for everything the lock's holder runs
 REMOTE_RUNNER_ENV = "HAAM_REMOTE_RUNNER"         # an ssh host this machine may hand heavy `make` runs to
 REMOTE_REPO_ENV = "HAAM_REMOTE_REPO"             # the clone's path there (default: this clone's path under ~)
 REMOTE_CHECK_SECONDS = 60.0
@@ -5295,7 +5446,9 @@ class MachineTurn:
         self.ticket = None
         self.remote_free = remote_free
         self.held = False
+        self.nested = False
         self._old = {}
+        self._old_env = None
 
     def _owner(self):
         try:
@@ -5343,8 +5496,39 @@ class MachineTurn:
             ahead.append(name)
         return ahead
 
+    def _inside_holder(self):
+        """The lock's holder started this run (a check script that takes the lock for its heavy steps, run through
+        exclusive itself). It already has the machine: waiting would wait for its own parent until the timeout,
+        with every other chat queued behind. Known by HAAM_EXCLUSIVE_HELD, or by the holder's pid among this
+        process's ancestors when something cleared the environment."""
+        owner = self._owner()
+        if not owner or owner.get("host") != (os.uname().nodename if hasattr(os, "uname") else ""):
+            return None
+        try:
+            pid = int(owner.get("pid") or 0)
+        except (TypeError, ValueError):
+            return None
+        if pid <= 0 or not pid_alive(pid):
+            return None
+        if os.environ.get(EXCLUSIVE_HELD_ENV) == f"{pid}@{self.lock}":
+            return owner
+        parent = {p_: pp for p_, pp, _, _ in process_table() or []}
+        x, seen = os.getppid(), set()
+        while x and x not in seen:
+            if x == pid:
+                return owner
+            seen.add(x)
+            x = parent.get(x)
+        return None
+
     def _acquire(self):
         told, told_ahead, next_remote = False, None, 0.0
+        holder = self._inside_holder()
+        if holder:
+            self.nested = True
+            self.say(f"{INFO} {self.who}: inside {holder.get('who', '?')}'s turn (pid {holder.get('pid')}), "
+                     "which already holds the machine: running straight through.")
+            return True
         self._enqueue()
         while True:
             ahead = self._ahead()
@@ -5400,6 +5584,8 @@ class MachineTurn:
                 "who": self.who, "pid": os.getpid(), "host": os.uname().nodename if hasattr(os, "uname") else "",
                 "since": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
             self.held = True
+            self._old_env = os.environ.get(EXCLUSIVE_HELD_ENV)   # what this run starts inherits it (nested calls)
+            os.environ[EXCLUSIVE_HELD_ENV] = f"{os.getpid()}@{self.lock}"
             self._dequeue()     # holding the lock now: the next ticket in line waits for it
             return True
 
@@ -5431,6 +5617,11 @@ class MachineTurn:
             if not owner or owner.get("pid") == os.getpid():
                 shutil.rmtree(self.lock, ignore_errors=True)
             self.held = False
+            if self._old_env is None:
+                os.environ.pop(EXCLUSIVE_HELD_ENV, None)
+            else:
+                os.environ[EXCLUSIVE_HELD_ENV] = self._old_env
+            self._old_env = None
 
     def _on_signal(self, signum, _frame):
         raise SystemExit(128 + signum)
@@ -5440,7 +5631,7 @@ class MachineTurn:
             if hasattr(signal, sig):
                 self._old[sig] = signal.signal(getattr(signal, sig), self._on_signal)
         try:
-            if not self._acquire() or not self._wait_quiet():
+            if not self._acquire() or (not self.nested and not self._wait_quiet()):
                 raise TimeoutError
         except BaseException:
             self.__exit__(None, None, None)
@@ -6156,6 +6347,17 @@ def cmd_doctor(args):
     others = [w for w in list_worktrees(root, cfg) if not w["main"]]
     if others:
         rep.add("info", f"{len(others)} other worktree(s)", "python3 tools/haam/haam.py worktree list")
+    tool_own = (main_dir / ".haam").resolve()      # ship's and local-ci's short-lived checkouts
+    stray_w = [w for w in others if not w["haam_area"] and tool_own not in Path(w["path"]).resolve().parents]
+    stray = sorted({str(Path(w["path"]).parent) for w in stray_w})
+    if stray:
+        n = len(stray_w)
+        rep.add("warn", f"{n} worktree(s) outside {wt_label}: worktree clean never removes them",
+                "in " + ", ".join(stray[:3]) + (" …" if len(stray) > 3 else "")
+                + ". If your project's rules tell agents to use another folder, point them at "
+                f"{wt_label} (or set worktree_dir to it)")
+        rep.action(WHO_AGENT, "See which of them are finished, then remove those with --apply",
+                   "python3 tools/haam/haam.py worktree clean " + " ".join(f"--also {shlex.quote(d)}" for d in stray[:3]))
 
     if admin and have("gh") and cfg.get("github_repo") and run(["gh", "auth", "status"])[0] == 0:
         repo = cfg["github_repo"]
@@ -6295,7 +6497,7 @@ def main():
     p.set_defaults(func=cmd_github_project)
 
     p = common(sub.add_parser("issue", help="work with issues on the GitHub Projects board (for agents)"))
-    p.add_argument("action", choices=["list", "create", "view", "add", "claim", "release", "status", "priority",
+    p.add_argument("action", choices=["list", "stale", "create", "view", "add", "claim", "release", "status", "priority",
                                       "label", "comment", "close", "link", "unlink", "children", "edit", "fields"])
     p.add_argument("number", nargs="?", help="issue number (#123 or 123)")
     p.add_argument("value", nargs="?", help="new status or priority")
@@ -6327,6 +6529,10 @@ def main():
     p.add_argument("--force", action="store_true", help="claim: allow a non-Ready issue (bugs); status: move an issue "
                    "another chat has claimed (only when the human asked)")
     p.add_argument("--human", action="store_true", help="a human ran the human-only skill for this change")
+    p.add_argument("--stale", action="store_true", help="release: another chat's claim quiet for stale_claim_days "
+                   "(no comment, no commit on its branch); refused when that setting is 0 or it isn't that quiet")
+    p.add_argument("--days", type=float, help="stale: list claims quiet this many days (default: stale_claim_days, "
+                   f"or {STALE_CLAIM_LIST_DAYS} when that is 0)")
     p.set_defaults(func=cmd_issue)
 
     p = sub.add_parser("sync-pr", help=argparse.SUPPRESS)
@@ -6459,6 +6665,8 @@ def main():
     p.add_argument("name", nargs="?", help="new: worktree name (default: agent-xxxx)")
     p.add_argument("--base", help="new: start from this ref (default: origin's default branch)")
     p.add_argument("--apply", action="store_true", help="clean: actually remove finished worktrees")
+    p.add_argument("--also", action="append", metavar="FOLDER",
+                   help="list/clean: also treat worktrees in FOLDER as agents' (one an older rule had them use)")
     p.set_defaults(func=cmd_worktree)
 
     p = common(sub.add_parser("invite", help="invite a developer"))

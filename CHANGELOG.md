@@ -4,6 +4,25 @@ All notable changes to the HAAM kit. The format follows [Keep a Changelog](https
 
 Each release lists **Migration** steps when a project needs to do more than run `haam.py update`.
 
+## [1.19.0] - 2026-11-13
+
+Four problems one busy test-first project found, with `grouping: release` and 5–10 agent chats a day on one machine.
+
+### Fixed
+- **`worktree clean` removes worktrees whose work shipped in a release PR.** With `grouping: release`, ship squash-merges a release branch into main. An issue branch's tip then never becomes an ancestor of main, its branch stays on origin, and it has no merged PR of its own. So clean kept every such worktree as "still on origin (PR open?)", and one project reached 179 worktrees and a full disk. Clean now reads the recent merged PRs once per run. A worktree with nothing unsaved, unused for 24h, whose commit is in main or in a merged PR's head, counts as finished, whatever its branch on origin says. A merged PR's head that isn't here (a deleted release branch) is fetched as `pull/<n>/head`. This also covers per-issue PRs in repositories that keep merged branches.
+- **`worktree clean` no longer resets a worktree's idle time.** Its `git status` could rewrite the worktree's index, which is the clock clean reads as "last used", so a worktree could keep looking freshly used. It now runs `git --no-optional-locks status`.
+- **A nested `haam exclusive` no longer deadlocks the machine.** A command run through `exclusive` that calls `exclusive` itself (a check script that takes the lock for its heavy steps) used to wait for its own parent until the timeout, with every other chat queued behind it. A run started by the lock's holder now runs straight through. The holder exports `HAAM_EXCLUSIVE_HELD` to what it runs, and the holder's pid among the caller's ancestors also counts, for when the environment was cleared. `local-ci` gets the same.
+- **Claude Code's own worktrees are cleaned when `worktree_dir` points elsewhere.** `.claude/worktrees` always counts as agents' worktrees.
+
+### Added
+- **`worktree clean --also <folder>`** treats the worktrees in an older folder as agents' for that run, for a project whose rules once had agents use a different place. `doctor` now warns about worktrees outside `worktree_dir`, names their folders and suggests the command.
+- **Claims from chats that stopped.** `issue stale` lists claimed issues (`In Progress` or `claimed`) with no comment and no commit on their branch for N days. The new setting `stale_claim_days` is the owner's choice, 0 (off) by default. Above 0, `/next` releases those claims with `issue release <n> --stale`, which checks the quiet time itself, comments where the work is, and moves `In Progress` back to `Ready`, so the next chat picks the work up on its branch. At 0, `/next` only lists them for the owner, and `/triage stale` starts from the same list.
+
+### Migration
+- `haam.py update`.
+- Optional: `settings --set stale_claim_days=7 --human` (or `/haam-settings`) to let agents free claims from chats that stopped.
+- If agents ever made worktrees outside `worktree_dir`, run `doctor`, then `worktree clean --also <folder>` (plan) and again with `--apply`.
+
 ## [1.18.0] - 2026-10-30
 
 ### Added
@@ -488,7 +507,10 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.16.0...HEAD
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.19.0...HEAD
+[1.19.0]: https://github.com/jorgedpl/haam-kit/compare/v1.18.0...v1.19.0
+[1.18.0]: https://github.com/jorgedpl/haam-kit/compare/v1.17.0...v1.18.0
+[1.17.0]: https://github.com/jorgedpl/haam-kit/compare/v1.16.0...v1.17.0
 [1.16.0]: https://github.com/jorgedpl/haam-kit/compare/v1.15.1...v1.16.0
 [1.15.1]: https://github.com/jorgedpl/haam-kit/compare/v1.15.0...v1.15.1
 [1.15.0]: https://github.com/jorgedpl/haam-kit/compare/v1.14.0...v1.15.0

@@ -4,6 +4,11 @@ All notable changes to the HAAM kit. The format follows [Keep a Changelog](https
 
 Each release lists **Migration** steps when a project needs to do more than run `haam.py update`.
 
+## [Unreleased]
+
+### Fixed
+- **`exclusive` hands a run to the other machine only when that machine can run it.** Before handing a waiting `make` run to `HAAM_REMOTE_RUNNER`, it now runs `make --version` there, in the same login shell the run uses. A runner that fails it isn't counted as free: the run waits here instead, with one warning that names the runner and its first error line. Before, a runner that couldn't run `make` (for example a new Xcode whose licence nobody had accepted, where every `make` exits 69) failed every run it was handed at once. By design such a run is never repeated here, so each one looked like a failed check of the change.
+
 ## [1.19.0] - 2026-11-13
 
 Four problems one busy test-first project found, with `grouping: release` and 5–10 agent chats a day on one machine.

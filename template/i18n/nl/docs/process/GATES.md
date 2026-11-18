@@ -7,7 +7,7 @@ Tussen een idee en productie staan vijf gates. Elke gate heeft een duidelijke ei
 | **G1 Decision** | Discovery → Backlog | Mens (PO) | Status in de tracker: alleen mensen voeren `/decide` uit |
 | **G2 Ready** | Backlog → Ready | Mens keurt de spec goed | Label `agent-ready`; agents bouwen alleen issues met `agent-ready` |
 | **G3 Verified** | In Progress → UAT | Geautomatiseerde checks + onafhankelijke reviewer-agent (+ mens voor beschermde gebieden) | Verplichte checks `ci`, `secrets`, `dependencies`, `ai-review`, `security-review` |
-| **G4 Accepted** | UAT → merge | Menselijke tester | Verplichte check `release-gate` (vereist het PR-label `uat-passed` of `gate-override`) |
+| **G4 Accepted** | UAT → merge | Menselijke tester | Verplichte check `release-gate` (vereist het PR-label `uat-passed` of `gate-override`). Alleen labels van de eigenaar of een vervangende goedkeurder tellen. |
 | **G5 Released** | merge → productie | Mens (PO) | GitHub-environment `production` met verplichte reviewer |
 
 De tabel toont de volgorde van checks-first. In de standaardflow test-first komt G4 vóór G3: je test eerst de branch van de agent, en daarna draaien de checks één keer op wat je hebt goedgekeurd (zie de checklist van G4).
@@ -70,7 +70,7 @@ De review bestaat uit lagen, zodat **geen enkele agent ooit zijn eigen werk revi
 **Regels voor de reviewcyclus**
 - De bouwende agent leest het commentaar van de reviewer, lost elk **Blocking**-item op en pusht; de reviews draaien automatisch opnieuw.
 - Als de bouwende agent vindt dat een bevinding niet klopt, antwoordt hij op de PR met uitleg waarom en vraagt hij het de mens. Hij blijft nooit in cirkels discussiëren: **na twee reviewrondes** die nog steeds falen, stopt hij en draagt hij het over aan de mens.
-- Alleen een mens kan een AI-review overrulen, met het PR-label `ai-review-overruled`. Dit wordt op de PR vastgelegd.
+- Alleen een mens kan een AI-review overrulen, met het PR-label `ai-review-overruled`. Dit wordt op de PR vastgelegd. Het telt alleen als het account dat het toevoegde `product_owner_github` of een van `backup_approvers_github` in `haam.config.json` op de basisbranch is, nooit een bot.
 - AI-reviewers kunnen niet goedkeuren of mergen. Ze kunnen alleen blokkeren.
 
 ### Als er ooit een secret op GitHub belandt
@@ -114,7 +114,7 @@ Soms staat productie in brand of wacht een deadline niet. Daarvoor zijn override
 ### Niveau 1: UAT overslaan (meest voorkomend)
 Gebruik dit als de fix dringend is en door tests geverifieerd, maar er geen tijd is voor een volledige UAT-cyclus.
 
-1. De mens voert `/override <ID> "<reason>"` uit (voor een PR zonder issue: `/override PR <number> "<reason>"`), of plaatst met de hand het commentaar `OVERRIDE: <reason>` op de PR (het commentaar moet beginnen met `OVERRIDE:`) en voegt het PR-label `gate-override` toe.
+1. De mens voert `/override <ID> "<reason>"` uit (voor een PR zonder issue: `/override PR <number> "<reason>"`), of plaatst met de hand het commentaar `OVERRIDE: <reason>` op de PR (het commentaar moet beginnen met `OVERRIDE:`) en voegt het PR-label `gate-override` toe. Beide tellen alleen vanaf het account van de eigenaar of een vervangende goedkeurder (`product_owner_github`, `backup_approvers_github` in `haam.config.json` op main), nooit van een bot; hetzelfde geldt voor `uat-passed` en voor de `uat:skip` van de issue. Zolang agents zich bij GitHub aanmelden als de eigenaar, kan GitHub de eigenaar niet van een agent onderscheiden: dit houdt bots en elk ander account tegen, niet een agent die de regels negeert. De release-gate draait vanuit de kopie van `gates.yml` op main (`pull_request_target`), dus een PR kan de gate die hem beoordeelt niet herschrijven.
 2. De check `release-gate` slaagt op het override-label.
 3. CI (check `ci`) **moet nog steeds slagen**.
 4. Als de PR een issue heeft, maakt de agent een vervolgissue aan in de tracker: `Post-override UAT for <ID>` (prioriteit High, label `stream:bug`, `override-followup`), zodat de overgeslagen verificatie achteraf toch gebeurt.

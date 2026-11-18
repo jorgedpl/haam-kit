@@ -7,7 +7,7 @@ Zwischen einer Idee und der Produktion stehen fünf Gates. Jedes hat eine klare 
 | **G1 Decision** | Discovery → Backlog | Mensch (PO) | Status im Tracker: Nur Menschen führen `/decide` aus |
 | **G2 Ready** | Backlog → Ready | Mensch gibt die Spec frei | Label `agent-ready`; Agenten bauen nur Issues mit `agent-ready` |
 | **G3 Verified** | In Progress → UAT | Automatische Checks + unabhängiger Reviewer-Agent (+ Mensch für geschützte Bereiche) | Erforderliche Checks `ci`, `secrets`, `dependencies`, `ai-review`, `security-review` |
-| **G4 Accepted** | UAT → Merge | Testende Person | Erforderlicher Check `release-gate` (braucht das PR-Label `uat-passed` oder `gate-override`) |
+| **G4 Accepted** | UAT → Merge | Testende Person | Erforderlicher Check `release-gate` (braucht das PR-Label `uat-passed` oder `gate-override`). Es zählen nur die Labels des Owners oder einer Vertretung. |
 | **G5 Released** | Merge → Produktion | Mensch (PO) | GitHub-Environment `production` mit verpflichtendem Reviewer |
 
 Die Tabelle zeigt die Reihenfolge bei checks-first. Im Standardablauf test-first kommt G4 vor G3: Du testest zuerst den Branch des Agenten, dann laufen die Checks einmal auf dem, was du bestanden hast (siehe die Checkliste für G4).
@@ -70,7 +70,7 @@ Das Review ist in Schichten aufgebaut, damit **kein Agent je seine eigene Arbeit
 **Regeln für die Review-Schleife**
 - Der bauende Agent liest den Kommentar des Reviewers, behebt jeden **Blocking**-Punkt und pusht; die Reviews laufen automatisch erneut.
 - Hält der bauende Agent einen Befund für falsch, antwortet er im PR mit einer Begründung und fragt den Menschen. Er diskutiert nie im Kreis: **Nach zwei Review-Runden**, die immer noch fehlschlagen, hört er auf und übergibt an den Menschen.
-- Nur ein Mensch kann ein KI-Review überstimmen, mit dem PR-Label `ai-review-overruled`. Das wird im PR festgehalten.
+- Nur ein Mensch kann ein KI-Review überstimmen, mit dem PR-Label `ai-review-overruled`. Das wird im PR festgehalten. Es zählt nur, wenn das Konto, das es gesetzt hat, `product_owner_github` oder eines der `backup_approvers_github` in `haam.config.json` auf dem Basis-Branch ist, nie ein Bot.
 - KI-Reviewer können nicht freigeben oder mergen. Sie können nur blockieren.
 
 ### Falls je ein Secret auf GitHub landet
@@ -114,7 +114,7 @@ Manchmal brennt die Produktion, oder eine Frist wartet nicht. Dafür gibt es Ove
 ### Stufe 1: UAT überspringen (am häufigsten)
 Nutze das, wenn der Fix dringend und durch Tests geprüft ist, aber keine Zeit für einen vollen UAT-Zyklus bleibt.
 
-1. Der Mensch führt `/override <ID> "<reason>"` aus (für einen PR ohne Issue: `/override PR <number> "<reason>"`) oder kommentiert von Hand `OVERRIDE: <reason>` im PR (der Kommentar muss mit `OVERRIDE:` beginnen) und setzt das PR-Label `gate-override`.
+1. Der Mensch führt `/override <ID> "<reason>"` aus (für einen PR ohne Issue: `/override PR <number> "<reason>"`) oder kommentiert von Hand `OVERRIDE: <reason>` im PR (der Kommentar muss mit `OVERRIDE:` beginnen) und setzt das PR-Label `gate-override`. Beides zählt nur vom Konto des Owners oder einer Vertretung (`product_owner_github`, `backup_approvers_github` in `haam.config.json` auf main), nie von einem Bot; dasselbe gilt für `uat-passed` und das `uat:skip` des Issues. Solange Agenten sich bei GitHub als der Owner anmelden, kann GitHub den Owner nicht von einem Agenten unterscheiden: Das hält Bots und jedes andere Konto auf, nicht einen Agenten, der die Regeln ignoriert. Das Release-Gate läuft aus der Kopie von `gates.yml` auf main (`pull_request_target`), ein PR kann also das Gate, das ihn prüft, nicht umschreiben.
 2. Der Check `release-gate` besteht durch das Override-Label.
 3. Die CI (Check `ci`) **muss trotzdem bestehen**.
 4. Hat der PR ein Issue, legt der Agent ein Folge-Issue im Tracker an: `Post-override UAT for <ID>` (Priorität High, Label `stream:bug`, `override-followup`), damit die übersprungene Prüfung nachträglich doch noch stattfindet.

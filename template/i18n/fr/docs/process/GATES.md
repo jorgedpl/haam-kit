@@ -7,7 +7,7 @@ Cinq portes séparent une idée de la production. Chacune a un responsable clair
 | **G1 Decision** | Discovery → Backlog | Humain (PO) | Statut dans l'outil de suivi : seuls des humains lancent `/decide` |
 | **G2 Ready** | Backlog → Ready | Un humain approuve la spec | Label `agent-ready` ; les agents ne construisent que les issues `agent-ready` |
 | **G3 Verified** | In Progress → UAT | Vérifications automatiques + agent relecteur indépendant (+ humain pour les zones protégées) | Vérifications requises `ci`, `secrets`, `dependencies`, `ai-review`, `security-review` |
-| **G4 Accepted** | UAT → fusion | Testeur humain | Vérification requise `release-gate` (demande le label de PR `uat-passed` ou `gate-override`) |
+| **G4 Accepted** | UAT → fusion | Testeur humain | Vérification requise `release-gate` (demande le label de PR `uat-passed` ou `gate-override`). Seuls comptent les labels du propriétaire ou d'un approbateur suppléant. |
 | **G5 Released** | fusion → production | Humain (PO) | Environnement GitHub `production` avec relecteur obligatoire |
 
 Le tableau montre l'ordre « vérifications d'abord ». Dans le flux par défaut « test d'abord », G4 vient avant G3 : vous testez d'abord la branche de l'agent, puis les vérifications tournent une seule fois sur ce que vous avez validé (voir la liste de contrôle de G4).
@@ -70,7 +70,7 @@ La revue est organisée en couches pour qu'**aucun agent ne relise jamais son pr
 **Règles de la boucle de revue**
 - L'agent qui construit lit le commentaire du relecteur, corrige chaque point **Blocking** et pousse ; les revues se relancent automatiquement.
 - Si l'agent qui construit pense qu'une remarque est fausse, il répond dans la PR en expliquant pourquoi et demande à l'humain. Il ne tourne jamais en rond : **après deux tours de revue** toujours en échec, il s'arrête et passe la main à l'humain.
-- Seul un humain peut passer outre une revue IA, avec le label de PR `ai-review-overruled`. Cela reste enregistré dans la PR.
+- Seul un humain peut passer outre une revue IA, avec le label de PR `ai-review-overruled`. Cela reste enregistré dans la PR. Il ne compte que si le compte qui l'a ajouté est `product_owner_github` ou l'un des `backup_approvers_github` dans `haam.config.json` sur la branche de base, jamais un bot.
 - Les relecteurs IA ne peuvent ni approuver ni fusionner. Ils peuvent seulement bloquer.
 
 ### Si un secret arrive un jour sur GitHub
@@ -114,7 +114,7 @@ Parfois la production est en feu ou une échéance ne peut pas attendre. Les dé
 ### Niveau 1 : sauter l'UAT (le plus courant)
 À utiliser quand la correction est urgente et vérifiée par des tests, mais qu'il n'y a pas le temps de faire un cycle UAT complet.
 
-1. L'humain lance `/override <ID> "<reason>"` (pour une PR sans issue : `/override PR <number> "<reason>"`), ou commente à la main `OVERRIDE: <reason>` dans la PR (le commentaire doit commencer par `OVERRIDE:`) et ajoute le label de PR `gate-override`.
+1. L'humain lance `/override <ID> "<reason>"` (pour une PR sans issue : `/override PR <number> "<reason>"`), ou commente à la main `OVERRIDE: <reason>` dans la PR (le commentaire doit commencer par `OVERRIDE:`) et ajoute le label de PR `gate-override`. Les deux ne comptent que venant du compte du propriétaire ou d'un approbateur suppléant (`product_owner_github`, `backup_approvers_github` dans `haam.config.json` sur main), jamais d'un bot ; de même pour `uat-passed` et pour le `uat:skip` de l'issue. Tant que les agents se connectent à GitHub sous le compte du propriétaire, GitHub ne peut pas distinguer le propriétaire d'un agent : cela arrête les bots et tout autre compte, pas un agent qui ignore les règles. Le contrôle de release s'exécute depuis la copie de `gates.yml` sur main (`pull_request_target`), donc une PR ne peut pas réécrire le contrôle qui la juge.
 2. La vérification `release-gate` passe grâce au label de dérogation.
 3. La CI (vérification `ci`) **doit toujours passer**.
 4. Quand la PR a une issue, l'agent crée une issue de suivi dans l'outil de suivi : `Post-override UAT for <ID>` (priorité High, label `stream:bug`, `override-followup`), pour que la vérification sautée ait quand même lieu après coup.

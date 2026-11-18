@@ -7,7 +7,7 @@ Entre una idea y producción hay cinco puertas. Cada una tiene un responsable cl
 | **G1 Decision** | Discovery → Backlog | Persona (PO) | Estado del tracker: solo las personas ejecutan `/decide` |
 | **G2 Ready** | Backlog → Ready | Una persona aprueba la especificación | Etiqueta `agent-ready`; los agentes solo construyen issues `agent-ready` |
 | **G3 Verified** | In Progress → UAT | Comprobaciones automáticas + agente revisor independiente (+ persona en las áreas protegidas) | Comprobaciones obligatorias `ci`, `secrets`, `dependencies`, `ai-review`, `security-review` |
-| **G4 Accepted** | UAT → fusión | Persona que prueba | Comprobación obligatoria `release-gate` (necesita la etiqueta de PR `uat-passed` o `gate-override`) |
+| **G4 Accepted** | UAT → fusión | Persona que prueba | Comprobación obligatoria `release-gate` (necesita la etiqueta de PR `uat-passed` o `gate-override`). Solo cuentan las etiquetas del propietario o de un aprobador suplente. |
 | **G5 Released** | fusión → producción | Persona (PO) | Entorno de GitHub `production` con revisor obligatorio |
 
 La tabla muestra el orden checks-first. En el flujo predeterminado test-first, G4 va antes que G3: primero pruebas la rama del agente y después las comprobaciones se ejecutan una vez sobre lo que aprobaste (ver la lista de comprobación de G4).
@@ -70,7 +70,7 @@ La revisión va por capas, de modo que **ningún agente revisa nunca su propio t
 **Reglas del ciclo de revisión**
 - El agente que construye lee el comentario del revisor, corrige cada elemento **Blocking** y hace push; las revisiones se vuelven a ejecutar automáticamente.
 - Si el agente que construye cree que un hallazgo es erróneo, responde en la PR explicando por qué y pregunta a la persona. Nunca discute en círculos: **tras dos rondas de revisión** que siguen fallando, se detiene y pasa el testigo a la persona.
-- Solo una persona puede imponerse a una revisión de IA, con la etiqueta de PR `ai-review-overruled`. Esto queda registrado en la PR.
+- Solo una persona puede imponerse a una revisión de IA, con la etiqueta de PR `ai-review-overruled`. Esto queda registrado en la PR. Solo cuenta cuando la cuenta que la añadió es `product_owner_github` o una de `backup_approvers_github` en `haam.config.json` de la rama base, nunca un bot.
 - Los revisores de IA no pueden aprobar ni fusionar. Solo pueden bloquear.
 
 ### Si un secreto llega alguna vez a GitHub
@@ -114,7 +114,7 @@ A veces producción está ardiendo o un plazo no puede esperar. Las anulaciones 
 ### Nivel 1: saltarse la UAT (el más habitual)
 Úsalo cuando la corrección es urgente y está verificada por pruebas, pero no hay tiempo para un ciclo completo de UAT.
 
-1. La persona ejecuta `/override <ID> "<reason>"` (para una PR sin issue: `/override PR <number> "<reason>"`), o comenta a mano `OVERRIDE: <reason>` en la PR (el comentario debe empezar por `OVERRIDE:`) y añade la etiqueta de PR `gate-override`.
+1. La persona ejecuta `/override <ID> "<reason>"` (para una PR sin issue: `/override PR <number> "<reason>"`), o comenta a mano `OVERRIDE: <reason>` en la PR (el comentario debe empezar por `OVERRIDE:`) y añade la etiqueta de PR `gate-override`. Ambas cuentan solo desde la cuenta del propietario o de un aprobador suplente (`product_owner_github`, `backup_approvers_github` en `haam.config.json` de main), nunca un bot; lo mismo vale para `uat-passed` y para el `uat:skip` de la issue. Mientras los agentes entren en GitHub como el propietario, GitHub no puede distinguir al propietario de un agente: esto frena a los bots y a cualquier otra cuenta, no a un agente que ignore las reglas. La puerta de release se ejecuta desde la copia de `gates.yml` en main (`pull_request_target`), así que un PR no puede reescribir la puerta que lo juzga.
 2. La comprobación `release-gate` se supera gracias a la etiqueta de anulación.
 3. La CI (comprobación `ci`) **tiene que pasar igualmente**.
 4. Cuando la PR tiene un issue, el agente crea un issue de seguimiento en el tracker: `Post-override UAT for <ID>` (prioridad High, etiqueta `stream:bug`, `override-followup`), para que la verificación que se saltó se haga igualmente a posteriori.

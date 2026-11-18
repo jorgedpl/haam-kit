@@ -76,7 +76,11 @@ const pr = Object.assign({ number: 7, title: '#12: Bump deps', head: { ref: '12-
 const issue = (n) => scenario.issues[n] === undefined ? null : Object.assign({ state: 'open', labels: [] },
   Array.isArray(scenario.issues[n]) ? { labels: scenario.issues[n] } : scenario.issues[n]);
 const github = {
-  paginate: async (fn) => fn === 'files' ? scenario.files : fn === 'pulls' ? [pr] : fn === 'commits' ? (scenario.commits || []) : [],
+  // Every label was added by the owner unless the scenario names another login (the gate counts only the owner's).
+  paginate: async (fn, params) => fn === 'files' ? scenario.files : fn === 'pulls' ? [pr] : fn === 'commits' ? (scenario.commits || [])
+    : fn === 'events' ? (params.issue_number === pr.number ? pr.labels.map(l => l.name) : (issue(params.issue_number) || { labels: [] }).labels)
+        .map(name => ({ event: 'labeled', label: { name }, actor: { login: scenario.labeller || 'octo-owner', type: 'User' } }))
+    : fn === 'comments' ? (scenario.comments || []) : [],
   rest: {
     pulls: { get: async () => ({ data: pr }), listFiles: 'files', list: 'pulls', listCommits: 'commits' },
     issues: { get: async ({ issue_number }) => {
@@ -84,15 +88,16 @@ const github = {
                 if (!i) throw new Error('Not Found');
                 return { data: Object.assign({}, i, { labels: i.labels.map(n => ({ name: n })) }) };
               },
-              listComments: 'comments', removeLabel: async () => {}, createComment: async () => {},
+              listComments: 'comments', listEvents: 'events', removeLabel: async () => {}, createComment: async () => {},
               addLabels: async (x) => calls.labels.push(...x.labels) },
-    repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify(Object.assign({ tracker: scenario.tracker },
+    repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify(Object.assign({ tracker: scenario.tracker,
+                 product_owner_github: scenario.owner === undefined ? 'octo-owner' : scenario.owner },
                  scenario.protected ? { protected_paths: scenario.protected } : {},
                  scenario.uat ? { uat: scenario.uat } : {}))).toString('base64') } }),
              createCommitStatus: async (x) => calls.statuses.push(x), listCommitStatusesForRef: 'statuses' },
   },
 };
-const context = { repo: { owner: 'o', repo: 'r' }, eventName: scenario.event || 'pull_request',
+const context = { repo: { owner: 'o', repo: 'r' }, eventName: scenario.event || 'pull_request_target',
   payload: scenario.event === 'issues' ? { action: 'unlabeled', issue: { number: 12 } }
                                        : { action: 'labeled', pull_request: { number: 7 } } };
 process.env.REVIEW_MODE = scenario.review || '';
@@ -231,7 +236,7 @@ class TestRepository(unittest.TestCase):
     def test_override_comment_satisfies_the_gate(self):
         """The comment /override posts must be one gates.yml accepts, and one that starts a gate run."""
         gates = (KIT / ".github/workflows/gates.yml").read_text()
-        js = re.search(r"comments\.find\(c =>\s*/(.+?)/\.test\(c\.body\)\)", gates).group(1)
+        js = re.search(r"comments\.filter\(c =>\s*/(.+?)/\.test\(c\.body\)\)", gates).group(1)
         accepts = re.compile(js.replace("\\/", "/"))
         triggers = re.findall(r"startsWith\(github\.event\.comment\.body, '([^']+)'\)", gates)
         skill = (KIT / ".agents/skills/override/SKILL.md").read_text()

@@ -7,7 +7,7 @@ Five gates stand between an idea and production. Each one has a clear owner, a c
 | **G1 Decision** | Discovery → Backlog | Human (PO) | Tracker status: only humans run `/decide` |
 | **G2 Ready** | Backlog → Ready | Human approves spec | `agent-ready` label; agents only build `agent-ready` issues |
 | **G3 Verified** | In Progress → UAT | Automated checks + independent reviewer agent (+ human for protected areas) | Required checks `ci`, `secrets`, `dependencies`, `ai-review`, `security-review` |
-| **G4 Accepted** | UAT → merge | Human tester | Required check `release-gate` (needs PR label `uat-passed` or `gate-override`) |
+| **G4 Accepted** | UAT → merge | Human tester | Required check `release-gate` (needs PR label `uat-passed` or `gate-override`). Only the owner's or a backup approver's labels count. |
 | **G5 Released** | merge → production | Human (PO) | GitHub environment `production` with required reviewer |
 
 The table shows the checks-first order. In the default test-first flow, G4 comes before G3: you test the agent's branch first, then the checks run once on what you passed (see the G4 checklist).
@@ -70,7 +70,7 @@ Review is layered so that **no agent ever reviews its own work** and **secrets a
 **Rules for the review loop**
 - The building agent reads the reviewer's comment, fixes every **Blocking** item and pushes; the reviews re-run automatically.
 - If the building agent believes a finding is wrong, it replies on the PR explaining why and asks the human. It never argues in circles: **after two review rounds** that still fail, it stops and hands over to the human.
-- Only a human can overrule an AI review, with the PR label `ai-review-overruled`. This is recorded on the PR.
+- Only the owner (or a backup approver) can overrule an AI review, with the PR label `ai-review-overruled`. This is recorded on the PR. It counts only when the login that added it is `product_owner_github` or one of `backup_approvers_github` in `haam.config.json` on the base branch, never a bot.
 - AI reviewers can't approve or merge. They can only block.
 
 ### If a secret ever reaches GitHub
@@ -114,7 +114,7 @@ Sometimes production is on fire or a deadline won't wait. Overrides exist for th
 ### Level 1: skip UAT (most common)
 Use when the fix is urgent and verified by tests but there's no time for a full UAT cycle.
 
-1. Human runs `/override <ID> "<reason>"` (for a PR with no issue: `/override PR <number> "<reason>"`), or manually comments `OVERRIDE: <reason>` on the PR (the comment must start with `OVERRIDE:`) and adds the PR label `gate-override`.
+1. Human runs `/override <ID> "<reason>"` (for a PR with no issue: `/override PR <number> "<reason>"`), or manually comments `OVERRIDE: <reason>` on the PR (the comment must start with `OVERRIDE:`) and adds the PR label `gate-override`. Both count only from the owner's or a backup approver's login (`product_owner_github`, `backup_approvers_github` in `haam.config.json` on main), never a bot; the same holds for `uat-passed` and for the issue's `uat:skip`. While agents sign in to GitHub as the owner, GitHub cannot tell the owner from an agent, so this stops bots and every other account, not an agent that ignores the rules. The release gate runs from main's copy of `gates.yml` (`pull_request_target`), so a PR cannot rewrite the gate that judges it.
 2. The `release-gate` check passes on the override label.
 3. CI (`ci` check) **still must pass**.
 4. When the PR has an issue, the agent creates a follow-up issue in the tracker: `Post-override UAT for <ID>` (priority High, label `stream:bug`, `override-followup`), so the skipped verification still happens after the fact.

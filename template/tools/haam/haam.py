@@ -10,6 +10,7 @@ run to adopt HAAM in a repository and to onboard new developers.
 Admin (first-time adoption and upgrades):
     install   --target DIR     Copy the HAAM kit into a repository (never overwrites)
     update    --target DIR     Upgrade a project to this kit version (keeps your customisations)
+    changeover [--apply]       Finish the release gate's move to main's copy (after the update that starts it)
     config                     Create/update haam.config.json and apply team key + names
     agents    [--apply]        Wire up Claude Code, Cursor, Codex, Grok, Gemini, Copilot
     github    [--apply]        Labels, branch rules, required checks, production env, security
@@ -637,8 +638,43 @@ def project_language(target, override=None):
     return lang
 
 
+GATES_WORKFLOW = ".github/workflows/gates.yml"
+CHANGEOVER_NOTE = ("gates.yml: step 1 of 2 (it also listens to pull_request, so the PR that brings it gets a gate)",
+                   "once this is on main, run haam.py update again: it removes that trigger, so a PR can't run its "
+                   "own copy of the gate")
+CHANGEOVER_RE = re.compile(r"^[ \t]*(?:#|//) >>> haam:changeover.*\n.*?^[ \t]*(?:#|//) <<< haam:changeover.*\n",
+                           re.M | re.S)
+LISTENS_TARGET_RE = re.compile(r"^ {2}pull_request_target:\s*$", re.M)
+
+
+def main_gates_listens_target(target):
+    """Whether the gate GitHub runs for this project's PRs (main's gates.yml) already listens to pull_request_target.
+    Read from origin's default branch (never this folder: running update twice on one branch must not skip a step).
+    False when main has no gates.yml or can't be read here: keeping the changeover lines is the safe side."""
+    for ref in ("origin/HEAD", "origin/main", "origin/master"):
+        p = subprocess.run(["git", "-C", str(target), "show", f"{ref}:{GATES_WORKFLOW}"], capture_output=True,
+                           text=True)
+        if p.returncode == 0:
+            return bool(LISTENS_TARGET_RE.search(p.stdout))
+        if "exists on disk, but not in" in (p.stderr or "") or "does not exist in" in (p.stderr or ""):
+            return False      # the branch is there, without a gates.yml: the first install
+    return False
+
+
+def gates_changeover(data, target):
+    """gates.yml for this project, and whether it is the changeover's first step. The gate runs on
+    `pull_request_target` (GitHub runs main's copy, so a PR can't rewrite the gate that judges it), but the PR that
+    first brings that copy is judged before main has it, and main's old copy knows no `pull_request_target`: that PR
+    would get no gate at all. So while main's copy doesn't listen to it, the lines between the `haam:changeover`
+    markers stay (a `pull_request` trigger whose run posts only in that case), and the next update removes them."""
+    if main_gates_listens_target(target):
+        return CHANGEOVER_RE.sub("", data.decode()).encode(), False
+    return data, CHANGEOVER_RE.search(data.decode()) is not None
+
+
 def make_renderer(target, language=None):
-    """Return render(path, rel) -> bytes: kit file content as it should look in this project."""
+    """Return render(path, rel) -> bytes: kit file content as it should look in this project. `render.changeover`
+    is True once gates.yml was rendered as the changeover's first step (see gates_changeover)."""
     tcfg = load_config(target) if (target / CONFIG_NAME).exists() else None
     lang = project_language(target, language)
     i18n = kit_root() / I18N_DIR / lang
@@ -652,6 +688,9 @@ def make_renderer(target, language=None):
         if lang != "en" and (i18n / rel_s).is_file():
             path = i18n / rel_s            # this project's language
         data = path.read_bytes()
+        if rel_s == GATES_WORKFLOW:
+            data, first_step = gates_changeover(data, target)
+            render.changeover = render.changeover or first_step
         if github_tracker and rel_s in LINEAR_FILES:
             kit = without_linear(json.loads(data))
             if kit == {"mcpServers": {}}:
@@ -675,6 +714,7 @@ def make_renderer(target, language=None):
         if applied_product:
             text = text.replace("`TODO(setup): product name`", applied_product)
         return text.encode()
+    render.changeover = False
     return render
 
 
@@ -856,6 +896,8 @@ def cmd_install(args):
     for cf in conflicts:
         rep.add("warn", f"Kept your existing {cf}", f"kit version saved to .haam/incoming/{cf}")
     rep.add("info", f"Kit version {VERSION} recorded in {LOCK_NAME} (commit it)")
+    if render.changeover:
+        rep.add("warn", *CHANGEOVER_NOTE)
     if conflicts:
         rep.action(WHO_AGENT, "Merge each conflicting file using the kit version in .haam/incoming/ "
                    "(rules in docs/setup/HAAM-ADOPTION-GUIDE.md, Phase 1 table). For an existing CLAUDE.md or AGENTS.md: "
@@ -993,6 +1035,8 @@ def cmd_update(args):
         rep.add("ok", f"Restored {r}", "it was missing because .gitignore hid it, not because you removed it")
     for r in conflicts:
         rep.add("warn", f"Needs a merge: {r}", f"you and the kit both changed it; new kit version → .haam/incoming/{r}")
+    if render.changeover and GATES_WORKFLOW in added + updated + conflicts + patched:
+        rep.add("warn", *CHANGEOVER_NOTE)
     for r in removed:
         rep.add("warn", f"No longer in the kit: {r}", "delete it if you don't use it (nothing is deleted automatically)")
 
@@ -1014,6 +1058,33 @@ def cmd_update(args):
                "Linear statuses), then re-run the plans", "python3 tools/haam/haam.py github  ·  python3 tools/haam/haam.py linear")
     rep.action(WHO_AGENT, "Check everything", "python3 tools/haam/haam.py agents --apply && python3 tools/haam/haam.py doctor")
     rep.print(args.json)
+
+
+def cmd_changeover(args):
+    """Finish the gate's changeover: once main's gates.yml listens to pull_request_target, remove the
+    `haam:changeover` lines from this folder's copy (what `update` does when a newer kit comes)."""
+    root = find_repo_root(Path.cwd())
+    f = root / GATES_WORKFLOW
+    text = f.read_text() if f.is_file() else ""
+    if not CHANGEOVER_RE.search(text):
+        print(f"Nothing to do: {GATES_WORKFLOW} has no changeover lines.")
+        return
+    if not main_gates_listens_target(root):
+        sys.exit(f"Not yet: main's {GATES_WORKFLOW} doesn't listen to pull_request_target. Merge the update that "
+                 "brings it first (git fetch, then run this again).")
+    done = CHANGEOVER_RE.sub("", text)
+    if not args.apply:
+        print(f"Plan: remove the pull_request trigger and its check from {GATES_WORKFLOW} "
+              f"({len(text.splitlines()) - len(done.splitlines())} lines). Re-run with --apply on a branch.")
+        return
+    lock = load_lock(root)
+    untouched = (lock.get("files") or {}).get(GATES_WORKFLOW) == sha(text.encode())
+    f.write_text(done)
+    if untouched:          # still the kit's copy: record the new one, so the next update sees it untouched
+        lock["files"][GATES_WORKFLOW] = sha(done.encode())
+        save_lock(root, lock)
+    print(f"✔ {GATES_WORKFLOW} now listens to pull_request_target alone. Commit it"
+          + (f" with {LOCK_NAME}" if untouched else "") + " and open a PR: main's copy of the gate judges it.")
 
 
 def latest_release():
@@ -6751,6 +6822,12 @@ def cmd_doctor(args):
         return
     skills = list((root / ".agents/skills").glob("*/SKILL.md"))
     rep.add("ok" if len(skills) >= 13 else "warn", f"{len(skills)} skills in .agents/skills")
+    gates = root / GATES_WORKFLOW
+    if gates.is_file() and CHANGEOVER_RE.search(gates.read_text(errors="replace")) and main_gates_listens_target(root):
+        rep.add("warn", "The gate's changeover is half done: main's gates.yml decides on pull_request_target, but this "
+                "copy still listens to pull_request too", "a PR can run its own copy of the gate until that goes")
+        rep.action(WHO_AGENT, "Finish the gate's changeover on a branch, then open a PR for it",
+                   "python3 tools/haam/haam.py changeover --apply")
     if (root / ".haam/incoming").exists() and any((root / ".haam/incoming").rglob("*")):
         rep.add("warn", "Unmerged kit files in .haam/incoming")
         rep.action(WHO_AGENT, "Merge the files in .haam/incoming, then delete that folder")
@@ -7143,6 +7220,10 @@ def main():
     p.add_argument("--linear-email")
     p.add_argument("--apply", action="store_true")
     p.set_defaults(func=cmd_invite)
+
+    p = sub.add_parser("changeover", help="finish the gate's changeover (gates.yml on pull_request_target alone)")
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_changeover)
 
     p = common(sub.add_parser("doctor", help="check setup status"))
     p.add_argument("--role", choices=["admin", "developer"], default="developer")

@@ -6,7 +6,12 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
-The machine-wide lock and the remote runner, from a project with two Macs and many agent chats (brought up from its copy, with its tests).
+Fixes and features from a busy test-first project with two Macs and many agent chats: its machine-lock and gate changes, brought up from its copy with their tests, and what its owner asked for next.
+
+### Security
+- **Only the owner's word passes the release gate.** `uat-passed`, `gate-override` with its `OVERRIDE:` comment, `ai-review-overruled` and the issue's `uat:skip` count only when `product_owner_github` or one of `backup_approvers_github` (in `haam.config.json` on main) added or wrote them, never a bot or a workflow token. With no owner configured, none counts. The gate's description says whose label didn't count. Known limit: while agents sign in to GitHub as the owner, GitHub can't tell them apart; this stops bots, workflow tokens and every other account.
+- **The gate runs from main's copy.** `gates.yml` triggers on `pull_request_target`, so a PR that edits it is still judged by main's gate. It checks out and runs nothing from the PR (a test fails if a checkout, a local action or the PR's head as a ref appears).
+- **Both AI reviewers read the steering files from the base branch:** every `AGENTS.md` and `CLAUDE.md`, the files the root `CLAUDE.md` imports, `.agents/`, `.claude/`, `.mcp.json`, `docs/process/GATES.md`. A PR's changes to them are in its diff, never in the instructions of the review that judges it.
 
 ### Fixed
 - **A run whose connection to the other machine drops is never run again here.** ssh's exit 255 used to read as "it didn't start there", so a connection that timed out 40 minutes into `make check` started the whole run again on this machine. `exclusive` now reads the output as it comes back: once the other machine says the command is running, its exit code is the answer, a dropped connection included. A connection that never opened still waits here.
@@ -21,6 +26,11 @@ The machine-wide lock and the remote runner, from a project with two Macs and ma
 ### Added
 - **`exclusive --max-run <minutes>`** stops the command and everything it started once it runs that long, and exits 125 (its result is unknown). A run sent to the other machine gets 180 minutes unless given, so one stuck run can no longer hold that machine for days.
 - **A lock held far longer than any check takes is said.** Past 3 hours, the waiting line says who holds it and since when, `doctor` warns (for this machine's lock and the other machine's), and the issue the run names (`"chat A, #12"`) gets one comment. A run stopped at its ceiling is commented on once the same way, from whichever machine sees it. Nothing is stopped automatically except at `--max-run`.
+
+### Migration
+- **Before you merge this update,** check that `product_owner_github` is set (`doctor` says so), and add `backup_approvers_github` for anyone else who passes UAT or overrides the gate (`config --backup-approvers "login1,login2"`). Otherwise no label of theirs counts any more.
+- **The gate changes over in two steps.** The PR that brings the new `gates.yml` is judged before main has it, and main's old copy knows no `pull_request_target`, so `update` writes it with a `pull_request` trigger too (the report says "step 1 of 2"): that run, the PR's own copy, posts `release-gate` only while main's copy is the old one, and nothing afterwards. **Once the update is on main, run `/haam-update` again, or `haam.py changeover --apply` on a branch:** it removes that trigger, so a PR can no longer run its own copy of the gate. `doctor` warns until it's done. A security review of the step-1 PR may flag that window; it closes with step 2.
+- `haam.py update`.
 
 ## [1.19.1] - 2026-11-13
 

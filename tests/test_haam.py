@@ -747,7 +747,9 @@ class TestGitHub(ToolTestCase):
         env = next(json.loads(r["body"]) for r in writes if any(x.endswith("environments/production") for x in r["args"]))
         self.assertEqual(env["reviewers"], [{"type": "User", "id": 583231}])
         created = [r["args"][2] for r in writes if r["args"][:2] == ["label", "create"]]
-        self.assertEqual(sorted(created), ["ai-review-overruled", "epic-build", "gate-override", "human-review", "uat:skip"])
+        self.assertEqual(sorted(created), ["ai-review-overruled", "epic-build", "gate-override", "human-review",
+                                           "owner-test", "spot-check", "uat:skip", "verified-by-agents",
+                                           "verify-failed", "verifying"])     # the last five: uat agents-verify
         patch = [json.loads(r["body"]) for r in writes if "PATCH" in r["args"] and r["body"] and "allow_auto_merge" in r["body"]]
         self.assertEqual(patch, [{"allow_auto_merge": True}])           # the no-UAT lane's auto-merge
         # Secrets are never set by the tool

@@ -2416,6 +2416,341 @@ class TestExclusive(ToolTestCase):
         self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["heavy_runs"], [])
 
 
+class TestAgentsVerify(ToolTestCase):
+    """uat: agents-verify: the lane rule, the hand-over, the verifier's own marks, a later push, pulling back."""
+
+    def setUp(self):
+        super().setUp()
+        self.origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
+        git(self.proj, "remote", "set-url", "origin", str(self.origin))
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        self.state = self.tmp / "gh-state.json"
+        self.env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(self.state),
+                    "FAKE_GH_ORIGIN": str(self.origin)}
+        self.install()
+        self.tool("config", "--product", "Acme", "--tracker", "github", "--team-key", "ACM",
+                  "--github-repo", "example-org/example-app", "--owner", "octocat")
+        self.tool("github-project", "--apply")
+        (self.proj / "apps/mobile").mkdir(parents=True)
+        (self.proj / "apps/mobile/screen.txt").write_text("a screen\n")
+        (self.proj / "src").mkdir()
+        (self.proj / "src/app.py").write_text("print('hi')\n")
+        self.push_main("adopt HAAM")
+
+    def tool(self, *args, **kw):
+        return self.run_tool(*args, tool=self.installed_tool(), **kw)
+
+    def gh(self):
+        return json.loads(self.state.read_text())
+
+    def push_main(self, msg):
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", msg)
+        git(self.proj, "push", "-q", "-u", "origin", "main")
+
+    def lane_on(self, shadow=0, *more):
+        self.tool("settings", "--set", "owner_test_paths=phones=apps/mobile/**", "--set", "uat=agents-verify",
+                  "--set", f"agents_verify_shadow={shadow}", *more, "--human")
+        self.push_main("settings: agents verify")
+
+    def ticket(self, title="Fix the export", status="Ready"):
+        return json.loads(self.tool("issue", "create", "--stream", "bug", "--title", title, "--status", status,
+                                    "--json").stdout)["number"]
+
+    def build(self, n, files=None, needs="no", msg=None, rename=None, plan=True, lines=True):
+        """The builder's branch on origin: a code commit, then the plan naming it under Agent pre-check."""
+        branch = f"{n}-change"
+        git(self.proj, "switch", "-q", "-c", branch, "origin/main")
+        for path, text in (files or {"src/app.py": f"print('fixed {n}')\n"}).items():
+            (self.proj / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.proj / path).write_text(text)
+        if rename:
+            git(self.proj, "mv", *rename)
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", msg or f"#{n}: fix")
+        code_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj, capture_output=True,
+                                  text=True).stdout.strip()
+        if plan:
+            pre = [f"- **Needs a person:** {needs}"] + ([f"- **Verified at:** {code_sha}", "- **Risk:** low: one line",
+                                                        "- **Undo:** revert the commit"] if lines else [])
+            (self.proj / f"docs/uat/GH-{n}-change.md").write_text(
+                "# UAT plan\n\n## Test cases\n| 1 | Risk: none here |\n\n## Agent pre-check\n" + "\n".join(pre) + "\n")
+            git(self.proj, "add", "-A")
+            git(self.proj, "commit", "-qm", f"#{n}: UAT plan")
+        git(self.proj, "push", "-q", "origin", branch)
+        git(self.proj, "switch", "-q", "main")
+        return branch, self.tip(branch)
+
+    def tip(self, branch):
+        return subprocess.run(["git", "rev-parse", branch], cwd=self.origin, capture_output=True, text=True).stdout.strip()
+
+    def lane(self, n):
+        return self.run_json("lane", str(n), tool=self.installed_tool())
+
+    def issue(self, n):
+        return self.run_json("issue", "view", str(n), tool=self.installed_tool())["issue"]
+
+    def comments(self, n):
+        return [c["body"] for c in self.gh()["comments"] if c["issue"] == n]
+
+    def claim(self, n, phase="verify", tool="Codex"):
+        return self.run_json("issue", "claim", str(n), "--for", phase, "--tool", tool, tool=self.installed_tool())["claim"]
+
+    def handover(self, n, check=True):
+        return self.tool("handover", str(n), "--json", check=check)
+
+    def test_settings_refuse_the_lane_without_the_owner_or_the_areas(self):
+        p = self.tool("settings", "--set", "uat=agents-verify", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--human", p.stderr)
+        p = self.tool("settings", "--set", "uat=agents-verify", "--human", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("needs owner_test_paths", p.stderr)
+        self.tool("settings", "--set", "owner_test_paths=phones=apps/mobile/**,apps/watch/**",
+                  "--set", "owner_test_paths=gates=AGENTS.md", "--set", "uat=agents-verify", "--human")
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual(cfg["owner_test_paths"], {"phones": ["apps/mobile/**", "apps/watch/**"], "gates": ["AGENTS.md"]})
+        self.assertEqual(cfg["uat"], "agents-verify")
+        p = self.tool("settings", "--set", "owner_test_paths=", "--human", check=False)    # can't empty it while on
+        self.assertIn("needs owner_test_paths", p.stderr)
+        self.tool("settings", "--set", "owner_test_paths=gates=", "--human")                # one area out
+        self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["owner_test_paths"],
+                         {"phones": ["apps/mobile/**", "apps/watch/**"]})
+        self.assertIn("owner_test_paths   phones: apps/mobile/**, apps/watch/**", self.tool("settings").stdout)
+
+    def test_lane_reasons_in_order(self):
+        n = self.ticket()
+        self.build(n)
+        self.assertEqual(self.lane(n)["lane"], "owner")                                  # the lane is off
+        self.assertIn("uat is owner-decides", self.lane(n)["reason"])
+        self.lane_on()
+        r = self.lane(n)
+        self.assertEqual((r["lane"], r["verification"]["verified"]), ("agents", False))
+        self.assertEqual(self.tool("lane", str(n)).stdout.splitlines()[0],
+                         "agents: needs no person, and changes none of the owner's own areas")
+        # The labels come first: owner-test, then uat-failed
+        self.tool("issue", "label", str(n), "--add", "uat-failed", "--add", "owner-test")
+        self.assertIn("owner-test", self.lane(n)["reason"])
+        self.tool("issue", "label", str(n), "--remove", "owner-test", "--human")
+        self.assertIn("uat-failed", self.lane(n)["reason"])
+        # An owner-test area, a file renamed out of one (by both names), a prototype's commits, the plan's line
+        a = self.ticket("Screen fix")
+        self.build(a, files={"apps/mobile/screen.txt": "changed\n"}, msg=f"#{a}: spike: keep the prototype")
+        self.assertEqual(self.lane(a)["reason"],
+                         "changes phones (apps/mobile/screen.txt), one of the owner's own areas (owner_test_paths)")
+        b = self.ticket("Move the screen")
+        self.build(b, files={}, rename=("apps/mobile/screen.txt", "src/screen.txt"))
+        self.assertIn("changes phones (apps/mobile/screen.txt", self.lane(b)["reason"])
+        c = self.ticket("Kept prototype")
+        self.build(c, msg=f"#{c}: spike: keep the prototype")
+        self.assertIn("built from a prototype", self.lane(c)["reason"])
+        d = self.ticket("New page")
+        self.build(d, needs="yes (a new page layout)")
+        self.assertEqual(self.lane(d)["reason"], "needs a person: a new page layout")
+        e = self.ticket("No line")
+        self.build(e, needs="", lines=False)
+        self.assertIn("no line `Needs a person", self.lane(e)["reason"])
+        f = self.ticket("No plan")
+        self.build(f, plan=False)
+        self.assertIn("no UAT plan", self.lane(f)["reason"])
+        # A branch's own copy of the settings doesn't count: the lane reads main's
+        g = self.ticket("Turn it off on the branch")
+        self.build(g, files={"haam.config.json": json.dumps({**json.loads((self.proj / "haam.config.json").read_text()),
+                                                             "owner_test_paths": {}})})
+        self.assertEqual(self.lane(g)["lane"], "agents")
+        # Every other value of uat: the owner's, as before
+        for value in ("always", "bugs-skip", "owner-decides"):
+            self.tool("settings", "--set", f"uat={value}", "--human")
+            self.push_main(f"uat {value}")
+            self.assertEqual(self.lane(g)["lane"], "owner", value)
+
+    def test_handover_by_lane(self):
+        self.lane_on()
+        n = self.ticket()
+        token = self.claim(n, "build", "Claude Code")
+        branch, head = self.build(n, lines=False)
+        p = self.tool("handover", str(n), "--claim", token, check=False)                 # the four lines first
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Verified at", p.stderr)
+        branch, head = self.build_again(n, branch)
+        res = json.loads(self.tool("handover", str(n), "--claim", token, "--json").stdout)
+        self.assertEqual((res["lane"], res["status"]), ("agents", "In Review"))
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "In Review")
+        self.assertIn("verifying", iss["labels"])
+        self.assertTrue(self.comments(n)[-1].startswith(f"🧪 Ready for verification · branch `{branch}` · head {head}"))
+        # The owner's lane: UAT, as today, with the reason in the first line
+        o = self.ticket("New page")
+        t2 = self.claim(o, "build", "Claude Code")
+        branch, head = self.build(o, needs="yes (a new page)")
+        res = json.loads(self.tool("handover", str(o), "--claim", t2, "--json").stdout)
+        self.assertEqual((res["lane"], res["status"]), ("owner", "UAT"))
+        self.assertEqual(self.issue(o)["status"], "UAT")
+        self.assertNotIn("verifying", self.issue(o)["labels"])
+        first = self.comments(o)[-1].splitlines()[0]
+        self.assertEqual(first, f"🧪 Ready for UAT · your test: needs a person: a new page · branch `{branch}` · head {head}")
+        self.assertIn("@octocat", self.comments(o)[-1])
+
+    def build_again(self, n, branch):
+        """The builder adds the plan's four lines (a docs commit on top)."""
+        git(self.proj, "switch", "-q", branch)
+        code_sha = subprocess.run(["git", "rev-parse", "HEAD~1"], cwd=self.proj, capture_output=True, text=True).stdout.strip()
+        plan = self.proj / f"docs/uat/GH-{n}-change.md"
+        plan.write_text(plan.read_text() + f"- **Verified at:** {code_sha}\n- **Risk:** medium: the export\n"
+                        "- **Undo:** revert the commit\n")
+        git(self.proj, "commit", "-qam", f"#{n}: plan lines")
+        git(self.proj, "push", "-q", "origin", branch)
+        git(self.proj, "switch", "-q", "main")
+        return branch, self.tip(branch)
+
+    def handed(self, title="Fix the export", **kw):
+        n = self.ticket(title)
+        token = self.claim(n, "build", "Claude Code")
+        branch, head = self.build(n, **kw)
+        self.tool("handover", str(n), "--claim", token)
+        return n, token, branch, head
+
+    def card(self, text="What changed: the export.\nRisk: low.\nChecked: the tests.\nNot checked: -.\nUndo: revert."):
+        f = self.tmp / "card.md"
+        f.write_text(text)
+        return str(f)
+
+    def verify(self, n, verdict, head, claim, check=True, cwd=None, **kw):
+        args = ["verify-result", str(n), "--verdict", verdict, "--head", head, "--claim", claim, "--tool",
+                kw.get("tool", "Codex, model-x")]
+        if verdict != "needs-owner" or kw.get("card"):
+            args += ["--body-file", self.card(kw.get("card") or "What changed: the export.\n- one\n- two")]
+        if kw.get("reason"):
+            args += ["--reason", kw["reason"]]
+        return self.run_tool(*args, tool=self.installed_tool(), check=check, cwd=cwd)
+
+    def test_verify_result_marks_and_refusals(self):
+        self.lane_on()
+        n, build, branch, head = self.handed()
+        # Only a ticket waiting for a verifier can be claimed for it
+        o = self.ticket("Not handed over")
+        self.assertIn("isn't waiting for a verifier", self.tool("issue", "claim", str(o), "--for", "verify",
+                                                                check=False).stderr)
+        v = self.claim(n)
+        self.assertIn("build claim", self.verify(n, "verified", head, build, check=False).stderr)
+        self.assertIn("No verify claim", self.verify(n, "verified", head, "abcdef", check=False).stderr)
+        self.assertIn("isn't the tip", self.verify(n, "verified", "0" * 40, v, check=False).stderr)
+        wt = self.tmp / "on-branch"
+        git(self.proj, "worktree", "add", "-q", str(wt), branch)
+        self.assertIn(f"has {branch} checked out", self.verify(n, "verified", head, v, check=False, cwd=wt).stderr)
+        git(self.proj, "worktree", "remove", "--force", str(wt))
+        before = {json.dumps(x, sort_keys=True) for x in self.gh().get("statuses", [])}
+        self.verify(n, "verified", head, v)
+        st = self.gh()
+        new = [x for x in st.get("statuses", []) if json.dumps(x, sort_keys=True) not in before]
+        self.assertEqual([(x["context"], x["state"], x["sha"]) for x in new], [("agent-verified", "success", head)])
+        self.assertFalse(any(x["context"] == "uat" for x in st.get("statuses", [])))         # never the owner's pass
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "In Review")
+        self.assertIn("verified-by-agents", iss["labels"])
+        for lab in ("verifying", "uat-passed", "uat:skip", "claimed"):
+            self.assertNotIn(lab, iss["labels"])
+        verdict = next(b for b in self.comments(n) if b.startswith("🔎"))
+        self.assertTrue(verdict.startswith(f"🔎 Verified by agents · branch `{branch}` · head {head} · claim {v} · "
+                                           "Codex, model-x\n\nWhat changed"))
+        self.assertTrue(self.comments(n)[-1].startswith(f"🔓 Claim released ({v})"))
+        self.assertTrue(self.lane(n)["verification"]["verified"])
+        # K4: a later push to docs/uat/ only still counts; a code change ends the verification
+        git(self.proj, "switch", "-q", branch)
+        (self.proj / f"docs/uat/GH-{n}-change.md").write_text("# plan\n\n## Agent pre-check\n- **Needs a person:** no\n")
+        git(self.proj, "commit", "-qam", "plan wording")
+        git(self.proj, "push", "-q", "origin", branch)
+        self.assertTrue(self.lane(n)["verification"]["verified"])
+        self.assertIn("verified by agents at its head already",
+                      self.tool("issue", "claim", str(n), "--for", "verify", check=False).stderr)
+        (self.proj / "src/app.py").write_text("print('again')\n")
+        git(self.proj, "commit", "-qam", "more code")
+        git(self.proj, "push", "-q", "origin", branch)
+        git(self.proj, "switch", "-q", "main")
+        r = self.lane(n)
+        self.assertEqual(r["lane"], "agents")
+        self.assertFalse(r["verification"]["verified"])
+        self.assertIn("moved on since the verified commit", r["verification"]["why"])
+        self.claim(n)                                                       # /next offers it for verification again
+        # The lane is the owner's: refused
+        m, _, _, mhead = self.handed("Pulled back")
+        mv = self.claim(m)
+        self.tool("issue", "label", str(m), "--add", "owner-test")
+        self.assertIn("lane is owner", self.verify(m, "verified", mhead, mv, check=False).stderr)
+
+    def test_not_verified_rounds_then_needs_owner(self):
+        self.lane_on()
+        n, build, branch, head = self.handed()
+        for round_ in (1, 2):
+            v = self.claim(n)
+            self.verify(n, "not-verified", head, v)
+            iss = self.issue(n)
+            self.assertEqual((iss["status"], iss["assignees"]), ("Ready", []))
+            self.assertIn("verify-failed", iss["labels"])
+            self.assertNotIn("verifying", iss["labels"])
+            body = next(b for b in reversed(self.comments(n)) if b.startswith("🔎"))
+            self.assertTrue(body.startswith("🔎 Not verified · branch"))
+            self.assertIn("- [ ] one\n- [ ] two", body)
+            self.tool("handover", str(n), "--branch", branch)                     # the rework comes back to a verifier
+            self.assertNotIn("verify-failed", self.issue(n)["labels"])
+        v = self.claim(n)
+        p = self.verify(n, "verified", head, v, check=False)                      # after max_review_rounds (2)
+        self.assertIn("needs-owner", p.stderr)
+        self.verify(n, "needs-owner", head, v, reason="it keeps failing on the export")
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "UAT")
+        self.assertIn("owner-test", iss["labels"])
+        self.assertTrue(any(b.startswith("🔎 Needs your test: it keeps failing on the export · branch") for b in self.comments(n)))
+        self.assertEqual(self.lane(n)["lane"], "owner")
+        res = self.run_json("metrics", "--days", "30", tool=self.installed_tool())["verification"]
+        self.assertEqual((res["handed_over"], res["not_verified"], res["needs_owner"]), (1, 2, [n]))
+
+    def test_shadow_start_and_spot_check(self):
+        self.lane_on(shadow=1)
+        n, _, _, head = self.handed()
+        v = self.claim(n)
+        self.verify(n, "verified", head, v)
+        self.assertEqual(self.issue(n)["status"], "UAT")                           # the owner still tests it
+        self.assertIn("Shadow start: verified ticket 1 of 1", self.comments(n)[-2])
+        # The tenth verified ticket is picked for a spot-check, by another model
+        st = self.gh()
+        for k in range(8):
+            st["issues"][str(900 + k)] = dict(st["issues"][str(n)], labels=["verified-by-agents"], state="CLOSED")
+        self.state.write_text(json.dumps(st))
+        m, _, _, mhead = self.handed("Tenth")
+        self.verify(m, "verified", mhead, self.claim(m))
+        iss = self.issue(m)
+        self.assertEqual(iss["status"], "In Review")                                # past the shadow start
+        self.assertIn("spot-check", iss["labels"])
+        v2 = self.claim(m, tool="Claude Code")
+        self.assertIn("another model", self.verify(m, "verified", mhead, v2, check=False).stderr)
+        self.verify(m, "verified", mhead, v2, tool="Claude Code, model-y")
+        self.assertNotIn("spot-check", self.issue(m)["labels"])
+
+    def test_pull_back_and_switching_off(self):
+        self.lane_on()
+        n, _, _, head = self.handed()
+        self.verify(n, "verified", head, self.claim(n))
+        self.assertEqual(self.lane(n)["lane"], "agents")
+        p = self.tool("issue", "label", str(n), "--add", "verified-by-agents", check=False)
+        self.assertIn("verify-result", p.stderr)                                    # only the verifier's tool adds it
+        self.tool("issue", "label", str(n), "--add", "owner-test")                   # `test <ID> myself`
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "UAT")
+        self.assertEqual(self.lane(n)["lane"], "owner")
+        self.assertTrue(self.comments(n)[-1].startswith("↩️ Pulled back"))
+        p = self.tool("issue", "label", str(n), "--remove", "owner-test", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Only the owner removes owner-test", p.stderr)
+        self.tool("issue", "label", str(n), "--remove", "owner-test", "--human")
+        self.assertEqual(self.lane(n)["lane"], "agents")
+        self.tool("settings", "--set", "uat=owner-decides", "--human")
+        self.push_main("lane off")
+        self.assertEqual(self.lane(n)["lane"], "owner")
+
+
 def git_status(cwd):
     return subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True).stdout
 

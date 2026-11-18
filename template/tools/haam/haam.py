@@ -5244,15 +5244,16 @@ def cmd_settings(args):
 
 def main_folder_busy(root, cfg):
     """Why the main folder can't take a settings change in its own files ('' when it can): another branch or a
-    commit is checked out there (a test), or it has unsaved changes besides haam.config.json."""
+    commit is checked out there (a test: writing there would leave an unsaved change under it). On the default
+    branch, unsaved changes are the owner's own work in progress (setup writes many files before its first commit),
+    and the change is written there as before."""
     if not git_out(root, "rev-parse", "--verify", "--quiet", "HEAD"):
         return ""                                       # no commit yet (first setup): nothing to keep apart
     base = cfg.get("default_branch") or "main"
     branch = git_out(root, "rev-parse", "--abbrev-ref", "HEAD")
     if branch != base:
         return f"it has {'a commit' if branch in ('HEAD', '') else branch} checked out, not {base}"
-    dirty = [f for f in git_out(root, "diff", "--name-only", "HEAD").splitlines() if f.strip() not in ("", CONFIG_NAME)]
-    return f"it has unsaved changes ({', '.join(dirty[:3])}{' …' if len(dirty) > 3 else ''})" if dirty else ""
+    return ""
 
 
 def open_settings_worktree(root, cfg, why):

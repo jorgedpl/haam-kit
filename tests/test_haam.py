@@ -2714,6 +2714,7 @@ class TestAgentsVerify(ToolTestCase):
         self.verify(n, "verified", head, v)
         self.assertEqual(self.issue(n)["status"], "UAT")                           # the owner still tests it
         self.assertIn("Shadow start: verified ticket 1 of 1", self.comments(n)[-2])
+        self.assertTrue(self.lane(n)["verification"]["shadow"])
         # The tenth verified ticket is picked for a spot-check, by another model
         st = self.gh()
         for k in range(8):

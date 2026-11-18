@@ -29,6 +29,10 @@ make dev
 ## Controle vooraf door de agent (Agent pre-check)
 <!-- Ingevuld door de agent: wat hij zelf gecontroleerd heeft (tests, `make e2e`, een browsertool) en wat hij zag. -->
 - **Fully verified by the agent:** no  <!-- "yes" alleen volgens de regels in /uat stap 3; dan kan de product owner het goedkeuren met "pass all verified". -->
+- **Needs a person:** yes (<waarom>)  <!-- met `uat: agents-verify`: "no" alleen volgens de regels in /uat stap 3; dan controleert een onafhankelijke agent het in plaats van de product owner -->
+- **Verified at:** <de commit van 40 tekens waar je bewijs vandaan komt>
+- **Risk:** <low | medium | high>: <één regel>
+- **Undo:** <hoe je het ongedaan maakt>
 - Bewijs: <de commando's of runs, en hun resultaten, één regel per acceptatiecriterium>
 
 ## Resultaten

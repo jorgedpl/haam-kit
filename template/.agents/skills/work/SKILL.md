@@ -1,7 +1,7 @@
 ---
 name: work
 description: Start an agent in a new chat window — give it its own worktree so parallel chats don't collide, prepare it, then pick the next work item and do it. Use when a human opens a chat to have an agent pick up work, e.g. "/work bugs".
-argument-hint: "[bugs|features|specs|ideas|epic <ID>]  (optional: one kind of work, or the Ready items of one epic)"
+argument-hint: "[bugs|features|specs|ideas|verify|epic <ID>]  (optional: one kind of work, or the Ready items of one epic)"
 ---
 
 # /work: one chat, one workspace, one issue
@@ -26,10 +26,10 @@ Run `python3 tools/haam/haam.py worktree status --json`.
 3. If dependencies aren't installed in this worktree yet, run `make setup`.
 
 ## 3. Pick and do the work
-With `epic <ID>`: if the epic has the label `mode:epic-build` (the owner's decision), build the whole epic as its lead agent (`/build`, *Epic build mode*). Otherwise take that epic's Ready items (bugs, and small features with approved specs) as one batch (`/build` explains the batch: one branch, one PR). Otherwise follow `/next` with the filter above (`bugs`, `features`, `specs` or `ideas`; `/next` says what each takes), in **just-pick mode**: take the top candidate without waiting for a choice, and say in your first line which one and why. Then follow the skill it leads to (`/build`, `/spec`, `/assess` or `/spike`) to the end, including the claim protocol. If the human told you this computer's name, pass it when claiming (`--machine`).
+With `epic <ID>`: if the epic has the label `mode:epic-build` (the owner's decision), build the whole epic as its lead agent (`/build`, *Epic build mode*). Otherwise take that epic's Ready items (bugs, and small features with approved specs) as one batch (`/build` explains the batch: one branch, one PR). Otherwise follow `/next` with the filter above (`bugs`, `features`, `specs`, `ideas` or `verify`; `/next` says what each takes), in **just-pick mode**: take the top candidate without waiting for a choice, and say in your first line which one and why. Then follow the skill it leads to (`/verify`, `/build`, `/spec`, `/assess` or `/spike`) to the end, including the claim protocol. `/work verify` (with the setting `uat: agents-verify`) makes this chat an independent verifier: it never verifies a change it built, and never edits the branch it verifies. If the human told you this computer's name, pass it when claiming (`--machine`).
 
 ## 4. Hand over
-1. When the item reaches its hand-over point (UAT plan ready, spec or assessment waiting for the human), reply with: the ID and title, the branch (test-first) or the PR link (checks-first), and exactly what the human does next (usually: type `/test <ID>` in their own chat).
+1. When the item reaches its hand-over point (UAT plan ready, spec or assessment waiting for the human, a verifier's verdict recorded), reply with: the ID and title, the branch (test-first) or the PR link (checks-first), and exactly what the human does next (usually: type `/test <ID>` in their own chat).
 2. **One issue per chat.** Don't start another item unless the human asked for more (e.g. "and keep going"). If they did, start again at step 3 in this same worktree.
 3. Nothing to pick? Report what's waiting on the human, as `/next` does, and stop.
 

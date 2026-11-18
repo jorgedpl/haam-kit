@@ -25,7 +25,8 @@ For each area (or only the one asked for), show a short table: setting · now ·
 The areas and their settings:
 - **Testing:**
   - `flow` (test-first | checks-first);
-  - `uat` (owner-decides | always | bugs-skip).
+  - `uat` (owner-decides | always | bugs-skip | agents-verify);
+  - with `agents-verify`: `owner_test_paths` and `agents_verify_shadow` (below, *The agents' lane*).
 - **Grouping:** `grouping` (per-issue | per-epic | release).
 - **Checks:**
   - `ci` (every-pr | local | off);
@@ -38,6 +39,12 @@ The areas and their settings:
 - **Limits:** `max_open_prs`, `max_in_uat`, `max_review_rounds`, `max_pr_lines` (whole numbers). To size them, ask how many people run agent chats, how many chats each, and how many hours a week the owner tests in how many sittings, then run `python3 tools/haam/haam.py settings --recommend --builders N --chats N --testing-hours N --sittings N` and show what it suggests.
   - In test-first, `max_in_uat` is the real limit: it's how much you can test. `max_open_prs` guards the CI cost of ready PRs. Drafts and docs-only PRs (briefs, split specs, assessments, ADRs) never count, and `capacity --list` shows the breakdown.
   - **Batch window**, for a weekend of agent work tested in one sitting: a temporary raise that ends by itself after its last day, e.g. `settings --set max_in_uat=30 --until <last day, YYYY-MM-DD> --human` (or `config --max-in-uat 30 --until … --human`). `config --end-batch-window --human` ends it early. It counts at once for every agent chat on this computer. Suggest pairing it with `/test all` and "pass all verified" for the sitting.
+- **The agents' lane** (`uat: agents-verify`, GitHub Projects only). A change that needs no person to judge it (its plan says `Needs a person: no`) and touches none of the owner's own areas is checked by an independent verifier agent at the handed-over commit, instead of waiting in `UAT`. The verifier records it with its own marks (`agent-verified`, `verified-by-agents`), never the owner's pass; the owner is told, pulls any ticket back with `test <ID> myself`, and nothing ships without their `ship`. Everything else comes to them as today. Walk through it in this order:
+  1. **`owner_test_paths`**: the areas that always keep the owner's own test, whatever the plan says, as named areas of path patterns. Suggest at least the gates themselves (`AGENTS.md`, `.agents/**`, `tools/haam/**`, `.github/**`, `haam.config.json`), the deploy scripts, and the project's riskiest areas (keys and crypto, sign-in, migrations and access rules, personal data, anything on a phone). Show how many waiting tickets each area would keep (`python3 tools/haam/haam.py lane <number>` for a few of them). Set one area per `--set`: `settings --set owner_test_paths=sign-in=src/auth/**,config/auth/** --human`; `owner_test_paths=<area>=` removes one. `uat agents-verify` is refused while the list is empty.
+  2. **`uat agents-verify`** itself.
+  3. **The shadow start**, `agents_verify_shadow` (default 10): the first that many tickets verified by agents still go to the owner's test too, so they can compare the verdicts with their own. `0` turns it off; they can end it early the same way.
+  4. Say what else changes: every 10th verified ticket gets the label `spot-check` and a second verifier on another model (`/next` offers it); `haam.py metrics` counts verified, sent back, needs-owner, pulled back, and later bugs or reverts of verified tickets; `github --apply` creates the lane's labels (`verifying`, `verified-by-agents`, `verify-failed`, `owner-test`, `spot-check`). Verifiers are started with `/work verify` (or `/next`).
+  5. **Switching it off:** `settings --set uat=owner-decides --human`. Every ticket not yet shipped is the owner's test again, and the agents' marks stay as a record.
 - **Protected areas:** `protected_paths`. Show the list. To add: `config --protected "src/auth/**" --human`. To remove: `config --unprotected "…" --human`.
 - **Production code** (`DECISIONS.md` §8): `production_paths` minus `non_production_paths`. It tells agents and the owner what runs for users, and what a prototype must not reach without the gates. Change it with `config --production "src/**,…" --human`, `--not-production "…" --human` and `--remove-not-production "…" --human`.
 - **Language:** `language` (`en`, `es`, `fr`, `de`, `it`, `nl`, `pt`): the language of the docs and of what agents write for people (specs, issues, UAT plans, messages). Change it with `config --language <code>`, then `python3 <kit-path>/tools/haam/haam.py update --target . --apply` with the kit at the project's version: docs nobody edited switch; edited ones stay as they are.
@@ -50,7 +57,9 @@ Point out combinations that undo each other's safety, in one line each, and let 
 - `ci off` without a release-time full check: Linux-only failures can reach production; keep secret scanning, the AI reviews and release-gate, and run `make check` (or the full CI workflow) on the commit you ship;
 - `deploy_approval automatic` with `uat bugs-skip`: an agent's bug fix can reach production with no human looking at it;
 - anything but `ci every-pr` with `review github` (or a Linear tracker, or no `HAAM_PROJECT_TOKEN` secret): the no-UAT lane stops merging by itself, and you ship those PRs (local results aren't tamper-proof; reduced checks aren't enough on their own);
-- `grouping release`: one failing release check holds every change in it.
+- `grouping release`: one failing release check holds every change in it;
+- `uat agents-verify` with `owner_test_paths` that leave out the gates (`AGENTS.md`, `.agents/**`, `tools/haam/**`, `.github/**`, `haam.config.json`): a change to the lane's own rules could be passed by the lane;
+- `uat agents-verify` with `deploy_approval automatic`: a verified ticket still waits for your `ship`, but what you ship deploys without a last look.
 
 ## 3. Apply
 1. For each change: `python3 tools/haam/haam.py settings --set key=value --human` (repeat `--set` for several). It saves `haam.config.json` and refuses invalid values. `--human` means the owner chose it in this session: never use it otherwise.

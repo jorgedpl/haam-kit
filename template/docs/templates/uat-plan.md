@@ -29,6 +29,10 @@ make dev
 ## Agent pre-check
 <!-- Filled by the agent: what it checked itself (tests, `make e2e`, a browser tool) and what it saw. -->
 - **Fully verified by the agent:** no  <!-- "yes" only under the rules in /uat step 3; then the owner can pass it with "pass all verified" -->
+- **Needs a person:** yes (<why>)  <!-- with `uat: agents-verify`: "no" only under the rules in /uat step 3; then an independent agent verifies it instead of the owner -->
+- **Verified at:** <the 40-character commit your evidence is from>
+- **Risk:** <low | medium | high>: <one line>
+- **Undo:** <how to undo it>
 - Evidence: <the commands or runs, and their results, one line per acceptance criterion>
 
 ## Results

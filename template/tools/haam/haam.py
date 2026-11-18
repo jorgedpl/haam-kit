@@ -4339,7 +4339,7 @@ def issue_markers(iss):
             body = ev.get("body") or ""
             if "Approved at G1" in body and not m["decided"]:
                 m["decided"] = at
-            elif body.startswith("🤖 Claimed by") and not re.search(r"\bto (assess|write|prototype|build a|verify)\b", body) and not m["claimed"]:
+            elif body.startswith("🤖 Claimed by") and not re.search(r"\bto (assess|write|prototype|verify)\b", body) and not m["claimed"]:
                 m["claimed"] = at
             elif ("docs/uat/" in body or "Fully verified by the agent" in body) and not m["uat"]:
                 m["uat"] = at
@@ -6945,7 +6945,7 @@ def verdict_records(comments):
         get = lambda pat: (re.search(pat, first) or [None, ""])[1]
         out.append({"verdict": verdict, "branch": get(r"branch `([^`]+)`"), "head": get(r"· head ([0-9a-f]{7,40})"),
                     "claim": get(r"· claim ([0-9a-f]{6,})"), "tool": get(r"· claim [0-9a-f]{6,} · (.+)$").strip(),
-                    "at": c.get("createdAt"),
+                    "at": c.get("createdAt"), "shadow": "\n\nShadow start: " in body,
                     "reason": get(r"^🔎 Needs your test: (.*?) · branch") if verdict == "needs-owner" else ""})
     return out
 
@@ -6974,12 +6974,14 @@ def verified_head_counts(root, verified_sha, tip_sha):
 def verification_state(root, cfg, number, labels, comments, head):
     """Whether the ticket counts as verified by agents at the branch's `head` now: {verified, why, verified_at, claim,
     tool, at}. Needs the verdict comment, the label, no owner-test, a head the verification still covers
-    (verified_head_counts) and the agent-verified status on the verified commit."""
+    (verified_head_counts) and the agent-verified status on the verified commit. shadow: verified during the shadow
+    start (agents_verify_shadow), so the owner still tests it and only their pass ships it."""
     recs = verdict_records(comments)
     rec = recs[-1] if recs else None
-    st = {"verified": False, "why": "", "verified_at": None, "claim": None, "tool": None, "at": None}
+    st = {"verified": False, "why": "", "verified_at": None, "claim": None, "tool": None, "at": None,
+          "shadow": False}
     if rec and rec["verdict"] == "verified":
-        st.update(verified_at=rec["head"], claim=rec["claim"], tool=rec["tool"], at=rec["at"])
+        st.update(verified_at=rec["head"], claim=rec["claim"], tool=rec["tool"], at=rec["at"], shadow=rec["shadow"])
     if OWNER_TEST_LABEL in labels:
         st["why"] = "pulled back: the owner tests it (owner-test)"
     elif not rec or rec["verdict"] != "verified":

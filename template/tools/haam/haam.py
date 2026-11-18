@@ -120,7 +120,11 @@ DEFAULT_CONFIG = {
     "grouping": "per-issue",     # per-issue | per-epic | release
     "ci": "every-pr",            # every-pr | local | off
     "nightly": "on",             # on | off: the full check and dependency audit on main every night
-    "uat": "owner-decides",      # owner-decides | always | bugs-skip
+    "uat": "owner-decides",      # owner-decides | always | bugs-skip | agents-verify
+    # uat: agents-verify. Areas that always keep the owner's own test, as {area name: [path patterns]}
+    # (settings --set owner_test_paths=<area>=<pattern>,<pattern> --human). Everything else may be verified by agents.
+    "owner_test_paths": {},
+    "agents_verify_shadow": 10,  # the first N verified tickets still go to the owner's test too (0: off)
     "deploy_approval": "each",   # each: you approve every production deploy; automatic: deploys start on merge
     "runner": "github",          # github | self-hosted
     "worktree_cleanup": "after-ship",  # after-ship | manual
@@ -179,13 +183,20 @@ SETTINGS = [
                       "once. Fewest Actions minutes. (Recommended)",
         "checks-first": "PR and checks first, then your test. You only test code that already passed the checks, "
                         "but every rework round runs the checks again."}),
-    ("Testing", "uat", ["owner-decides", "always", "bugs-skip"], "Which changes you test yourself.", {
+    ("Testing", "uat", ["owner-decides", "always", "bugs-skip", "agents-verify"], "Which changes you test yourself.", {
         "owner-decides": "You test everything, except issues you mark uat:skip (config, dependency bumps, invisible "
                          "refactors): those merge once the checks and reviews pass. (Recommended)",
         "always": "You test every change. Most control, most of your time.",
         "bugs-skip": "When you triage a bug, it's marked uat:skip unless you say test: it then merges once the checks "
                      "and reviews pass, without your test. Features still come to you; protected areas always do. "
-                     "Fast for bug fixes; you rely on the tests and the reviews to catch a wrong fix."}),
+                     "Fast for bug fixes; you rely on the tests and the reviews to catch a wrong fix.",
+        "agents-verify": "A change that needs no person to judge it (its plan says `Needs a person: no`) and touches "
+                         "none of your owner_test_paths is verified by an independent agent at the handed-over "
+                         "commit, with its own marks (never your pass). You are told, can pull any ticket back "
+                         "(`test <ID> myself`), and it ships only on your `ship`. The rest come to you as today. "
+                         "Needs owner_test_paths and the GitHub tracker."}),
+    ("Testing", "agents_verify_shadow", int, "uat: agents-verify starts in shadow: this many verified tickets "
+     "still come to your test too, so you can compare. 0: off.", {}),
     ("Grouping", "grouping", ["per-issue", "per-epic", "release"], "How changes become pull requests.", {
         "per-issue": "One PR per issue: easy to follow and to revert. The checks run once per issue. (Recommended "
                      "to start)",
@@ -246,7 +257,7 @@ SETTINGS = [
      "before an agent may release that claim and pick the work up (a chat that died: session limit, laptop asleep, "
      "crash). 0 (default): never; /next lists them for you and /triage stale frees them.", {}),
 ]
-INT_SETTINGS_ZERO_OK = {"stale_claim_days", "release_after_passed", "release_after_days"}     # 0 means off
+INT_SETTINGS_ZERO_OK = {"stale_claim_days", "release_after_passed", "release_after_days", "agents_verify_shadow"}     # 0 means off
 SETTING_KEYS = {k: (g, opts, what, helps) for g, k, opts, what, helps in SETTINGS}
 
 GITHUB_LABELS = [
@@ -256,6 +267,12 @@ GITHUB_LABELS = [
     ("ai-review-overruled", "5319E7", "Human overrules the AI reviews on this PR"),
     ("uat:skip", "C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
     ("epic-build", "3E4B9E", "One PR for a whole epic, built slice by slice: review it per slice"),
+    # uat: agents-verify (issue labels; `github --apply` creates them)
+    ("verifying", "BFD4F2", "Handed over: waiting for an independent agent to verify it (uat: agents-verify)"),
+    ("verified-by-agents", "0E8A16", "Verified by an independent agent at its head; not the owner's pass"),
+    ("verify-failed", "D93F0B", "The verifier sent it back: rework first, then verify again"),
+    ("owner-test", "FBCA04", "The owner tests this one themselves; only the owner removes it"),
+    ("spot-check", "C5DEF5", "A verified ticket picked for a second verification on another model"),
 ]
 
 # (name, Linear state type, colour)
@@ -1997,7 +2014,8 @@ EPIC_LABEL = "epic"
 HUMAN_LABELS = {"agent-ready": "agent-ready is added only after a human approves the spec",
                 "uat:skip": "uat:skip (no UAT, merges by itself) is the owner's decision",
                 "mode:prototype": "mode:prototype (an agent builds a prototype first) is the owner's decision",
-                "mode:epic-build": "mode:epic-build (one agent builds the whole epic) is the owner's decision"}
+                "mode:epic-build": "mode:epic-build (one agent builds the whole epic) is the owner's decision",
+                "verified-by-agents": "verified-by-agents is recorded only by `haam.py verify-result`"}
 # Moving into these needs a human decision (they're done through human-only skills)
 HUMAN_STATUSES = {"Done", "Parked", "Canceled"}
 PROJECT_TOKEN_SECRET = "HAAM_PROJECT_TOKEN"
@@ -2817,11 +2835,23 @@ def issue_action(args, cfg, board):
                 raise RuntimeError(f"{HUMAN_LABELS[lab]}; add --human only when they decided it in this session")
             cmd += ["--add-label", lab]
         for lab in args.remove or []:
+            if lab == OWNER_TEST_LABEL and not args.human:
+                raise RuntimeError("Only the owner removes owner-test (their own test). Add --human only when they "
+                                   "said so in this session.")
             cmd += ["--remove-label", lab]
+        pull_back = OWNER_TEST_LABEL in (args.add or []) and OWNER_TEST_LABEL not in iss["labels"]
+        if pull_back and "verifying" in iss["labels"]:
+            cmd += ["--remove-label", "verifying"]
         code, out, err = run(cmd)
+        if code != 0 and any(x in LANE_LABEL_NAMES for x in args.add or []) and "not found" in (err or out or "").lower():
+            ensure_labels(repo, [x for x in args.add if x in LANE_LABEL_NAMES])
+            code, out, err = run(cmd)
         if code != 0:
             raise RuntimeError(err or out)
-        return {"number": number, "message": f"#{number}: labels updated"}
+        msg = f"#{number}: labels updated"
+        if pull_back:
+            msg += pull_back_to_owner(cfg, board, iss)
+        return {"number": number, "message": msg}
 
     if a == "comment":
         body = Path(args.body_file).read_text() if args.body_file else (args.body or "")
@@ -2864,6 +2894,10 @@ def issue_action(args, cfg, board):
                                    "(or bugs that need a fix plan).")
             if EPIC_LABEL in iss["labels"]:
                 raise RuntimeError(f"#{number} is an epic: write a spec for each of its sub-issues instead")
+        elif phase == "verify":
+            why = verify_claim_refusal(cfg, iss)
+            if why:
+                raise RuntimeError(why)
         token = os.urandom(3).hex()
         cmd = ["gh", "issue", "edit", str(number), "-R", repo, "--add-assignee", "@me"]
         if phase != "build":
@@ -2883,7 +2917,7 @@ def issue_action(args, cfg, board):
         where = f" on {args.machine}" if args.machine else ""
         branch = args.branch or (f"{number}-<short-title>" if phase == "build" else "")
         what = {"build": "", "assess": " to assess it", "spec": " to write its spec",
-                "spike": " to build a prototype"}[phase]
+                "spike": " to build a prototype", "verify": VERIFY_CLAIM_WHAT}[phase]
         body = (f"{CLAIM_MARK} @{me} via {tool}{where}{what}" + (f" · branch `{branch}`" if branch else "")
                 + f" · claim {token}")
         code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
@@ -2898,6 +2932,8 @@ def issue_action(args, cfg, board):
         for c in claims:
             if c is mine:
                 break
+            if phase == "verify" and VERIFY_CLAIM_WHAT not in (c.get("body") or ""):
+                continue                    # the build's own claim, still open in test-first: not a rival verifier
             t = parse_when(c.get("createdAt"))
             if not when or not t or (when - t).total_seconds() <= CLAIM_RACE_MINUTES * 60:
                 rivals.append(c)
@@ -2911,7 +2947,10 @@ def issue_action(args, cfg, board):
                "assess": f"When the assessment is pushed: {release} --status Decision",
                "spec": f"When the spec is pushed: {release}",
                "spike": "Branch spike/<branch name>; when the prototype is pushed, label it spike-ready and "
-                        + (f"{release} --status Decision" if "stream:idea" in iss["labels"] else release)}[phase]
+                        + (f"{release} --status Decision" if "stream:idea" in iss["labels"] else release),
+               "verify": f"Work detached at the handed-over head, in your own worktree, then record the verdict: "
+                         f"python3 tools/haam/haam.py verify-result {number} --verdict verified|not-verified|needs-owner "
+                         f"--head <sha> --claim {token} --body-file <card> (it releases the claim)"}[phase]
         return {"number": number, "assignee": me, "claim": token, "phase": phase,
                 "message": f"Claimed #{number} for @{me}{what} (claim {token}). {nxt}"}
 
@@ -4864,7 +4903,7 @@ def issue_markers(iss):
             body = ev.get("body") or ""
             if "Approved at G1" in body and not m["decided"]:
                 m["decided"] = at
-            elif body.startswith("🤖 Claimed by") and not re.search(r"\bto (assess|write|prototype)\b", body) and not m["claimed"]:
+            elif body.startswith("🤖 Claimed by") and not re.search(r"\bto (assess|write|prototype|verify)\b", body) and not m["claimed"]:
                 m["claimed"] = at
             elif ("docs/uat/" in body or "Fully verified by the agent" in body) and not m["uat"]:
                 m["uat"] = at
@@ -4883,6 +4922,33 @@ def issue_markers(iss):
     if "stream:feature" in labels and not m["decided"] and not was_idea:
         m["decided"] = created                        # born a feature (roadmap item): no decision to wait for
         m["created"] = None                           # so it isn't counted as a 0-hour decision
+    return m
+
+
+def verify_markers(iss):
+    """uat: agents-verify on one issue: the first hand-over to a verifier, the verdicts, and a pull-back (owner-test)
+    after a verification, with whether the owner's own test then failed."""
+    m = {"handed": None, "verdicts": [], "first_verdict": None, "verified_at": None, "pulled_back": False,
+         "pulled_back_failed": False}
+    for ev in (iss.get("timelineItems") or {}).get("nodes") or []:
+        if not ev or not ev.get("createdAt"):
+            continue
+        at, kind = iso_time(ev["createdAt"]), ev.get("__typename")
+        if kind == "IssueComment":
+            body = ev.get("body") or ""
+            rec = verdict_records([{"body": body}])
+            if body.startswith(READY_VERIFY_MARK) and not m["handed"]:
+                m["handed"] = at
+            elif rec:
+                m["verdicts"].append(rec[0]["verdict"])
+                m["first_verdict"] = m["first_verdict"] or at
+                if rec[0]["verdict"] == "verified" and not m["verified_at"]:
+                    m["verified_at"] = at
+            elif "❌ UAT failed" in body and m["pulled_back"]:
+                m["pulled_back_failed"] = True
+        elif kind == "LabeledEvent" and (ev.get("label") or {}).get("name") == OWNER_TEST_LABEL and m["verified_at"] \
+                and at >= m["verified_at"]:
+            m["pulled_back"] = True
     return m
 
 
@@ -4941,6 +5007,8 @@ def cmd_metrics(args):
     rows, queues = [], {k: [] for k, _, _, _ in QUEUES}
     to_done = {"all": [], "stream:bug": [], "stream:feature": [], "stream:idea": []}
     reruns, failures, found_in_uat, bugs_later, judge = [], 0, 0, [], {"decided": 0, "malformed": 0, "escalated": 0}
+    ver = {"handed_over": 0, "verified": [], "not_verified": 0, "sent_back": [], "needs_owner": [], "pulled_back": [],
+           "pulled_back_failed": [], "hours": []}
     closed_at = {i["number"]: iso_time(i["closedAt"]) for i in issues if i.get("closedAt")}
     for iss in issues:
         labels = [l["name"] for l in (iss.get("labels") or {}).get("nodes") or []]
@@ -4965,6 +5033,19 @@ def cmd_metrics(args):
                 h = hours(start, end)
                 queues[key].append(h)
                 row["queues_h"][key] = h
+        vm = verify_markers(iss)
+        if vm["handed"]:
+            ver["handed_over"] += 1
+            if vm["first_verdict"] and vm["first_verdict"] >= vm["handed"]:
+                ver["hours"].append(hours(vm["handed"], vm["first_verdict"]))
+        for key, verdict in (("verified", "verified"), ("sent_back", "not-verified"), ("needs_owner", "needs-owner")):
+            if verdict in vm["verdicts"]:
+                ver[key].append(iss["number"])
+        ver["not_verified"] += vm["verdicts"].count("not-verified")
+        if vm["pulled_back"]:
+            ver["pulled_back"].append(iss["number"])
+        if vm["pulled_back_failed"]:
+            ver["pulled_back_failed"].append(iss["number"])
         if m["failed"]:
             reruns.append(iss["number"])
             failures += len(m["failed"])
@@ -4982,12 +5063,19 @@ def cmd_metrics(args):
                 bugs_later.append({"bug": iss["number"], "after": sorted(after_done)})
         rows.append(row)
     reverts = revert_commits(root, since_dt.date().isoformat())
+    verified_set = set(ver["verified"])
+    verification = {k: v for k, v in ver.items() if k != "hours"}
+    verification.update(
+        hours_to_verdict=percentiles(ver["hours"]),
+        bugs_later=[b for b in bugs_later if verified_set & set(b["after"])],
+        reverts=[r for r in reverts if verified_set & {int(n) for n in re.findall(r"#(\d+)", r)}])
     res = {"repo": repo, "days": args.days, "since": since, "issues": len(rows),
            "time_to_done_days": {k: percentiles(v) for k, v in to_done.items()},
            "queues_hours": {k: dict(percentiles(v), what=w) for k, w, _, _ in QUEUES for v in [queues[k]]},
            "reruns": {"issues": len(reruns), "failed_tests": failures, "issue_numbers": sorted(reruns)},
            "defects": {"found_in_uat": found_in_uat, "found_later": len(bugs_later), "later": bugs_later},
-           "reverts": {"count": len(reverts), "commits": reverts}, "judge": judge, "rows": rows}
+           "reverts": {"count": len(reverts), "commits": reverts}, "judge": judge, "verification": verification,
+           "rows": rows}
     text = metrics_text(res)
     if args.save:
         folder = root / "docs" / "metrics"
@@ -5028,6 +5116,17 @@ def metrics_text(res):
               c("1", "\nDefects"), f"  Found in your test (UAT): {d['found_in_uat']}   ·   Found after Done: {d['found_later']}"
               + (" (" + ", ".join(f"#{b['bug']} after #{b['after'][0]}" for b in d["later"][:8]) + ")" if d["later"] else ""),
               c("1", "\nReverts on main"), f"  {v['count']}" + (": " + "; ".join(v["commits"][:5]) if v["commits"] else "")]
+    vf = res.get("verification") or {}
+    if vf.get("handed_over") or vf.get("verified"):
+        nums = lambda xs: f" (#{', #'.join(str(n) for n in xs[:8])})" if xs else ""
+        lines += [c("1", "\nVerified by agents (uat: agents-verify)"),
+                  f"  Handed to a verifier: {vf['handed_over']}   ·   verified: {len(vf['verified'])}{nums(vf['verified'])}",
+                  f"  Not verified: {vf['not_verified']} verdict(s) on {len(vf['sent_back'])} ticket(s)   ·   "
+                  f"needs your test: {len(vf['needs_owner'])}{nums(vf['needs_owner'])}",
+                  f"  Pulled back after a verification: {len(vf['pulled_back'])}{nums(vf['pulled_back'])}, "
+                  f"of which failed your test: {len(vf['pulled_back_failed'])}{nums(vf['pulled_back_failed'])}",
+                  f"  Later: bugs naming a verified ticket {len(vf['bugs_later'])}, reverts {len(vf['reverts'])}"
+                  f"   ·   hand-over to verdict: {hrs(vf['hours_to_verdict'])}"]
     if any(j.values()):
         lines += [c("1", "\nJudge verdicts"), f"  decided {j['decided']}  ·  malformed {j['malformed']}  ·  escalated {j['escalated']}"]
     lines.append(c("2", "\nFrom the issues' labels, the skills' comments and closes (issues updated in the window). 'Found after Done' "
@@ -5193,6 +5292,9 @@ def cmd_settings(args):
         if k == "runner_label" and re.fullmatch(r"[\w.-]+", v):
             changed[k] = v
             continue
+        if k == "owner_test_paths":        # one area per --set: <area>=<pattern>,<pattern> (empty: remove it)
+            changed[k] = set_owner_test_area(changed.get(k, owner_test_areas(cfg)), v)
+            continue
         if k not in SETTING_KEYS:
             sys.exit(f"Unknown setting '{k}'. Settings: {', '.join(SETTING_KEYS)} (protected areas: config --protected)")
         opts = SETTING_KEYS[k][1]
@@ -5337,6 +5439,21 @@ def settings_change(args, root, cfg, rep, changed, refused, note, pr):
     if (changed.get("grouping") or setting_value(cfg, "grouping")) == "release" and \
             (changed.get("flow") or setting_value(cfg, "flow")) == "checks-first":
         sys.exit("grouping release needs flow test-first: in checks-first every change already has its own PR.")
+    if (changed.get("uat") or setting_value(cfg, "uat")) == "agents-verify" and ("uat" in changed or
+                                                                                "owner_test_paths" in changed):
+        if not owner_test_areas({"owner_test_paths": changed.get("owner_test_paths", cfg.get("owner_test_paths"))}):
+            sys.exit("uat agents-verify needs owner_test_paths first: the areas that always keep your own test (e.g. "
+                     "--set owner_test_paths=sign-in=src/auth/** --set owner_test_paths=gates=AGENTS.md,.agents/**,"
+                     "tools/haam/**,.github/**,haam.config.json). Without them every change could skip you.")
+        if cfg.get("tracker") != "github":
+            sys.exit("uat agents-verify needs the GitHub tracker: the verifier records its verdict on GitHub issues.")
+    if "owner_test_paths" in changed:
+        tracked = git_out(root, "ls-files").splitlines()
+        for area, pats in changed["owner_test_paths"].items():
+            for x in pats:
+                if tracked and not protected_matches([x], tracked) and not args.json:
+                    print(f"{WARN} owner_test_paths {area}: '{x}' matches no file in the repository (check the "
+                          "spelling, e.g. src/auth/** for everything in src/auth)")
     if changed:
         before = {k: configured_value(cfg, k) for k in changed}
         cfg.update(changed)
@@ -5353,6 +5470,7 @@ def settings_change(args, root, cfg, rep, changed, refused, note, pr):
                      "options": list(opts) if isinstance(opts, list) else [], "what": what, "options_help": helps,
                      "changed_now": key in changed or key in note["opened"]})
     res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "heavy_runs": cfg.get("heavy_runs") or [],
+           "owner_test_paths": owner_test_areas(cfg),
            "batch_window": window, "windows": windows, "windows_opened": note["opened"], "windows_ended": note["ended"],
            "github_variables": github_variables(cfg),
            "required_checks": required_checks(cfg), "applied": [], "changed": changed, "refused": refused,
@@ -5444,6 +5562,9 @@ def settings_change(args, root, cfg, rep, changed, refused, note, pr):
             for o in r["options"]:
                 print(f"      {'→' if o == r['value'] else '·'} {o}: {r['options_help'].get(o, '')}")
     print(f"\n  protected_paths    {', '.join(cfg.get('protected_paths') or [])}")
+    areas = owner_test_areas(cfg)
+    print("  owner_test_paths   " + ("; ".join(f"{a}: {', '.join(p_)}" for a, p_ in areas.items()) if areas else
+                                    "(none: needed before uat agents-verify)"))
     print(f"  heavy_runs         {', '.join(cfg.get('heavy_runs') or []) or '(none: haam.py exclusive only takes turns)'}")
     print(f"  production code    {', '.join(cfg.get('production_paths') or ['**'])}, except "
           f"{', '.join((cfg.get('non_production_paths') or NON_PRODUCTION_DEFAULT)[:6])} …")
@@ -7534,6 +7655,582 @@ def cmd_production(args):
     sys.exit(1 if hits and args.check else 0)
 
 
+# ----------------------------------------------------------------------------- uat: agents-verify (the verify lane)
+# A change that needs no person to judge it, and touches none of the owner's own areas (owner_test_paths), is verified
+# by an independent agent at the handed-over commit instead of waiting in UAT. Its marks are its own (the commit status
+# `agent-verified`, the label `verified-by-agents`, a 🔎 comment), never the owner's (`uat`, `uat-passed`, `uat:skip`),
+# and it ships only on the owner's `ship`. `issue_lane`, `verification_state` and `verified_head_counts` are what
+# `ship` and the gate's helpers call.
+
+OWNER_TEST_LABEL = "owner-test"
+LANE_LABEL_NAMES = {"verifying", "verified-by-agents", "verify-failed", OWNER_TEST_LABEL, "spot-check"}
+LANE_KEYS = ("uat", "owner_test_paths", "agents_verify_shadow", "max_review_rounds")
+VERIFY_CLAIM_WHAT = " to verify it"
+READY_VERIFY_MARK, READY_UAT_MARK = "🧪 Ready for verification", "🧪 Ready for UAT"
+VERIFIED_MARK, NOT_VERIFIED_MARK, NEEDS_OWNER_MARK = "🔎 Verified by agents", "🔎 Not verified", "🔎 Needs your test"
+PULLED_BACK_MARK = "↩️ Pulled back"
+VERIFIED_CONTEXT = "agent-verified"
+VERIFY_DOCS_ONLY = ("docs/uat/", "docs/changes/")   # a tip that differs from the verified commit only here still counts
+SPOT_CHECK_EVERY = 10
+SPIKE_COMMIT = re.compile(r"^(?:\S+:\s*)?spike:", re.I)     # as the gate reads a kept prototype's commits
+PLAN_KEYS = (("needs_person", "Needs a person"), ("verified_at", "Verified at"), ("risk", "Risk"), ("undo", "Undo"))
+OTHER_PHASES = (" to assess it", " to write its spec", " to build a prototype", VERIFY_CLAIM_WHAT)
+
+
+def owner_test_areas(cfg):
+    """owner_test_paths as {area: [patterns]} (a list of "area=pattern" strings is read too)."""
+    raw = (cfg or {}).get("owner_test_paths") or {}
+    areas = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            pats = [v] if isinstance(v, str) else list(v or [])
+            pats = [str(x).strip() for x in pats if str(x).strip()]
+            if str(k).strip() and pats:
+                areas[str(k).strip()] = pats
+    elif isinstance(raw, list):
+        for item in raw:
+            name, _, pat = str(item).partition("=")
+            if name.strip() and pat.strip():
+                areas.setdefault(name.strip(), []).append(pat.strip())
+    return areas
+
+
+def set_owner_test_area(areas, value):
+    """One `--set owner_test_paths=…`: `<area>=<pattern>,<pattern>` sets that area, `<area>=` removes it, and an empty
+    value empties the list."""
+    value = value.strip()
+    if not value:
+        return {}
+    name, eq, pats = value.partition("=")
+    name = name.strip()
+    if not eq or not re.fullmatch(r"[\w][\w .:/+-]*", name):
+        sys.exit("owner_test_paths takes <area>=<pattern>,<pattern> (e.g. owner_test_paths=sign-in=src/auth/**), "
+                 "<area>= to remove an area, or nothing to empty the list")
+    out = dict(areas)
+    pats = [x.strip() for x in pats.split(",") if x.strip()]
+    if pats:
+        out[name] = pats
+    else:
+        out.pop(name, None)
+    return out
+
+
+def lane_config(root):
+    """The lane's settings as the default branch has them (origin first: what the gate reads), so a branch can't
+    change its own lane; the rest of the config as this folder has it."""
+    _, main, _ = git_paths(root)
+    try:
+        cfg = dict(load_config(root))
+    except SystemExit:
+        cfg = {}
+    base = cfg.get("default_branch") or "main"
+    for spec in (f"origin/{base}:{CONFIG_NAME}", f"{base}:{CONFIG_NAME}"):
+        raw = git_out(main, "show", spec)
+        if not raw:
+            continue
+        try:
+            on_main = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for k in LANE_KEYS:
+            cfg[k] = on_main.get(k)
+        return cfg
+    return cfg
+
+
+def branch_files(root, base, head):
+    """The files a branch changes against the base, a renamed or copied file by both names (as the gate reads them)."""
+    code, out, err = run(["git", "diff", "--name-status", "-M", f"{base}...{head}"], cwd=root)
+    if code != 0:
+        raise RuntimeError(f"Couldn't compare {head[:12]} with {base}: {(err or '').strip()[:160]}")
+    files = []
+    for line in out.splitlines():
+        for f in line.split("\t")[1:]:
+            if f and f not in files:
+                files.append(f)
+    return files
+
+
+def find_plan(root, ref, branch, head):
+    """(path, text) of the issue's UAT plan at the branch's head (a batch's plan is named after the branch's issue)."""
+    listed = git_out(root, "ls-tree", "--name-only", head, "docs/uat/").splitlines()
+    for r in dict.fromkeys(x for x in (ref, branch_issue(branch, ref)) if x is not None):
+        for path in sorted(listed):
+            if path.rsplit("/", 1)[-1].startswith(f"{file_id(r)}-") and path.endswith(".md"):
+                return path, git_out(root, "show", f"{head}:{path}")
+    return None, ""
+
+
+def plan_lines(text):
+    """The Agent pre-check lines of a UAT plan: {needs_person, verified_at, risk, undo} (those it has)."""
+    text = text or ""
+    m = re.search(r"(?m)^#+ .*Agent pre-check.*$", text)
+    if m:
+        rest = text[m.end():]
+        nxt = re.search(r"(?m)^## ", rest)
+        text = rest[:nxt.start()] if nxt else rest
+    out = {}
+    for key, label in PLAN_KEYS:
+        found = re.search(rf"(?mi)^\s*(?:[-*]\s+)?\**\s*{re.escape(label)}\s*:\s*\**\s*(.*?)\s*(?:<!--.*)?$", text)
+        if found:
+            out[key] = found.group(1).strip()
+    return out
+
+
+def issue_labels(repo, number):
+    code, out, err = run(["gh", "issue", "view", str(number), "-R", repo, "--json", "labels"])
+    if code != 0:
+        raise RuntimeError(f"Couldn't read #{number}: {(err or out)[:160]}")
+    return [x.get("name") for x in (json.loads(out or "{}").get("labels") or [])]
+
+
+def lane_details(root, cfg, number, labels=None, branch=None, head=None, base=None):
+    """issue_lane with what it read: {lane, reason, branch, head, files, plan, plan_fields}."""
+    d = {"issue": number, "lane": "owner", "reason": "", "branch": branch, "head": head, "files": [], "plan": None,
+         "plan_fields": {}}
+
+    def owner(why):
+        d["reason"] = why
+        return d
+    uat = setting_value(cfg, "uat")
+    if uat != "agents-verify":
+        return owner(f"the setting uat is {uat}, not agents-verify: the owner tests it, as before")
+    if labels is None:
+        labels = issue_labels(cfg["github_repo"], number)
+    if OWNER_TEST_LABEL in labels:
+        return owner("label owner-test: the owner tests it themselves")
+    if "uat-failed" in labels:
+        return owner("label uat-failed: rework after the owner's failed test stays the owner's")
+    if not branch or not head:
+        found, target, _ = find_branch(root, cfg, number, branch)
+        if not found:
+            return owner(f"no branch found for #{number}")
+        d["branch"], branch = found, found
+        head = head or git_out(root, "rev-parse", "--verify", "--quiet", target)
+        d["head"] = head
+        if not head:
+            return owner(f"can't read the tip of {found}")
+    base = base or default_base(root)
+    d["files"] = files = branch_files(root, base, head)
+    for area, pats in owner_test_areas(cfg).items():
+        hits = protected_matches(pats, files)
+        if hits:
+            more = f" and {len(hits) - 1} more" if len(hits) > 1 else ""
+            return owner(f"changes {area} ({hits[0]}{more}), one of the owner's own areas (owner_test_paths)")
+    subjects = git_out(root, "log", "--format=%s", f"{base}..{head}").splitlines()
+    if any(SPIKE_COMMIT.match(s) for s in subjects):
+        return owner("built from a prototype (spike: commits)")
+    d["plan"], text = find_plan(root, number, branch, head)
+    d["plan_fields"] = fields = plan_lines(text)
+    need = fields.get("needs_person") or ""
+    if re.match(r"(?i)yes\b", need):
+        why = re.sub(r"(?i)^yes\b[\s:,-]*", "", need).strip()
+        return owner(f"needs a person: {why.strip('()') or 'the plan says so'}")
+    if not re.match(r"(?i)no\b", need):
+        return owner("the plan has no line `Needs a person: yes (<why>)` or `no`" if d["plan"] else
+                     "no UAT plan on the branch (docs/uat/), so no `Needs a person:` line")
+    d["lane"] = "agents"
+    d["reason"] = "needs no person, and changes none of the owner's own areas"
+    return d
+
+
+def issue_lane(root, cfg, number, labels=None, branch=None, head=None, base=None):
+    """Who checks this ticket: ("agents", why) or ("owner", the first reason that applies). cfg: lane_config(root).
+    Reads the branch's changed files against the base (default origin/main), so fetch first."""
+    d = lane_details(root, cfg, number, labels=labels, branch=branch, head=head, base=base)
+    return d["lane"], d["reason"]
+
+
+def verdict_records(comments):
+    """The verifier's 🔎 records, oldest first: {verdict, branch, head, claim, tool, at, reason}."""
+    out = []
+    for c in comments:
+        body = c.get("body") or ""
+        verdict = ("verified" if body.startswith(VERIFIED_MARK) else "not-verified" if body.startswith(NOT_VERIFIED_MARK)
+                   else "needs-owner" if body.startswith(NEEDS_OWNER_MARK) else None)
+        if not verdict:
+            continue
+        first = body.splitlines()[0]
+        get = lambda pat: (re.search(pat, first) or [None, ""])[1]
+        out.append({"verdict": verdict, "branch": get(r"branch `([^`]+)`"), "head": get(r"· head ([0-9a-f]{7,40})"),
+                    "claim": get(r"· claim ([0-9a-f]{6,})"), "tool": get(r"· claim [0-9a-f]{6,} · (.+)$").strip(),
+                    "at": c.get("createdAt"), "shadow": "\n\nShadow start: " in body,
+                    "reason": get(r"^🔎 Needs your test: (.*?) · branch") if verdict == "needs-owner" else ""})
+    return out
+
+
+def build_claim_tokens(comments):
+    """The ids of every build claim the issue ever had (claims to assess, spec, prototype or verify aren't builds)."""
+    return {claim_token(c.get("body")) for c in comments if (c.get("body") or "").startswith(CLAIM_MARK)
+            and not any(w in (c.get("body") or "") for w in OTHER_PHASES)} - {""}
+
+
+def verified_head_counts(root, verified_sha, tip_sha):
+    """Whether a verification of `verified_sha` still covers the branch at `tip_sha`: the same commit, or one that
+    differs from it only in files under docs/uat/ or docs/changes/ (the plan and the release note). Needs both commits
+    here (fetch first); False when it can't tell."""
+    if not verified_sha or not tip_sha:
+        return False
+    a, b = verified_sha.lower(), tip_sha.lower()
+    if len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a)):
+        return True
+    code, out, _ = run(["git", "diff", "--name-only", "--no-renames", a, b], cwd=root)
+    if code != 0:
+        return False
+    return all(f.startswith(VERIFY_DOCS_ONLY) for f in out.splitlines())
+
+
+def verification_state(root, cfg, number, labels, comments, head):
+    """Whether the ticket counts as verified by agents at the branch's `head` now: {verified, why, verified_at, claim,
+    tool, at}. Needs the verdict comment, the label, no owner-test, a head the verification still covers
+    (verified_head_counts) and the agent-verified status on the verified commit. shadow: verified during the shadow
+    start (agents_verify_shadow), so the owner still tests it and only their pass ships it."""
+    recs = verdict_records(comments)
+    rec = recs[-1] if recs else None
+    st = {"verified": False, "why": "", "verified_at": None, "claim": None, "tool": None, "at": None,
+          "shadow": False}
+    if rec and rec["verdict"] == "verified":
+        st.update(verified_at=rec["head"], claim=rec["claim"], tool=rec["tool"], at=rec["at"], shadow=rec["shadow"])
+    if OWNER_TEST_LABEL in labels:
+        st["why"] = "pulled back: the owner tests it (owner-test)"
+    elif not rec or rec["verdict"] != "verified":
+        st["why"] = ("sent back by the verifier (verify-failed)" if rec and rec["verdict"] == "not-verified"
+                     else "the verifier asked for the owner's test" if rec and rec["verdict"] == "needs-owner"
+                     else "waiting for a verifier" if "verifying" in labels else "not verified")
+    elif "verified-by-agents" not in labels:
+        st["why"] = "no label verified-by-agents"
+    elif not verified_head_counts(root, rec["head"], head):
+        st["why"] = (f"the branch moved on since the verified commit {rec['head'][:8]} (now {(head or '?')[:8]}): "
+                     "it needs verifying again")
+    elif not status_ok(cfg["github_repo"], rec["head"], VERIFIED_CONTEXT):
+        st["why"] = f"no {VERIFIED_CONTEXT} status on {rec['head'][:8]}"
+    else:
+        st["verified"] = True
+        st["why"] = f"verified by agents at {rec['head'][:8]} (claim {rec['claim']})"
+    return st
+
+
+def ensure_labels(repo, names):
+    for name, color, desc in GITHUB_LABELS:
+        if name in names:
+            run(["gh", "label", "create", name, "-R", repo, "--color", color, "--description", desc, "--force"])
+
+
+def edit_issue_labels(repo, number, add=(), remove=(), extra=()):
+    """Add and remove labels in one edit, creating the lane's labels if this repository doesn't have them yet."""
+    cmd = ["gh", "issue", "edit", str(number), "-R", repo] + list(extra)
+    for x in add:
+        cmd += ["--add-label", x]
+    for x in remove:
+        cmd += ["--remove-label", x]
+    if len(cmd) == 6:
+        return
+    code, out, err = run(cmd)
+    if code != 0 and "not found" in (err or out or "").lower():
+        ensure_labels(repo, set(add))
+        code, out, err = run(cmd)
+    if code != 0:
+        raise RuntimeError(err or out)
+
+
+def verify_claim_refusal(cfg, iss):
+    """Why `issue claim --for verify` can't take this issue (None: it can)."""
+    lcfg = lane_config(find_repo_root(Path.cwd()))
+    n, labels = iss["number"], iss["labels"] or []
+    if setting_value(lcfg, "uat") != "agents-verify":
+        return "Nothing is verified by agents here: the setting uat isn't agents-verify on main."
+    if OWNER_TEST_LABEL in labels:
+        return f"#{n} has owner-test: the owner tests it themselves."
+    if "spot-check" in labels and iss["status"] in ("In Review", "UAT"):
+        return None
+    if "verified-by-agents" in labels and "verifying" not in labels and iss["status"] == "In Review":
+        # A later push ended the verification: the new head is verified again
+        root = find_repo_root(Path.cwd())
+        run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+        branch, target, _ = find_branch(root, lcfg, n)
+        head = git_out(root, "rev-parse", "--verify", "--quiet", target) if branch else ""
+        if head and not verification_state(root, lcfg, n, labels, issue_comments(lcfg["github_repo"], n),
+                                           head)["verified"]:
+            return None
+        return f"#{n} is verified by agents at its head already."
+    if "verifying" not in labels or iss["status"] != "In Review":
+        return (f"#{n} isn't waiting for a verifier (status {iss['status'] or '-'}, no label verifying). "
+                "/uat hands a ticket over with `haam.py handover`.")
+    return None
+
+
+def pull_back_to_owner(cfg, board, iss):
+    """owner-test was just added: the owner tests it themselves. A ticket waiting in the agents' lane goes to UAT."""
+    repo, n = cfg["github_repo"], iss["number"]
+    moved = ""
+    if iss["status"] == "In Review" and ({"verifying", "verified-by-agents"} & set(iss["labels"] or [])):
+        board.set_option(iss, "Status", "UAT")
+        moved = "; status UAT (the owner's test)"
+    run(["gh", "issue", "comment", str(n), "-R", repo, "--body",
+         f"{PULLED_BACK_MARK}: the owner tests #{n} themselves (label `{OWNER_TEST_LABEL}`). It leaves the agents' "
+         "lane, and no release takes it until they pass it."])
+    return moved
+
+
+def remote_tip(repo, branch):
+    code, ref_, _ = gh_api("GET", f"repos/{repo}/git/ref/heads/{branch}")
+    return ((ref_ or {}).get("object") or {}).get("sha") if code == 0 and isinstance(ref_, dict) else None
+
+
+def lane_start(args, what):
+    """(root, the folder's config, the lane's config, issue number, repo) for lane / handover / verify-result."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if cfg.get("tracker") != "github":
+        sys.exit(f"{what} reads the issue's labels and comments on GitHub: the agents-verify lane needs the GitHub "
+                 "tracker (Linear: every change stays the owner's test).")
+    run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+    return root, cfg, lane_config(root), parse_issue_number(args.issue), cfg["github_repo"]
+
+
+def cmd_lane(args):
+    """Who checks this ticket under uat: agents-verify: `agents` (an independent verifier) or `owner` (the owner's own
+    test), with the first reason that applies; and whether a verification still counts."""
+    root, cfg, lcfg, number, repo = lane_start(args, "lane")
+    try:
+        d = lane_details(root, lcfg, number, branch=args.branch)
+        if d["lane"] == "agents":
+            d["verification"] = verification_state(root, lcfg, number, issue_labels(repo, number),
+                                                    issue_comments(repo, number), d["head"])
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return
+    print(f"{d['lane']}: {d['reason']}")
+    if d.get("branch") and d.get("head"):
+        print(f"   branch {d['branch']} at {d['head'][:8]}" + (f" · plan {d['plan']}" if d.get("plan") else ""))
+    v = d.get("verification")
+    if v:
+        print(f"   {OK if v['verified'] else INFO} {v['why']}")
+
+
+def cmd_handover(args):
+    """/uat's hand-over (GitHub Projects): the lane decides where a built ticket goes. agents: status In Review, label
+    verifying and `🧪 Ready for verification`; owner: status UAT and `🧪 Ready for UAT` with the reason."""
+    root, cfg, lcfg, number, repo = lane_start(args, "handover")
+    board = GHProject(cfg)
+    try:
+        board.load()
+        iss = board.issue(number)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if is_claimed(iss) and not claim_is_mine(repo, number, args):
+        sys.exit(f"#{number} is claimed by another chat: only the chat that built it hands it over (from its branch, "
+                 "or with --claim <its id>).")
+    try:
+        branch, target, _ = find_branch(root, cfg, number, args.branch)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if not branch or not (target or "").startswith("origin/"):
+        sys.exit(f"Push the branch first: the hand-over is what's on GitHub ({branch or 'no branch found'}).")
+    head = git_out(root, "rev-parse", target)
+    try:
+        d = lane_details(root, lcfg, number, labels=iss["labels"], branch=branch, head=head)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    summary = Path(args.body_file).read_text().strip() if args.body_file else ""
+    plan = d["plan"] or find_plan(root, number, branch, head)[0]
+    f = d["plan_fields"]
+    owner = cfg.get("product_owner_github")
+    if d["lane"] == "agents":
+        bad = []
+        if not re.fullmatch(r"[0-9a-f]{40}", (f.get("verified_at") or "").lower()):
+            bad.append("`Verified at: <the 40-character commit your evidence is from>`")
+        elif not verified_head_counts(root, f["verified_at"], head):
+            bad.append(f"`Verified at: {f['verified_at'][:12]}…` differs from the head {head[:8]} in more than "
+                       "docs/uat/ and docs/changes/: run the evidence again at the head and name it")
+        if not re.match(r"(?i)(low|medium|high)\s*[:·-]\s*\S", f.get("risk") or "") or "<" in (f.get("risk") or ""):
+            bad.append("`Risk: low|medium|high: <one line>`")
+        if not f.get("undo") or "<" in f["undo"]:
+            bad.append("`Undo: <how to undo it>`")
+        if bad:
+            sys.exit(f"The plan ({plan}) needs these lines under Agent pre-check before a verifier can take it: "
+                     + "; ".join(bad))
+        try:
+            edit_issue_labels(repo, number, add=["verifying"],
+                              remove=[x for x in ("verify-failed", "verified-by-agents") if x in iss["labels"]])
+        except RuntimeError as e:
+            sys.exit(f"Couldn't label #{number}: {e}")
+        board.set_option(iss, "Status", "In Review")
+        status = "In Review"
+        body = (f"{READY_VERIFY_MARK} · branch `{branch}` · head {head}\n\n"
+                f"Lane: agents ({d['reason']}). Risk: {f['risk']}. Undo: {f['undo']}.\nPlan: `{plan}`"
+                + (f"\n\n{summary}" if summary else ""))
+    else:
+        board.set_option(iss, "Status", "UAT")
+        status = "UAT"
+        fully = re.search(r"(?i)Fully verified by the agent:\**\s*yes", find_plan(root, number, branch, head)[1] or "")
+        body = (f"{READY_UAT_MARK} · your test: {d['reason']} · branch `{branch}` · head {head}\n\n"
+                + ("✔ Fully verified by the agent\n" if fully and setting_value(lcfg, "uat") != "agents-verify" else "")
+                + (f"Plan: `{plan}`" if plan else "") + (f"\n\n{summary}" if summary else "")
+                + (f"\n\n@{owner}" if owner else ""))
+    code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
+    if code != 0:
+        sys.exit(f"Couldn't comment on #{number}: {(err or out)[:200]}")
+    res = {"issue": number, "lane": d["lane"], "reason": d["reason"], "status": status, "branch": branch, "head": head,
+           "plan": plan}
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"{OK} #{number} → {status} ({d['lane']}: {d['reason']})")
+    print("   A verifier takes it: /work verify, or /next." if d["lane"] == "agents" else
+          f"   The owner tests it: /test {number}")
+
+
+def checklist(text):
+    """Each finding of a card as a checklist item."""
+    out = []
+    for line in (text or "").splitlines():
+        m = re.match(r"^(\s*)[-*]\s+(?!\[[ xX]\])(.*)$", line)
+        out.append(f"{m.group(1)}- [ ] {m.group(2)}" if m else line)
+    return "\n".join(out)
+
+
+def verified_ticket_count(repo, exclude=None):
+    """How many tickets were ever verified by agents (label verified-by-agents, open or closed), besides `exclude`."""
+    code, out, _ = run(["gh", "issue", "list", "-R", repo, "--label", "verified-by-agents", "--state", "all",
+                        "--json", "number", "--limit", "1000"])
+    try:
+        nums = {i.get("number") for i in json.loads(out or "[]")} if code == 0 else set()
+    except json.JSONDecodeError:
+        nums = set()
+    return len(nums - {exclude})
+
+
+def cmd_verify_result(args):
+    """The verifier's verdict, recorded with its own marks (never the owner's): verified, not-verified or needs-owner."""
+    root, cfg, lcfg, number, repo = lane_start(args, "verify-result")
+    verdict = args.verdict
+    card = Path(args.body_file).read_text().strip() if args.body_file else ""
+    if not card and verdict != "needs-owner":
+        sys.exit("--body-file <card> is required: what changed, the risk, what was checked, what wasn't, how to undo it "
+                 "(not-verified: the findings, one per line)")
+    if verdict == "needs-owner" and not (args.reason or "").strip():
+        sys.exit("--reason is required for needs-owner: why the owner must test it themselves")
+    board = GHProject(cfg)
+    try:
+        board.load()
+        iss = board.issue(number)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    comments = issue_comments(repo, number)
+    if args.claim in build_claim_tokens(comments):
+        sys.exit(f"claim {args.claim} is the build claim of #{number}: a verifier is never the builder. A fresh chat "
+                 f"claims it to verify: issue claim {number} --for verify")
+    mine = [c for c in active_claims(comments) if claim_token(c.get("body")) == args.claim
+            and VERIFY_CLAIM_WHAT in (c.get("body") or "")]
+    if not mine:
+        sys.exit(f"No verify claim {args.claim} on #{number}. Claim it first: issue claim {number} --for verify")
+    try:
+        branch, _, _ = find_branch(root, cfg, number, args.branch)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if not branch:
+        sys.exit(f"No branch found for #{number} (add --branch <name>)")
+    if git_out(Path.cwd(), "branch", "--show-current") == branch:
+        sys.exit(f"This worktree has {branch} checked out. A verifier works detached at the handed-over commit "
+                 f"(git switch --detach origin/{branch}) in its own worktree, and never edits the branch.")
+    tip = remote_tip(repo, branch)
+    want = (args.head or "").strip().lower()
+    if not tip or len(want) < 7 or not tip.lower().startswith(want):
+        sys.exit(f"{want or '--head'} isn't the tip of {branch} on GitHub ({(tip or 'not found')[:12]}). The branch "
+                 "moved after the hand-over: verify the new head (or leave it to the next verifier).")
+    head = tip
+    run(["git", "fetch", "--quiet", "origin", branch], cwd=root)
+    try:
+        lane, why = issue_lane(root, lcfg, number, labels=iss["labels"], branch=branch, head=head)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if lane == "owner":
+        sys.exit(f"#{number}'s lane is owner ({why}): the owner tests it. Release your claim: "
+                 f"issue release {number} --claim {args.claim}")
+    rounds = sum(1 for r in verdict_records(comments) if r["verdict"] == "not-verified")
+    max_rounds = int(setting_value(lcfg, "max_review_rounds") or 2)
+    if verdict != "needs-owner" and rounds >= max_rounds:
+        sys.exit(f"#{number} was sent back {rounds} time(s) (max_review_rounds {max_rounds}): the verdict now is "
+                 "needs-owner, with the reason.")
+    labels = set(iss["labels"] or [])
+    tool = (args.tool or "an agent").strip()
+    if "spot-check" in labels and verdict == "verified":
+        before = [r for r in verdict_records(comments) if r["verdict"] == "verified"]
+        if before and before[-1]["tool"].lower() == tool.lower():
+            sys.exit(f"#{number} is a spot-check: a second verification on another model than the first ({tool}). "
+                     "Pass --tool with this chat's tool and model.")
+    tail = f" · branch `{branch}` · head {head} · claim {args.claim} · {tool}"
+    owner = cfg.get("product_owner_github")
+    when = time.strftime("%Y-%m-%d")
+    res = {"issue": number, "verdict": verdict, "branch": branch, "head": head, "claim": args.claim}
+    if verdict == "verified":
+        nth = verified_ticket_count(repo, exclude=number) + 1
+        shadow_n = int(setting_value(lcfg, "agents_verify_shadow") or 0)
+        shadow = nth <= shadow_n
+        spot_new = "verified-by-agents" not in labels and "spot-check" not in labels and nth % SPOT_CHECK_EVERY == 0
+        code, _, err = gh_api("POST", f"repos/{repo}/statuses/{head}", {
+            "state": "success", "context": VERIFIED_CONTEXT,
+            "description": f"Verified by agents (claim {args.claim}) on {when}"[:140]})
+        if code != 0:
+            sys.exit(f"Couldn't record the verification on the commit: {(err or '')[:200]}")
+        body = f"{VERIFIED_MARK}{tail}\n\n{card}"
+        if shadow:
+            body += (f"\n\nShadow start: verified ticket {nth} of {shadow_n}. The owner still tests it, as before "
+                     f"(`/test {number}`), so the two can be compared." + (f" @{owner}" if owner else ""))
+        if spot_new:
+            body += (f"\n\nSpot-check: every {SPOT_CHECK_EVERY}th verified ticket is verified again by a second "
+                     "verifier on another model (label `spot-check`).")
+        add = ["verified-by-agents"] + (["spot-check"] if spot_new else [])
+        remove = [x for x in ("verifying", "verify-failed", CLAIMED_LABEL) if x in labels]
+        if "spot-check" in labels:
+            remove.append("spot-check")          # the second verification is done
+        status = "UAT" if shadow else "In Review"
+        res.update(shadow=shadow, spot_check=spot_new, nth=nth)
+        extra = []
+    elif verdict == "not-verified":
+        gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "failure", "context": VERIFIED_CONTEXT,
+                                                         "description": f"Not verified (claim {args.claim}) on {when}"})
+        body = f"{NOT_VERIFIED_MARK}{tail}\n\n{checklist(card)}"
+        add = ["verify-failed"]
+        remove = [x for x in ("verifying", "verified-by-agents", "spot-check", CLAIMED_LABEL) if x in labels]
+        extra = sum((["--remove-assignee", a] for a in iss["assignees"]), [])
+        status = "Ready"
+        res["round"] = rounds + 1
+    else:
+        gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "failure", "context": VERIFIED_CONTEXT,
+                                                         "description": f"Needs the owner's test (claim {args.claim})"})
+        reason = " ".join(args.reason.split())
+        body = (f"{NEEDS_OWNER_MARK}: {reason}{tail}" + (f"\n\n{card}" if card else "")
+                + (f"\n\n@{owner}" if owner else ""))
+        add = [OWNER_TEST_LABEL]
+        remove = [x for x in ("verifying", "spot-check", CLAIMED_LABEL) if x in labels]
+        extra = []
+        status = "UAT"
+    code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
+    if code != 0:
+        sys.exit(f"Couldn't comment on #{number}: {(err or out)[:200]}")
+    try:
+        edit_issue_labels(repo, number, add=add, remove=remove, extra=extra)
+    except RuntimeError as e:
+        sys.exit(f"Recorded the verdict, but couldn't change the labels of #{number}: {e}")
+    if iss["status"] != status:
+        board.set_option(iss, "Status", status)
+    run(["gh", "issue", "comment", str(number), "-R", repo, "--body",
+         f"{RELEASE_MARK} ({args.claim}) · verdict {verdict}" + (f" · status {status}" if status != iss["status"] else "")])
+    res["status"] = status
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"{OK} #{number}: {verdict} at {head[:8]} → {status}; claim {args.claim} released")
+    if res.get("shadow"):
+        print(f"   Shadow start ({res['nth']} of {setting_value(lcfg, 'agents_verify_shadow')}): the owner tests it too.")
+    if res.get("spot_check"):
+        print("   Picked for a spot-check: /next gives it to a second verifier on another model.")
+
+
 def cmd_hooks(args):
     root = find_repo_root(Path.cwd())
     rep = Report()
@@ -7912,7 +8609,7 @@ def main():
     p.add_argument("--tool", help="claim: agent tool, e.g. 'Claude Code'")
     p.add_argument("--machine", help="claim: which computer, e.g. 'desktop'")
     p.add_argument("--branch", help="claim: branch name")
-    p.add_argument("--for", dest="for_", choices=["build", "assess", "spec", "spike"],
+    p.add_argument("--for", dest="for_", choices=["build", "assess", "spec", "spike", "verify"],
                    help="claim: what this chat is about to do (default build)")
     p.add_argument("--claim", help="release/status: this chat's claim id (printed by claim, and in its comment)")
     p.add_argument("--force", action="store_true", help="claim: allow a non-Ready issue (bugs); status: move an issue "
@@ -7979,6 +8676,29 @@ def main():
     p.add_argument("--sha", help="with --built: the commit the build took (default: origin's main now)")
     p.add_argument("--human", action="store_true", help="the owner said the build is done, in this session")
     p.set_defaults(func=cmd_cadence)
+
+    p = common(sub.add_parser("lane", help="uat: agents-verify: who checks this ticket, agents or the owner, and why"))
+    p.add_argument("issue", help="issue number (#12)")
+    p.add_argument("--branch", help="the ticket's branch, when it isn't named after the issue")
+    p.set_defaults(func=cmd_lane)
+
+    p = common(sub.add_parser("handover", help="/uat: hand a built ticket over by its lane (verifier or owner)"))
+    p.add_argument("issue", help="issue number (#12)")
+    p.add_argument("--branch", help="the ticket's branch, when it isn't named after the issue")
+    p.add_argument("--claim", help="this chat's build claim id (when it isn't on the branch)")
+    p.add_argument("--body-file", help="the 3-5 line summary for the comment")
+    p.set_defaults(func=cmd_handover)
+
+    p = common(sub.add_parser("verify-result", help="the verifier's verdict, with its own marks (never the owner's)"))
+    p.add_argument("issue", help="issue number (#12)")
+    p.add_argument("--verdict", required=True, choices=["verified", "not-verified", "needs-owner"])
+    p.add_argument("--head", required=True, help="the commit you verified: the branch's tip on GitHub")
+    p.add_argument("--claim", required=True, help="your verify claim's id (issue claim <n> --for verify)")
+    p.add_argument("--body-file", help="the card (verified), the findings one per line (not-verified)")
+    p.add_argument("--reason", help="needs-owner: why the owner must test it")
+    p.add_argument("--tool", help="your agent tool and model, e.g. 'Claude Code, <model>'")
+    p.add_argument("--branch", help="the ticket's branch, when it isn't named after the issue")
+    p.set_defaults(func=cmd_verify_result)
 
     p = common(sub.add_parser("protected", help="list changed files in protected areas (human-review, never the no-UAT lane)"))
     p.add_argument("--base", help="compare with this ref (default: origin/main)")

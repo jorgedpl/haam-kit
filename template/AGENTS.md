@@ -43,6 +43,7 @@ Skills live in `.agents/skills/<name>/SKILL.md` (the shared Agent Skills format)
 | Prepare UAT | `/uat <ID>` | agent |
 | Test a change, then ship it or send it back (G4, G5) | `/test [<ID>]` | **human only** |
 | Record UAT result (G4) | `/uat-result <ID> pass\|fail` | **human only** |
+| Release on the owner's rhythm: is a release or a phone build due? Prepare it, then ask for ship, the deploy and live | `/cadence [now]` | **human only** |
 | Override a gate | `/override <ID> "<reason>"` | **human only** |
 | Close after deploy (G5) | `/release <ID>` | **human only** |
 | Adopt HAAM in a repo | `/haam-setup` | **human only** (project admin) |

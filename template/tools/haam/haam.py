@@ -25,6 +25,8 @@ Testing and shipping (inside /test, after the human's verdict):
     checkout-pr ISSUE | --back              Put a change on this machine to test it (its PR, or the agent's branch)
     publish ISSUE --human                   Test-first: push the tested commit and open its PR (uat-passed)
     ship ISSUE... | --all --human           Merge, approve the production deploy (one for several), wait, close (exit 2: run again)
+    ship --all --plan                       What ship would do: the release's changes in order, left out, clashes, files
+    cadence [--json] | --built TARGET --human   Is a release (or a phone build) due by the owner's cadence?
 
 CI cost:
     ci-usage [--days 7]                     Where the Actions minutes went (by workflow, job, trigger, day)
@@ -128,6 +130,9 @@ DEFAULT_CONFIG = {
     # Days with no sign of life (no comment on the issue, no commit on its branch) after which an agent may release
     # another chat's claim (issue release --stale) and pick the work up. 0: never; `issue stale` only lists them.
     "stale_claim_days": 0,
+    "release_after_passed": 0,
+    "release_after_days": 0,
+    "release_targets": {},
     # Board fields every new issue must get on create (GitHub Projects). Empty: agents set a field only when
     # the text clearly answers it. Example: ["Area", "Kind", "Code check"]. Epics use required_epic_fields
     # when set, otherwise the same list without "Code check".
@@ -223,6 +228,10 @@ SETTINGS = [
                 "merged before it). (Recommended)",
         "automatic": "Deploys start as soon as a PR merges: fastest, but a merged change goes live without a last "
                      "look. Best with uat: always."}),
+    ("Shipping", "release_after_passed", int, "grouping release: /cadence prepares a release once this many changes "
+     "have passed. 0 (default): only when you ask. You still say ship, the deploy and live.", {}),
+    ("Shipping", "release_after_days", int, "...or once the oldest passed change has waited this many days, so a quiet "
+     "week still ships. 0 (default): off. An Urgent issue, or one labelled security, is due at once.", {}),
     ("Limits", "max_open_prs", int, "Agents hold new builds at this many ready PRs (CI cost).", {}),
     ("Limits", "max_in_uat", int, "...or at this many changes waiting for your test.", {}),
     ("Limits", "max_review_rounds", int, "Failing AI review rounds before an agent stops and hands over to you.", {}),
@@ -237,7 +246,7 @@ SETTINGS = [
      "before an agent may release that claim and pick the work up (a chat that died: session limit, laptop asleep, "
      "crash). 0 (default): never; /next lists them for you and /triage stale frees them.", {}),
 ]
-INT_SETTINGS_ZERO_OK = {"stale_claim_days"}     # 0 means off
+INT_SETTINGS_ZERO_OK = {"stale_claim_days", "release_after_passed", "release_after_days"}     # 0 means off
 SETTING_KEYS = {k: (g, opts, what, helps) for g, k, opts, what, helps in SETTINGS}
 
 GITHUB_LABELS = [
@@ -1174,7 +1183,8 @@ def cmd_config(args):
                                   ("--end-batch-window", args.end_batch_window or None),
                                   ("--required-fields", args.required_fields),
                                   ("--required-epic-fields", args.required_epic_fields),
-                                  ("--worktree-dir", args.worktree_dir)) if v is not None]
+                                  ("--worktree-dir", args.worktree_dir), ("--release-target", args.release_target),
+                                  ("--clear-release-targets", args.clear_release_targets or None)) if v is not None]
     if owner_flags and (root / CONFIG_NAME).exists() and not args.human:
         sys.exit(f"{', '.join(owner_flags)}: these are the owner's settings. Change them inside /haam-settings (or "
                  "/haam-setup) after the human chose, with --human.")
@@ -1218,6 +1228,15 @@ def cmd_config(args):
         cfg["backup_approvers_github"] = [x.strip() for x in args.backup_approvers.split(",") if x.strip()]
     if args.agents is not None:
         cfg["agents"] = [x.strip().lower() for x in args.agents.split(",") if x.strip()]
+    if args.release_target or args.clear_release_targets:
+        targets = {} if args.clear_release_targets else dict(cfg.get("release_targets") or {})
+        for spec in args.release_target or []:
+            name, _, pats = spec.partition("=")
+            pats = [x.strip() for x in pats.split(",") if x.strip()]
+            if not name.strip() or not pats:
+                sys.exit(f"--release-target {spec!r}: give NAME=PATTERNS, e.g. ios='apps/ios/**,packages/core/**'")
+            targets[name.strip()] = pats
+        cfg["release_targets"] = targets
     if args.protected or args.unprotected:
         cur = list(cfg.get("protected_paths") or [])
         for x in (args.protected or "").split(","):
@@ -3603,15 +3622,309 @@ def tidy_worktrees(root, cfg, say):
         say(f"{INFO} Worktrees tidied: {last[-1].strip()}")
 
 
+MIGRATION_PATTERNS = ["**/migrations/**", "**/migration/**", "**/migrate/**", "**/*.sql"]
+
+
+def issue_number_key(key):
+    """Sort key for an issue ID by its number as a number: #852 before #1879 (as text, "#1879" < "#852")."""
+    m = re.search(r"(\d+)\D*$", str(key or ""))
+    return (int(m.group(1)) if m else 10 ** 9, str(key))
+
+
+def release_order(items, first=()):
+    """The order a release takes passed changes in: the ones the owner named with --first (in the order given), then
+    by issue number as a number, a change for several issues by its lowest."""
+    pos = {k: i for i, k in enumerate(first)}
+
+    def key(kv):
+        k, v = kv
+        if k in pos:
+            return (0, (pos[k], ""))
+        return (1, min(issue_number_key(i) for i in (v.get("issues") or [k])))
+    return sorted(items, key=key)
+
+
+def merges_cleanly(cwd, a, b):
+    """True when commits a and b merge without a conflict, False when they conflict, None when git can't say (older
+    than 2.38). Nothing is written to any branch or worktree."""
+    p = subprocess.run(["git", "merge-tree", "--write-tree", "--quiet", a, b], cwd=cwd, capture_output=True, text=True)
+    return True if p.returncode == 0 else False if p.returncode == 1 else None
+
+
+def compose_release(root, wt, base_sha, items, first=()):
+    """Merge passed changes, in order, into the detached worktree `wt` (made from base_sha). The real ship and
+    `ship --plan` both run this, so a plan can't disagree with the merge. Returns (included, left_out, clashes):
+    included [(key, v)]; left_out [{key, why}] (changed after the test, or conflicts with main itself); clashes
+    [{key, with}]: a change that conflicts with one already in (`with`: its key, or None when only with the changes
+    before it together), which the owner decides (`--first`), unless the change it clashes with is one they put first."""
+    included, left_out, clashes = [], [], []
+    for key, v in items:
+        tip = git_out(root, "rev-parse", "--verify", "--quiet", f"origin/{v['branch']}")
+        if tip and tip != v["sha"]:
+            left_out.append({"key": key, "why": f"changed after your test ({v['sha'][:8]} → {tip[:8]}): test it again"})
+            continue
+        c2, _, _ = run(["git", "merge", "--no-ff", "--no-edit", "-m", f"{' '.join(v['issues'])}: {v['title']}",
+                        v["sha"]], cwd=wt)
+        if c2 == 0:
+            included.append((key, v))
+            continue
+        run(["git", "merge", "--abort"], cwd=wt)
+        if merges_cleanly(wt, base_sha, v["sha"]) is not True:
+            left_out.append({"key": key, "why": "conflicts with main: send it back to an agent to rebase on main, then "
+                                                "test it again"})
+            continue
+        partner = next((k2 for k2, v2 in included if merges_cleanly(wt, v2["sha"], v["sha"]) is False), None)
+        if partner is not None and partner in first:
+            left_out.append({"key": key, "why": f"clashes with {partner}, which you put first: send it back to an agent "
+                                                "to rebase on main, then test it again"})
+        else:
+            clashes.append({"key": key, "with": partner})
+    return included, left_out, clashes
+
+
+def clash_question(clashes):
+    """What the owner is asked when passed changes clash: never left to the sort order."""
+    lines = []
+    for c in clashes:
+        k, w = c["key"], c["with"]
+        if w:
+            lines.append(f"{k} and {w} change the same lines. Say which goes first: `--first {k.lstrip('#')}` puts {k} "
+                         f"in and leaves {w} out (to rebase and test again); `--first {w.lstrip('#')}` the other way.")
+        else:
+            lines.append(f"{k} conflicts with the changes before it together. `--first {k.lstrip('#')}` puts it in first "
+                         f"(what it clashes with is then left out), or `--without {k.lstrip('#')}` leaves it out.")
+    return lines
+
+
+def release_composition(root, cfg, items, first=(), keep=False):
+    """Compose a release from `items` in a temporary worktree from a fresh origin/<base>. Returns a dict: base, wt
+    (when keep, the caller removes it), head, included, left_out, clashes, files, protected, migrations."""
+    run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+    base = cfg.get("default_branch") or "main"
+    _, main, _ = git_paths(root)
+    wt = main / ".haam" / ("release-build" if keep else "release-plan")
+    run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+    code, _, err = run(["git", "worktree", "add", "--detach", str(wt), f"origin/{base}"], cwd=root)
+    if code != 0:
+        raise RuntimeError(f"Couldn't prepare the release: {err[:200]}")
+    try:
+        base_sha = git_out(wt, "rev-parse", "HEAD")
+        included, left_out, clashes = compose_release(root, wt, base_sha, items, first)
+        head = git_out(wt, "rev-parse", "HEAD")
+        _, names, _ = run(["git", "diff", "--name-only", "--no-renames", base_sha, head], cwd=wt)
+        files = [f for f in (names or "").splitlines() if f]
+    finally:
+        if not keep:
+            run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+    return {"base": base, "base_sha": base_sha, "wt": wt if keep else None, "head": head, "included": included,
+            "left_out": left_out, "clashes": clashes, "files": files,
+            "protected": protected_matches(cfg.get("protected_paths"), files),
+            "migrations": protected_matches(MIGRATION_PATTERNS, files)}
+
+
+def release_items(args, cfg, data):
+    """The passed changes a new release may take: not already in a release that is merged and waiting for its
+    deploy (the same tested commit), and not left out with --without; only those named, when ship names issues."""
+    passed = data.get("passed") or {}
+    taken = {}
+    for r in (data.get("awaiting_live") or []) + ([data["release"]] if data.get("release") else []):
+        taken.update({k: v.get("sha") for k, v in (r.get("included") or {}).items()})
+    wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
+    without = {show_ref(issue_ref(cfg, x)) for x in (getattr(args, "without", None) or [])}
+    return [(k, v) for k, v in passed.items()
+            if taken.get(k) != v.get("sha") and k not in without and (not wanted or k in wanted)]
+
+
+def print_release_plan(comp, args, awaiting):
+    """`ship --plan`: what the release would be, in the tool's own order, with nothing merged or pushed."""
+    plan = {"in": [{"key": k, "issues": v["issues"], "title": v["title"], "sha": v["sha"], "by": v.get("by"),
+                    "on": v.get("on")} for k, v in comp["included"]],
+            "left_out": comp["left_out"], "clashes": comp["clashes"], "question": clash_question(comp["clashes"]),
+            "files": comp["files"], "protected": comp["protected"], "migrations": comp["migrations"],
+            "base": comp["base_sha"], "waiting_for_deploy": [r["pr"] for r in awaiting]}
+    if args.json:
+        print(json.dumps(plan, indent=2))
+        return
+    print(f"Release plan on {comp['base']} ({comp['base_sha'][:8]}); nothing is merged or pushed. "
+          "Order: --first, then by issue number.")
+    if awaiting:
+        print(f"{INFO} Merged and waiting for the deploy: " + ", ".join(f"release PR #{r['pr']} ({', '.join(r['issues'])})"
+                                                                      for r in awaiting))
+    print("In, in this order:" if comp["included"] else "Nothing would go in.")
+    for i, (k, v) in enumerate(comp["included"], 1):
+        print(f"  {i}. {' '.join(v['issues'])}: {v['title']} · tested {v['sha'][:8]}"
+              + (f" · passed by @{v['by']} on {v['on']}" if v.get("by") else ""))
+    for x in comp["left_out"]:
+        print(f"{WARN} Left out: {x['key']}: {x['why']}")
+    for q in clash_question(comp["clashes"]):
+        print(f"{WARN} Clash: {q}")
+    shown = comp["files"][:15]
+    print(f"Files: {len(comp['files'])} changed" + (f" ({', '.join(shown)}{' …' if len(comp['files']) > 15 else ''})"
+                                                    if shown else ""))
+    if comp["protected"]:
+        print(f"{WARN} Protected areas: {', '.join(comp['protected'][:15])}")
+    if comp["migrations"]:
+        print(f"{WARN} Looks like database migrations: {', '.join(comp['migrations'][:15])}")
+
+
+def release_merge_commit(repo, rel):
+    """The merge commit of a release PR on GitHub, or None."""
+    c, o, _ = run(["gh", "pr", "view", str(rel["pr"]), "-R", repo, "--json", "state,mergeCommit"])
+    v = json.loads(o) if c == 0 and o else {}
+    return (v.get("mergeCommit") or {}).get("oid") if v.get("state") == "MERGED" else None
+
+
+def forget_release(repo, data, rel):
+    """A release is live: forget its passes (unless re-passed since) and delete its changes' branches (if nobody
+    pushed since)."""
+    for k, v in (rel.get("included") or {}).items():
+        if ((data.get("passed") or {}).get(k) or {}).get("sha") == v["sha"]:
+            data["passed"].pop(k, None)
+        c6, ref_, _ = gh_api("GET", f"repos/{repo}/git/ref/heads/{v['branch']}")
+        if c6 == 0 and isinstance(ref_, dict) and (ref_.get("object") or {}).get("sha") == v["sha"]:
+            gh_api("DELETE", f"repos/{repo}/git/refs/heads/{v['branch']}")
+
+
+def cadence_file(root):
+    _, main, _ = git_paths(root)
+    return main / ".haam" / "cadence.json"
+
+
+ISSUE_IN_SUBJECT_RE = re.compile(r"^((?:(?:#\d+|[A-Z][A-Z0-9]+-\d+)[\s,]*)+):")
+
+
+def cadence_report(root, cfg):
+    """What /cadence reads: the passed changes waiting for a release, whether a release is due (and why), and for
+    each release target (a build that ships on its own, e.g. a phone app) how many changes touch it since its last
+    build. Nothing is changed."""
+    tf = tested_file(root)
+    data = json.loads(tf.read_text()) if tf.exists() else {}
+    args_ = argparse.Namespace(issue=None, without=None)
+    items = release_items(args_, cfg, data)
+    awaiting = (data.get("awaiting_live") or []) + ([data["release"]] if data.get("release") else [])
+    every = int(setting_value(cfg, "release_after_passed") or 0)
+    days = int(setting_value(cfg, "release_after_days") or 0)
+    today = time.time()
+
+    def age_days(v):
+        try:
+            return (today - time.mktime(time.strptime(v.get("on") or "", "%Y-%m-%d"))) / 86400
+        except ValueError:
+            return 0.0
+    ages = [age_days(v) for _, v in items]
+    oldest = max(ages) if ages else 0.0
+    urgent = []
+    if items and cfg.get("tracker") == "github":
+        try:
+            board = GHProject(cfg)
+            board.load()
+            byn = {f"#{i['number']}": i for i in board.items()}
+            for k, v in items:
+                for ref in v.get("issues") or [k]:
+                    it = byn.get(ref) or {}
+                    if it.get("priority") == "Urgent" or "security" in (it.get("labels") or []) \
+                            or "security" in (v.get("labels") or []):
+                        urgent.append(ref)
+        except RuntimeError:
+            pass
+    reasons = []
+    if urgent:
+        reasons.append(f"urgent: {', '.join(urgent)}")
+    if every and len(items) >= every:
+        reasons.append(f"{len(items)} changes passed (the setting is {every})")
+    if days and items and oldest >= days:
+        reasons.append(f"the oldest passed change has waited {int(oldest)} days (the setting is {days})")
+
+    targets = []
+    run(["git", "fetch", "--quiet", "origin"], cwd=root)
+    base = f"origin/{cfg.get('default_branch') or 'main'}"
+    built = (json.loads(cadence_file(root).read_text()) if cadence_file(root).exists() else {}).get("built") or {}
+    for name, pats in (cfg.get("release_targets") or {}).items():
+        refs = set()
+        last = (built.get(name) or {}).get("sha")
+        if last and git_out(root, "cat-file", "-t", last) == "commit":
+            # Each change's own merge commit ("#12: …") names the issue; its files say whether it touches the target.
+            _, names, _ = run(["git", "log", "--format=%x00%s", "--name-only", "--no-renames", f"{last}..{base}"],
+                              cwd=root)
+            for block in (names or "").split("\x00"):
+                lines = [x for x in block.splitlines() if x.strip()]
+                if not lines:
+                    continue
+                m = ISSUE_IN_SUBJECT_RE.match(lines[0])
+                if m and protected_matches(pats, lines[1:]):
+                    refs.update(re.findall(r"#\d+|[A-Z][A-Z0-9]+-\d+", m.group(1)))
+        for k, v in items:
+            mb = git_out(root, "merge-base", base, v["sha"]) if v.get("sha") else ""
+            if mb:
+                _, names, _ = run(["git", "diff", "--name-only", "--no-renames", mb, v["sha"]], cwd=root)
+                if protected_matches(pats, [x for x in (names or "").splitlines() if x]):
+                    refs.update(v.get("issues") or [k])
+        due = bool(every) and len(refs) >= every
+        targets.append({"name": name, "changes": sorted(refs, key=issue_number_key), "count": len(refs), "due": due,
+                        "last_build": built.get(name), "since": "its last build" if last else "ever (no build recorded)"})
+    return {"passed": [k for k, _ in release_order(items)], "count": len(items), "oldest_days": round(oldest, 1),
+            "urgent": urgent, "due": bool(reasons), "reasons": reasons, "settings": {"release_after_passed": every,
+            "release_after_days": days}, "waiting_for_deploy": [r["pr"] for r in awaiting], "targets": targets}
+
+
+def cmd_cadence(args):
+    """Whether a release is due by the owner's cadence (release_after_passed, release_after_days, an urgent change),
+    and how many changes each release target (a phone build) has waiting. /cadence reads it; it changes nothing,
+    except `--built <target>`, which records that the owner's build of that target took origin's main now."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if args.built:
+        if not args.human:
+            sys.exit("--built records the owner's build: add --human (inside /cadence, after the owner's word).")
+        if args.built not in (cfg.get("release_targets") or {}):
+            sys.exit(f"No release target named {args.built!r} (config --release-target {args.built}=<paths> --human).")
+        run(["git", "fetch", "--quiet", "origin"], cwd=root)
+        sha = args.sha or git_out(root, "rev-parse", f"origin/{cfg.get('default_branch') or 'main'}")
+        f = cadence_file(root)
+        state = json.loads(f.read_text()) if f.exists() else {}
+        state.setdefault("built", {})[args.built] = {"sha": sha, "at": time.strftime("%Y-%m-%d %H:%M")}
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(state, indent=2) + "\n")
+        print(f"{OK} {args.built}: build recorded at {sha[:8]}; its count starts again from there.")
+        return
+    rep = cadence_report(root, cfg)
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return
+    st = rep["settings"]
+    rule = (f"release after {st['release_after_passed'] or '–'} passed changes or {st['release_after_days'] or '–'} "
+            "days; urgent at once")
+    if rep["due"]:
+        print(f"{OK} A release is due ({rule}): " + "; ".join(rep["reasons"]) + ".")
+    elif rep["count"]:
+        print(f"{INFO} Not due yet ({rule}): {rep['count']} passed, the oldest {rep['oldest_days']:g} days.")
+    else:
+        print(f"{INFO} Nothing has passed since the last release ({rule}).")
+    if rep["count"]:
+        print("Passed, in release order: " + ", ".join(rep["passed"]))
+    if rep["waiting_for_deploy"]:
+        print(f"{INFO} Merged and waiting for the deploy: " + ", ".join(f"release PR #{n}" for n in rep["waiting_for_deploy"]))
+    for t in rep["targets"]:
+        print(f"{OK if t['due'] else INFO} {t['name']}: {t['count']} change(s) since {t['since']}"
+              + (" — a build is due" if t["due"] else "") + (f": {', '.join(t['changes'][:20])}" if t["changes"] else ""))
+
+
 def ship_release(args, root, cfg):
     """grouping = release: everything the owner passed goes into ONE release PR (merged together on a fresh branch
     from main), which gets the checks and the AI reviews once, then merges and deploys once.
+    With `deploy: manual`, a merged release waits for the owner's deploy without holding up the next one: the next
+    `ship` builds a new release from what passed since, and `--live` closes every release the deploy contained.
+    `--plan` shows what the release would be and does nothing else.
     Returns the exit code (0 also when nothing had passed); exits itself only when it can't go on."""
     repo = cfg["github_repo"]
     me = [sys.executable, str(Path(__file__).resolve())]
     tf = tested_file(root)
     data = json.loads(tf.read_text()) if tf.exists() else {}
-    passed = data.get("passed") or {}
+    manual = cfg.get("deploy") == "manual"
+
+    def save():
+        tf.parent.mkdir(parents=True, exist_ok=True)
+        tf.write_text(json.dumps(data, indent=2) + "\n")
 
     def out(state, code, message):
         if args.json:
@@ -3620,8 +3933,14 @@ def ship_release(args, root, cfg):
             print(message, flush=True)
         sys.exit(code)
 
+    def result(state, code, message):
+        if not args.json:
+            print(message, flush=True)
+        args._release_result = {"ok": code == 0, "state": state, "message": message}
+        return code
+
     rel = data.get("release")
-    if rel:
+    if rel and not args.plan:
         c_v, o_v, _ = run(["gh", "pr", "view", str(rel["pr"]), "-R", repo, "--json", "state,headRefOid"])
         live = json.loads(o_v) if c_v == 0 and o_v else {}
         if live.get("state") == "MERGED" and args.abandon_release:
@@ -3641,51 +3960,101 @@ def ship_release(args, root, cfg):
             if lead0:
                 data.pop(lead0, None)
                 (data.get("branches") or {}).pop(lead0, None)
-            tf.write_text(json.dumps(data, indent=2) + "\n")
+            save()
             if not args.json:
                 print(f"{INFO} Release PR #{rel['pr']} dropped ({why}); building a new one from what has passed.", flush=True)
-            passed = data.get("passed") or {}
             rel = None
-    if not rel:
-        wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
-        items = [(k, v) for k, v in sorted(passed.items()) if not wanted or k in wanted]
-        if not items:
+        elif live.get("state") == "MERGED" and manual:
+            # Merged, waiting for the owner's deploy: it no longer holds up the next release.
+            data.setdefault("awaiting_live", []).append(rel)
+            data.pop("release", None)
+            save()
+            rel = None
+    elif rel and args.plan:         # read only: a merged release waiting for its deploy doesn't hold up the plan
+        c_v, o_v, _ = run(["gh", "pr", "view", str(rel["pr"]), "-R", repo, "--json", "state"])
+        if (json.loads(o_v) if c_v == 0 and o_v else {}).get("state") == "MERGED" and manual:
+            data.setdefault("awaiting_live", []).append(rel)
+            rel = None
+    awaiting = data.get("awaiting_live") or []
+
+    if args.live and awaiting and not rel and not args.plan:
+        # The owner deployed and said it's live: close every release the deployed commit contains.
+        run(["git", "fetch", "--quiet", "origin"], cwd=root)
+        deployed = args.deployed or git_out(root, "rev-parse", f"origin/{cfg.get('default_branch') or 'main'}")
+        closed, waiting, failed, cache = [], [], [], {}
+        for r in list(awaiting):
+            m = release_merge_commit(repo, r)
+            if not m or not commit_contains(repo, m, deployed, cache):
+                waiting.append(r)
+                continue
+            c5, o5, e5 = run(me + ["ship", r["issues"][0].lstrip("#"), "--human", "--release-pr", "--pr-number",
+                                   str(r["pr"]), "--live"], cwd=root)
             if not args.json:
-                print(f"{INFO} Nothing has passed since the last release.", flush=True)
-            args._release_result = {"ok": True, "state": "nothing to ship", "message": "Nothing has passed since the last release."}
-            return 0
-        run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
-        base = cfg.get("default_branch") or "main"
-        _, main, _ = git_paths(root)
-        wt = main / ".haam" / "release-build"
-        run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
-        code, _, err = run(["git", "worktree", "add", "--detach", str(wt), f"origin/{base}"], cwd=root)
-        if code != 0:
-            out("stopped", 1, f"Couldn't prepare the release: {err[:200]}")
-        included, skipped = [], []
+                print(o5 + (e5 or ""), end="")
+            if c5 == 0:
+                forget_release(repo, data, r)
+                closed.append(r)
+            else:
+                failed.append(r)
+                waiting.append(r)
+        data["awaiting_live"] = waiting
+        if not waiting:
+            data.pop("awaiting_live", None)
+        save()
+        msg = (f"Live: release PR{'s' if len(closed) > 1 else ''} " + ", ".join(f"#{r['pr']}" for r in closed) + "."
+               if closed else "No release was closed.")
+        rest = [r for r in waiting if r not in failed]
+        if rest:
+            msg += (" Not in the deployed commit, still waiting: " + ", ".join(f"#{r['pr']}" for r in rest)
+                    + ". Deploy again, then say it's live.")
+        if failed:
+            msg += " Couldn't close " + ", ".join(f"#{r['pr']}" for r in failed) + ": run the same command again."
+        return result("live" if closed and not failed else "stopped", 0 if closed and not failed else 1, msg)
+
+    if not rel:
+        items = release_order(release_items(args, cfg, data),
+                              [show_ref(issue_ref(cfg, x)) for x in (getattr(args, "first", None) or [])])
+        if args.plan:
+            if not items:
+                return result("nothing to ship", 0, f"{INFO} Nothing has passed since the last release."
+                              + (" Waiting for the deploy of " + ", ".join(f"release PR #{r['pr']}" for r in awaiting)
+                                 if awaiting else ""))
+            try:
+                comp = release_composition(root, cfg, items, [show_ref(issue_ref(cfg, x)) for x in (args.first or [])])
+            except RuntimeError as e:
+                out("stopped", 1, str(e))
+            print_release_plan(comp, args, awaiting)
+            args._release_result = None
+            return 3 if comp["clashes"] else 0
+        if not items:
+            if awaiting:
+                names = ", ".join(f"release PR #{r['pr']} ({', '.join(r['issues'])})" for r in awaiting)
+                return result("deploy by hand", SHIP_WAITING_HUMAN,
+                              f"Nothing new has passed. Merged and waiting for the deploy: {names}. Deploy it your "
+                              "usual way, then say it's live (ship --all --human --live).")
+            return result("nothing to ship", 0, f"{INFO} Nothing has passed since the last release.")
         try:
-            for key, v in items:
-                tip = git_out(root, "rev-parse", "--verify", "--quiet", f"origin/{v['branch']}")
-                if tip and tip != v["sha"]:
-                    skipped.append(f"{key}: changed after your test ({v['sha'][:8]} → {tip[:8]}): test it again")
-                    continue
-                c2, _, _ = run(["git", "merge", "--no-ff", "--no-edit", "-m", f"{' '.join(v['issues'])}: {v['title']}",
-                                v["sha"]], cwd=wt)
-                if c2 != 0:
-                    run(["git", "merge", "--abort"], cwd=wt)
-                    skipped.append(f"{key}: conflicts with the rest of the release: send it back to an agent to "
-                                   "rebase on main, then test it again")
-                    continue
-                included.append((key, v))
+            comp = release_composition(root, cfg, items, [show_ref(issue_ref(cfg, x)) for x in (args.first or [])],
+                                       keep=True)
+        except RuntimeError as e:
+            out("stopped", 1, str(e))
+        wt = comp["wt"]
+        included, skipped = comp["included"], [f"{x['key']}: {x['why']}" for x in comp["left_out"]]
+        try:
+            if comp["clashes"]:
+                out("stopped", 1, "Two passed changes clash, so nothing was built: the owner says which goes first. "
+                    + " ".join(clash_question(comp["clashes"])) + " (`ship --plan` shows the whole release.)")
             if not included:
                 out("stopped", 1, "Nothing could go into the release. " + " ".join(skipped))
-            head = git_out(wt, "rev-parse", "HEAD")
+            head = comp["head"]
             name = f"release/{time.strftime('%Y%m%d-%H%M%S')}"
             c3, _, e3 = run(["git", "push", "--quiet", "origin", f"HEAD:refs/heads/{name}"], cwd=wt)
             if c3 != 0:
                 out("stopped", 1, f"Couldn't push the release branch: {e3[:200]}")
         finally:
             run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+        base = comp["base"]
+        _, main, _ = git_paths(root)
         ids, labels = [], ["uat-passed"]
         for _, v in included:
             ids += [i for i in v["issues"] if i not in ids]
@@ -3694,10 +4063,13 @@ def ship_release(args, root, cfg):
         gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "success", "context": "uat",
                "description": f"Release of changes each passed by @{who}"[:140]})
         body = ("\n".join(f"Refs {i}" for i in ids) + "\n\n## Release\nEach change was tested and passed on its own "
-                "before going in (HAAM release grouping); the checks and the AI reviews run once, on the whole "
-                "release.\n\n| Change | Tested commit | Passed by |\n|---|---|---|\n"
+                "before going in (HAAM release grouping), in issue-number order; the checks and the AI reviews run "
+                "once, on the whole release.\n\n| Change | Tested commit | Passed by |\n|---|---|---|\n"
                 + "".join(f"| {' '.join(v['issues'])}: {v['title']} | `{v['sha'][:8]}` | @{v['by']} on {v['on']} |\n"
-                          for _, v in included))
+                          for _, v in included)
+                + (("\n" + "\n".join(f"- Not in this release: {s}" for s in skipped) + "\n") if skipped else "")
+                + (f"\nProtected areas: {', '.join(comp['protected'][:30])}\n" if comp["protected"] else "")
+                + (f"\nLooks like database migrations: {', '.join(comp['migrations'][:30])}\n" if comp["migrations"] else ""))
         f = main / ".haam" / "pr-release.md"
         f.write_text(body)
         cmd = ["gh", "pr", "create", "-R", repo, "--head", name, "--base", base, "--title",
@@ -3715,11 +4087,14 @@ def ship_release(args, root, cfg):
         data[ids[0]] = head                              # ship merges exactly this combination
         data.setdefault("branches", {})[ids[0]] = name
         data["release"] = rel
-        tf.write_text(json.dumps(data, indent=2) + "\n")
+        save()
         if not args.json:
             print(f"{OK} Release PR opened with {', '.join(ids)}: {url}", flush=True)
             for sk in skipped:
                 print(f"{WARN} Not in this release: {sk}", flush=True)
+    elif args.plan:
+        return result("release open", 0, f"{INFO} Release PR #{rel['pr']} ({', '.join(rel['issues'])}) is open; ship "
+                      "carries on with it. Nothing else is planned until it merges.")
     elif not args.json:
         print(f"{INFO} Carrying on with release PR #{rel['pr']} ({', '.join(rel['issues'])})", flush=True)
     lead = rel["issues"][0]
@@ -3736,16 +4111,19 @@ def ship_release(args, root, cfg):
         if c5 == 1:
             print(f"{INFO} If a release check failed: send the change it's about back (its /test fail), then "
                   "`ship --all --human --abandon-release` builds a new release without it.", flush=True)
-    if c5 == 0:     # released: forget the passes, delete the merged changes' branches (if nobody pushed since)
-        data = json.loads(tf.read_text()) if tf.exists() else {}
-        rel = data.pop("release", {}) or {}
-        for k, v in (rel.get("included") or {}).items():
-            if ((data.get("passed") or {}).get(k) or {}).get("sha") == v["sha"]:    # not re-passed since
-                data["passed"].pop(k, None)
-            c6, ref_, _ = gh_api("GET", f"repos/{repo}/git/ref/heads/{v['branch']}")
-            if c6 == 0 and isinstance(ref_, dict) and (ref_.get("object") or {}).get("sha") == v["sha"]:
-                gh_api("DELETE", f"repos/{repo}/git/refs/heads/{v['branch']}")
-        tf.write_text(json.dumps(data, indent=2) + "\n")
+    data = json.loads(tf.read_text()) if tf.exists() else {}
+    if c5 == 0:     # released
+        forget_release(repo, data, data.pop("release", {}) or rel)
+        save()
+    elif c5 == SHIP_WAITING_HUMAN and manual:
+        # Merged: it waits for the owner's deploy, and the next ship may build the next release meanwhile.
+        cur = data.pop("release", None) or rel
+        data.setdefault("awaiting_live", []).append(cur)
+        save()
+        if len(data["awaiting_live"]) > 1 and not args.json:
+            print(f"{INFO} Waiting for the deploy: " + ", ".join(f"release PR #{r['pr']}" for r in data["awaiting_live"])
+                  + ". One deploy of main carries them all; then `ship --all --human --live` closes every one.",
+                  flush=True)
     return c5
 
 
@@ -3755,6 +4133,8 @@ def ship_batch(args, root, cfg):
     Safe to run again; exit codes as for one issue."""
     if setting_value(cfg, "grouping") == "release" and not getattr(args, "_release_done", False):
         code = ship_release(args, root, cfg)
+        if args.plan:
+            sys.exit(code)
         others = []
         if code == 0 and args.all and cfg.get("tracker") == "github":
             try:
@@ -3797,6 +4177,10 @@ def ship_batch(args, root, cfg):
             finish("stopped", 1, f"Couldn't list what's ready: {e}")
     if not refs:
         finish("nothing to ship", 0, "Nothing is ready to ship: no PR has passed UAT or is in the no-UAT lane.")
+    if args.plan:       # one PR per change: each merges on its own checks; this only lists them, in order
+        refs = sorted(refs, key=lambda r: issue_number_key(show_ref(r)))
+        finish("plan", 0, "Would ship, in this order (each PR merges on its own checks): "
+               + ", ".join(show_ref(r) for r in refs) + ". Nothing was merged.")
     say(f"{INFO} Shipping together: " + ", ".join(show_ref(r) for r in refs))
     me = [sys.executable, str(Path(__file__).resolve())]
     for r in refs:
@@ -3881,15 +4265,18 @@ def cmd_ship(args):
     Exit codes: 0 live, 2 not finished yet (run again), 3 waiting for the human to deploy by hand, 1 stopped."""
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
-    if not args.human:
+    if args.plan:       # shows what ship would do, and does nothing else
+        if args.release_pr or args.merge_only or args.merged_only or args.live:
+            sys.exit("--plan shows what `ship --all` (or `ship <IDs>`) would do; give it nothing else.")
+    elif not args.human:
         sys.exit("Shipping is the human's decision. Run it only inside /test (after the human said 'pass' and "
                  "'ship') or /release (with --merged-only), and add --human.")
-    if git_paths(root)[2]:
+    if git_paths(root)[2] and not args.plan:
         sys.exit("ship runs only from the owner's own chat in the main project folder, never from an agent's worktree.")
     issues = args.issue or []
     release = (setting_value(cfg, "grouping") == "release" and not args.release_pr and not args.merge_only
                and not args.released_in and not args.merged_only)
-    if args.all or len(issues) > 1 or release:
+    if args.all or len(issues) > 1 or release or args.plan:
         return ship_batch(args, root, cfg)
     if not issues:
         sys.exit("Give the issue (ship 12), several (ship 12 13 14), or --all")
@@ -7007,6 +7394,10 @@ def main():
     p.add_argument("--not-production", help="add path patterns that are never production code (prototypes, tests…)")
     p.add_argument("--remove-not-production", help="remove patterns from the not-production list, e.g. 'docs/**' "
                    "when your docs site is what users see")
+    p.add_argument("--release-target", action="append", metavar="NAME=PATTERNS",
+                   help="a build that ships on its own (a phone app): its paths, for /cadence (e.g. "
+                        "ios='apps/ios/**,packages/core/**'); repeatable, replaces that name's patterns")
+    p.add_argument("--clear-release-targets", action="store_true", help="remove every release target")
     p.add_argument("--protected", help="add protected path patterns, comma-separated (e.g. 'src/auth/**,db/migrations/**')")
     p.add_argument("--unprotected", help="remove protected path patterns, comma-separated")
     p.add_argument("--max-open-prs", type=int, help="agents hold new builds at this many ready PRs (default 10; drafts "
@@ -7117,8 +7508,22 @@ def main():
     p.add_argument("--merged-only", action="store_true", help="/release: never merge, only finish an already-merged PR")
     p.add_argument("--workflow", default="deploy.yml", help="the deploy workflow file")
     p.add_argument("--live", action="store_true", help="the human confirmed it's live (manual deploys)")
+    p.add_argument("--deployed", help="with --live: the commit the deploy took (default: origin's main now); every "
+                   "release it contains is closed")
+    p.add_argument("--plan", action="store_true", help="show what ship would do (the release's exact changes, in "
+                   "order, what is left out and why, clashes, files, protected areas, migrations); change nothing")
+    p.add_argument("--first", action="append", metavar="ID", help="grouping release: put this change in first (repeat "
+                   "for an order); a passed change it clashes with is left out")
+    p.add_argument("--without", action="append", metavar="ID", help="grouping release: leave this passed change out "
+                   "of the release (it stays passed for the next one)")
     p.add_argument("--no-deploy", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_ship)
+
+    p = common(sub.add_parser("cadence", help="whether a release (or a target's build) is due by the owner's cadence"))
+    p.add_argument("--built", metavar="TARGET", help="record the owner's build of this release target (with --human)")
+    p.add_argument("--sha", help="with --built: the commit the build took (default: origin's main now)")
+    p.add_argument("--human", action="store_true", help="the owner said the build is done, in this session")
+    p.set_defaults(func=cmd_cadence)
 
     p = common(sub.add_parser("protected", help="list changed files in protected areas (human-review, never the no-UAT lane)"))
     p.add_argument("--base", help="compare with this ref (default: origin/main)")

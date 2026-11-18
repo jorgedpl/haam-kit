@@ -30,6 +30,10 @@ def git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
+def git_out(cwd, *args):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
 class ToolTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="haam-test-"))
@@ -1682,6 +1686,14 @@ class TestHelpers(unittest.TestCase):
         self.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.mod)
 
+    def test_release_order_is_by_issue_number_as_a_number(self):
+        """#852 before #1879 (as text, "#1879" sorts first); --first goes before everything, in the order given."""
+        items = [("#1879", {"issues": ["#1879"]}), ("#852", {"issues": ["#852"]}), ("#90", {"issues": ["#1200", "#90"]}),
+                 ("APP-7", {"issues": ["APP-7"]})]
+        self.assertEqual([k for k, _ in self.mod.release_order(items)], ["APP-7", "#90", "#852", "#1879"])
+        self.assertEqual([k for k, _ in self.mod.release_order(items, ["#1879", "#852"])],
+                         ["#1879", "#852", "APP-7", "#90"])
+
     def test_required_fields_for(self):
         cfg = {"required_issue_fields": ["Area", "Kind", "Code check"]}
         self.assertEqual(self.mod.required_fields_for(cfg), ["Area", "Kind", "Code check"])
@@ -2181,6 +2193,147 @@ class TestWorktrees(ToolTestCase):
         files = subprocess.run(["git", "ls-tree", "--name-only", rel[0]["headRefName"]], cwd=self.origin,
                                capture_output=True, text=True).stdout.split()
         self.assertTrue({"a.txt", "b.txt"} <= set(files))
+
+    def release_project(self, deploy_manual=False):
+        """A GitHub Projects project with grouping release, its origin and the fake gh; returns (tool, state)."""
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        state = self.tmp / "gh-state.json"
+        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state),
+               "FAKE_GH_ORIGIN": str(self.origin), "HAAM_POLL_SECONDS": "0"}
+        tool = lambda *a, **kw: self.run_tool(*a, tool=self.installed_tool(), env=env, **kw)
+        tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM")
+        tool("settings", "--set", "grouping=release", "--set", "worktree_cleanup=manual", "--human")
+        if deploy_manual:
+            tool("config", "--deploy", "manual", "--human")
+        tool("github-project", "--apply")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "config")
+        git(self.proj, "push", "-q", "origin", "main")
+        return tool, state
+
+    def pass_change(self, tool, title, files):
+        """An issue in UAT whose branch writes `files` ({name: text}), tested and passed by the owner."""
+        n = json.loads(tool("issue", "create", "--stream", "bug", "--title", title, "--status", "UAT",
+                            "--json").stdout)["number"]
+        git(self.proj, "switch", "-q", "-c", f"{n}-fix", "main")
+        for name, text in files.items():
+            (self.proj / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.proj / name).write_text(text)
+            git(self.proj, "add", name)
+        git(self.proj, "commit", "-qm", f"#{n}: fix")
+        git(self.proj, "push", "-q", "-u", "origin", f"{n}-fix")
+        git(self.proj, "switch", "-q", "main")
+        tool("checkout-pr", str(n))
+        tool("checkout-pr", "--back")
+        tool("publish", str(n), "--human", "--json")
+        return n
+
+    def test_release_plan_and_a_clash_the_owner_decides(self):
+        """B3: `ship --plan` shows the exact release with no side effects; two passed changes that clash stop the
+        release with a question instead of the sort order picking; --first answers it."""
+        tool, state = self.release_project()
+        a = self.pass_change(tool, "Fix A", {"shared.txt": "from A\n", "a.txt": "A\n"})
+        b = self.pass_change(tool, "Fix B", {"shared.txt": "from B\n"})
+        c = self.pass_change(tool, "Fix C", {"c.txt": "C\n", "db/migrations/001.sql": "create table t();\n"})
+        before = state.read_text()
+        heads = git_out(self.origin, "for-each-ref", "--format=%(refname)", "refs/heads")
+        plan = tool("ship", "--all", "--plan", check=False)
+        self.assertEqual(plan.returncode, 3, plan.stdout + plan.stderr)          # a clash: the owner's word is needed
+        self.assertIn(f"1. #{a}: Fix A", plan.stdout)
+        self.assertIn(f"2. #{c}: Fix C", plan.stdout)
+        self.assertIn(f"#{b} and #{a} change the same lines", plan.stdout)
+        self.assertIn("db/migrations/001.sql", plan.stdout)
+        self.assertIn("Looks like database migrations", plan.stdout)
+        js = json.loads(tool("ship", "--all", "--plan", "--json", check=False).stdout)
+        self.assertEqual([x["key"] for x in js["in"]], [f"#{a}", f"#{c}"])
+        self.assertEqual(js["clashes"], [{"key": f"#{b}", "with": f"#{a}"}])
+        self.assertEqual(state.read_text(), before, "the plan changed nothing on GitHub")
+        self.assertEqual(git_out(self.origin, "for-each-ref", "--format=%(refname)", "refs/heads"), heads)
+        self.assertFalse((self.proj / ".haam/release-plan").exists())
+
+        res = tool("ship", "--all", "--human", check=False)                       # never left to the sort order
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("Two passed changes clash", res.stdout)
+        self.assertFalse(json.loads(state.read_text()).get("prs"))
+
+        plan = tool("ship", "--all", "--plan", "--first", str(b), check=False)
+        self.assertEqual(plan.returncode, 0, plan.stdout + plan.stderr)
+        self.assertIn(f"1. #{b}: Fix B", plan.stdout)
+        self.assertIn(f"Left out: #{a}: clashes with #{b}, which you put first", plan.stdout)
+        res = tool("ship", "--all", "--human", "--first", str(b), check=False)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        rel = [p for p in json.loads(state.read_text())["prs"].values() if p["state"] == "MERGED"]
+        self.assertEqual(rel[0]["title"].split(":")[0], f"#{b} #{c}")
+        self.assertIn(f"Not in this release: #{a}", rel[0]["body"])
+        tested = json.loads((self.proj / ".haam/tested.json").read_text())
+        self.assertEqual(list(tested["passed"]), [f"#{a}"], "A is still passed, for after its rebase")
+
+    def test_a_new_release_while_an_earlier_one_waits_for_its_deploy(self):
+        """B2: with deploy manual, a merged release waiting for the owner's deploy doesn't hold up the next one, and
+        one `--live` closes every release the deployed commit contains."""
+        tool, state = self.release_project(deploy_manual=True)
+        a = self.pass_change(tool, "Fix A", {"a.txt": "A\n"})
+        res = tool("ship", "--all", "--human", check=False)
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)              # merged, waiting for the deploy
+        b = self.pass_change(tool, "Fix B", {"b.txt": "B\n"})
+        plan = tool("ship", "--all", "--plan", check=False)
+        self.assertIn("Merged and waiting for the deploy", plan.stdout)
+        self.assertIn(f"1. #{b}: Fix B", plan.stdout)
+        self.assertNotIn(f"#{a}: Fix A", plan.stdout)
+        res = tool("ship", "--all", "--human", check=False)
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("Release PR opened with", res.stdout)
+        prs = json.loads(state.read_text())["prs"]
+        self.assertEqual(sorted(p["state"] for p in prs.values()), ["MERGED", "MERGED"])
+        res = tool("ship", "--all", "--human", check=False)                       # nothing new: still waiting
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("Nothing new has passed", res.stdout)
+        res = tool("ship", "--all", "--human", "--live", check=False)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Live: release PRs", res.stdout)
+        st = json.loads(state.read_text())
+        for n in (a, b):
+            self.assertEqual(st["issues"][str(n)]["state"], "CLOSED")
+        tested = json.loads((self.proj / ".haam/tested.json").read_text())
+        self.assertFalse(tested.get("passed"))
+        self.assertFalse(tested.get("awaiting_live"))
+
+    def test_cadence_says_when_a_release_or_a_build_is_due(self):
+        """B1: a release is due at release_after_passed passed changes, or when the oldest waited release_after_days;
+        a release target counts the changes touching its paths since its last build. Nothing is changed."""
+        tool, state = self.release_project()
+        tool("settings", "--set", "release_after_passed=2", "--set", "release_after_days=3", "--human")
+        tool("config", "--release-target", "app=apps/phone/**", "--human")
+        git(self.proj, "commit", "-qam", "cadence")
+        git(self.proj, "push", "-q", "origin", "main")
+        a = self.pass_change(tool, "Fix A", {"apps/phone/a.txt": "A\n"})
+        rep = json.loads(tool("cadence", "--json").stdout)
+        self.assertFalse(rep["due"], rep)
+        self.assertEqual(rep["passed"], [f"#{a}"])
+        self.assertEqual(rep["targets"][0]["count"], 1)
+        self.assertFalse(rep["targets"][0]["due"])
+        b = self.pass_change(tool, "Fix B", {"apps/phone/b.txt": "B\n", "web.txt": "w\n"})
+        out = tool("cadence").stdout
+        self.assertIn("A release is due", out)
+        self.assertIn("2 changes passed", out)
+        self.assertIn("app: 2 change(s)", out)
+        self.assertIn("a build is due", out)
+        p = tool("cadence", "--built", "app", check=False)
+        self.assertNotEqual(p.returncode, 0)                                     # the owner's word: --human
+        tool("cadence", "--built", "app", "--human")
+        rep = json.loads(tool("cadence", "--json").stdout)
+        self.assertEqual(rep["targets"][0]["count"], 2, "passed changes not built yet still count")
+        # One change, waiting 5 days: due by age.
+        tf = self.proj / ".haam/tested.json"
+        data = json.loads(tf.read_text())
+        data["passed"].pop(f"#{b}")
+        data["passed"][f"#{a}"]["on"] = time.strftime("%Y-%m-%d", time.localtime(time.time() - 5 * 86400))
+        tf.write_text(json.dumps(data))
+        rep = json.loads(tool("cadence", "--json").stdout)
+        self.assertTrue(rep["due"], rep)
+        self.assertIn("waited 5 days", rep["reasons"][0])
+        self.assertFalse(json.loads(state.read_text()).get("prs"), "cadence changed nothing on GitHub")
 
     def test_config_owner_flags_need_human(self):
         tool = self.installed_tool()

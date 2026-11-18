@@ -3789,10 +3789,64 @@ def release_items(args, cfg, data):
             if taken.get(k) != v.get("sha") and k not in without and (not wanted or k in wanted)]
 
 
+def verified_release_items(root, cfg, data, args):
+    """uat: agents-verify (as main has it): the tickets an independent verifier verified, for the owner's `ship` to
+    take into the release beside the ones they passed. Returns (items, left_out): an item goes in only while its
+    verification still covers the branch's tip (the agent-verified status on the verified commit), its lane is still
+    `agents` against today's main, it has no owner-test, and it wasn't verified during the shadow start (then only
+    the owner's own pass ships it). Each one kept out is named with its reason."""
+    if cfg.get("tracker") != "github":
+        return [], []
+    lcfg = lane_config(root)
+    if setting_value(lcfg, "uat") != "agents-verify":
+        return [], []          # the lane is off: ship ignores agent-verified
+    repo = cfg["github_repo"]
+    c, o, _ = run(["gh", "issue", "list", "-R", repo, "--state", "open", "--label", "verified-by-agents", "--limit",
+                   "200", "--json", "number,title,labels"])
+    found = json.loads(o) if c == 0 and o else []
+    passed = data.get("passed") or {}
+    taken = set()
+    for r in (data.get("awaiting_live") or []) + ([data["release"]] if data.get("release") else []):
+        taken.update(r.get("included") or {})
+    wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
+    without = {show_ref(issue_ref(cfg, x)) for x in (getattr(args, "without", None) or [])}
+    items, left = [], []
+    for it in found:
+        key = f"#{it['number']}"
+        if key in passed or key in taken or key in without or (wanted and key not in wanted):
+            continue
+        labels = [l["name"] if isinstance(l, dict) else l for l in it.get("labels") or []]
+        d = lane_details(root, lcfg, it["number"], labels=labels)
+        if d["lane"] != "agents":
+            left.append({"key": key, "why": f"verified by agents, but it's your test now: {d['reason']}"})
+            continue
+        st = verification_state(root, lcfg, it["number"], labels, issue_comments(repo, it["number"]), d["head"])
+        if not st["verified"]:
+            left.append({"key": key, "why": f"not verified any more: {st['why']}"})
+            continue
+        if st["shadow"]:
+            left.append({"key": key, "why": "verified during the shadow start: it ships on your own pass"})
+            continue
+        items.append((key, {"sha": d["head"], "branch": d["branch"], "title": it["title"], "issues": [key],
+                            "by": None, "on": (st["at"] or "")[:10], "labels": [l for l in labels if l == "human-review"],
+                            "verified": {"claim": st["claim"], "tool": st["tool"], "at": st["at"],
+                                         "risk": (d.get("plan_fields") or {}).get("risk")}}))
+    return items, left
+
+
+def how_checked(v):
+    """The release table's wording: the owner's pass, or the agents' verification. Never one for the other."""
+    if v.get("verified"):
+        return f"Verified by agents (claim {v['verified'].get('claim') or '?'}) on {v.get('on') or '?'}"
+    return f"Tested and passed by @{v.get('by') or '?'} on {v.get('on') or '?'}"
+
+
 def print_release_plan(comp, args, awaiting):
     """`ship --plan`: what the release would be, in the tool's own order, with nothing merged or pushed."""
     plan = {"in": [{"key": k, "issues": v["issues"], "title": v["title"], "sha": v["sha"], "by": v.get("by"),
-                    "on": v.get("on")} for k, v in comp["included"]],
+                    "on": v.get("on"), "checked": "verified" if v.get("verified") else "passed",
+                    **({"claim": v["verified"].get("claim"), "risk": v["verified"].get("risk")} if v.get("verified")
+                       else {})} for k, v in comp["included"]],
             "left_out": comp["left_out"], "clashes": comp["clashes"], "question": clash_question(comp["clashes"]),
             "files": comp["files"], "protected": comp["protected"], "migrations": comp["migrations"],
             "base": comp["base_sha"], "waiting_for_deploy": [r["pr"] for r in awaiting]}
@@ -3806,8 +3860,16 @@ def print_release_plan(comp, args, awaiting):
                                                                       for r in awaiting))
     print("In, in this order:" if comp["included"] else "Nothing would go in.")
     for i, (k, v) in enumerate(comp["included"], 1):
+        if v.get("verified"):
+            continue
         print(f"  {i}. {' '.join(v['issues'])}: {v['title']} · tested {v['sha'][:8]}"
               + (f" · passed by @{v['by']} on {v['on']}" if v.get("by") else ""))
+    ver = [(i, v) for i, (_, v) in enumerate(comp["included"], 1) if v.get("verified")]
+    if ver:
+        print("Verified by agents, not passed by you (`ship without <IDs>` leaves any out):")
+        for i, v in ver:
+            print(f"  {i}. {' '.join(v['issues'])}: {v['title']} · verified {v['sha'][:8]} "
+                  f"(claim {v['verified'].get('claim')}) · risk {v['verified'].get('risk') or '?'}")
     for x in comp["left_out"]:
         print(f"{WARN} Left out: {x['key']}: {x['why']}")
     for q in clash_question(comp["clashes"]):
@@ -4066,7 +4128,8 @@ def ship_release(args, root, cfg):
         return result("live" if closed and not failed else "stopped", 0 if closed and not failed else 1, msg)
 
     if not rel:
-        items = release_order(release_items(args, cfg, data),
+        vitems, vleft = verified_release_items(root, cfg, data, args)
+        items = release_order(release_items(args, cfg, data) + vitems,
                               [show_ref(issue_ref(cfg, x)) for x in (getattr(args, "first", None) or [])])
         if args.plan:
             if not items:
@@ -4077,6 +4140,7 @@ def ship_release(args, root, cfg):
                 comp = release_composition(root, cfg, items, [show_ref(issue_ref(cfg, x)) for x in (args.first or [])])
             except RuntimeError as e:
                 out("stopped", 1, str(e))
+            comp["left_out"] += vleft
             print_release_plan(comp, args, awaiting)
             args._release_result = None
             return 3 if comp["clashes"] else 0
@@ -4093,7 +4157,7 @@ def ship_release(args, root, cfg):
         except RuntimeError as e:
             out("stopped", 1, str(e))
         wt = comp["wt"]
-        included, skipped = comp["included"], [f"{x['key']}: {x['why']}" for x in comp["left_out"]]
+        included, skipped = comp["included"], [f"{x['key']}: {x['why']}" for x in comp["left_out"] + vleft]
         try:
             if comp["clashes"]:
                 out("stopped", 1, "Two passed changes clash, so nothing was built: the owner says which goes first. "
@@ -4114,12 +4178,17 @@ def ship_release(args, root, cfg):
             ids += [i for i in v["issues"] if i not in ids]
             labels += [l for l in v.get("labels") or [] if l not in labels]
         who = gh_login() or "the owner"
+        any_verified = any(v.get("verified") for _, v in included)
         gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "success", "context": "uat",
-               "description": f"Release of changes each passed by @{who}"[:140]})
-        body = ("\n".join(f"Refs {i}" for i in ids) + "\n\n## Release\nEach change was tested and passed on its own "
-                "before going in (HAAM release grouping), in issue-number order; the checks and the AI reviews run "
-                "once, on the whole release.\n\n| Change | Tested commit | Passed by |\n|---|---|---|\n"
-                + "".join(f"| {' '.join(v['issues'])}: {v['title']} | `{v['sha'][:8]}` | @{v['by']} on {v['on']} |\n"
+               "description": (f"Release shipped by @{who}: each change passed by them or verified by agents"
+                               if any_verified else f"Release of changes each passed by @{who}")[:140]})
+        body = ("\n".join(f"Refs {i}" for i in ids) + "\n\n## Release\nEach change was "
+                + ("tested and passed by the owner, or verified by an independent agent (`uat: agents-verify`), "
+                   if any_verified else "tested and passed on its own ")
+                + "before going in (HAAM release grouping), in issue-number order; the checks and the AI reviews run "
+                "once, on the whole release, and it merges on the owner's `ship`.\n\n"
+                "| Change | Commit | How it was checked |\n|---|---|---|\n"
+                + "".join(f"| {' '.join(v['issues'])}: {v['title']} | `{v['sha'][:8]}` | {how_checked(v)} |\n"
                           for _, v in included)
                 + (("\n" + "\n".join(f"- Not in this release: {s}" for s in skipped) + "\n") if skipped else "")
                 + (f"\nProtected areas: {', '.join(comp['protected'][:30])}\n" if comp["protected"] else "")
@@ -5447,6 +5516,11 @@ def settings_change(args, root, cfg, rep, changed, refused, note, pr):
                      "tools/haam/**,.github/**,haam.config.json). Without them every change could skip you.")
         if cfg.get("tracker") != "github":
             sys.exit("uat agents-verify needs the GitHub tracker: the verifier records its verdict on GitHub issues.")
+    if (changed.get("uat") or setting_value(cfg, "uat")) == "agents-verify" and \
+            (changed.get("grouping") or setting_value(cfg, "grouping")) != "release" and \
+            ("uat" in changed or "grouping" in changed):
+        sys.exit("uat agents-verify needs grouping release for now: a verified change joins the next release on your "
+                 "`ship`. One PR per change for verified tickets isn't in the kit yet.")
     if "owner_test_paths" in changed:
         tracked = git_out(root, "ls-files").splitlines()
         for area, pats in changed["owner_test_paths"].items():

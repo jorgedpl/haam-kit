@@ -240,7 +240,7 @@ if a[:2] == ["issue", "view"]:
          "labels": [{"name": x} for x in i.get("labels", [])], "state": i.get("state"), "title": i.get("title")})
 if a[:2] == ["issue", "list"]:
     want, state = opts(a, "--label"), opt(a, "--state", "open")
-    out([{"number": int(k), "title": i["title"]} for k, i in st["issues"].items()
+    out([{"number": int(k), "title": i["title"], "labels": [{"name": x} for x in i["labels"]]} for k, i in st["issues"].items()
          if all(x in i["labels"] for x in want) and (state == "all" or i["state"] == state.upper())])
 if a[:2] == ["issue", "comment"]:
     import datetime

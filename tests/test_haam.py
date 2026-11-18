@@ -2750,7 +2750,7 @@ class TestAgentsVerify(ToolTestCase):
         git(self.proj, "push", "-q", "-u", "origin", "main")
 
     def lane_on(self, shadow=0, *more):
-        self.tool("settings", "--set", "owner_test_paths=phones=apps/mobile/**", "--set", "uat=agents-verify",
+        self.tool("settings", "--set", "grouping=release", "--set", "owner_test_paths=phones=apps/mobile/**", "--set", "uat=agents-verify",
                   "--set", f"agents_verify_shadow={shadow}", *more, "--human")
         self.push_main("settings: agents verify")
 
@@ -2807,7 +2807,10 @@ class TestAgentsVerify(ToolTestCase):
         p = self.tool("settings", "--set", "uat=agents-verify", "--human", check=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("needs owner_test_paths", p.stderr)
-        self.tool("settings", "--set", "owner_test_paths=phones=apps/mobile/**,apps/watch/**",
+        p = self.tool("settings", "--set", "owner_test_paths=gates=AGENTS.md", "--set", "uat=agents-verify", "--human",
+                      check=False)
+        self.assertIn("needs grouping release", p.stderr)
+        self.tool("settings", "--set", "owner_test_paths=phones=apps/mobile/**,apps/watch/**", "--set", "grouping=release",
                   "--set", "owner_test_paths=gates=AGENTS.md", "--set", "uat=agents-verify", "--human")
         cfg = json.loads((self.proj / "haam.config.json").read_text())
         self.assertEqual(cfg["owner_test_paths"], {"phones": ["apps/mobile/**", "apps/watch/**"], "gates": ["AGENTS.md"]})
@@ -2924,6 +2927,43 @@ class TestAgentsVerify(ToolTestCase):
         if kw.get("reason"):
             args += ["--reason", kw["reason"]]
         return self.run_tool(*args, tool=self.installed_tool(), check=check, cwd=cwd)
+
+    def test_a_release_tells_the_two_kinds_of_pass_apart(self):
+        """K5: on the owner's ship, verified tickets join the release beside the ones the owner passed, listed apart,
+        each kind in its own words in the release's table; a pulled-back ticket stays out."""
+        self.lane_on()
+        v, _, vbranch, vhead = self.handed("Fix the export")
+        self.verify(v, "verified", vhead, self.claim(v))
+        p = self.ticket("Fix the import", status="UAT")
+        git(self.proj, "switch", "-q", "-c", f"{p}-import", "origin/main")
+        (self.proj / "import.txt").write_text("fixed\n")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", f"#{p}: fix")
+        git(self.proj, "push", "-q", "-u", "origin", f"{p}-import")
+        git(self.proj, "switch", "-q", "main")
+        self.tool("checkout-pr", str(p))
+        self.tool("checkout-pr", "--back")
+        self.tool("publish", str(p), "--human")
+        plan = self.tool("ship", "--all", "--plan").stdout
+        self.assertIn(f"#{p}: Fix the import", plan)
+        self.assertIn("Verified by agents, not passed by you", plan)
+        self.assertIn(f"#{v}: Fix the export · verified {vhead[:8]}", plan)
+        js = json.loads(self.tool("ship", "--all", "--plan", "--json").stdout)
+        self.assertEqual({x["key"]: x["checked"] for x in js["in"]}, {f"#{v}": "verified", f"#{p}": "passed"})
+        # Pulled back: it leaves the release
+        self.tool("issue", "label", str(v), "--add", "owner-test")
+        js = json.loads(self.tool("ship", "--all", "--plan", "--json").stdout)
+        self.assertEqual([x["key"] for x in js["in"]], [f"#{p}"])
+        self.tool("issue", "label", str(v), "--remove", "owner-test", "--human")
+        res = self.tool("ship", "--all", "--human", "--wait", "0", check=False)
+        rel = [x for x in self.gh()["prs"].values() if x["headRefName"].startswith("release/")]
+        self.assertEqual(len(rel), 1, res.stdout + res.stderr)
+        body = rel[0]["body"]
+        self.assertIn(f"#{v}: Fix the export | `{vhead[:8]}` | Verified by agents (claim", body)
+        self.assertIn(f"#{p}: Fix the import", body)
+        self.assertIn("Tested and passed by @", body)
+        # Switched off: ship ignores agent-verified
+        self.tool("settings", "--set", "uat=owner-decides", "--human")
 
     def test_verify_result_marks_and_refusals(self):
         self.lane_on()

@@ -1283,11 +1283,14 @@ def cmd_config(args):
         cfg["deploy"] = args.deploy
     limits = {k: int(v) for k, v in (("max_open_prs", args.max_open_prs), ("max_in_uat", args.max_in_uat)) if v is not None}
     if args.until:
-        set_batch_window(cfg, args.until, limits)           # a temporary raise; the normal limits stay as they are
+        # A temporary raise on this computer, outside haam.config.json: the normal limits stay as they are.
+        active = open_limit_windows(root, limits, args.until)
+        rep.add("ok", "Settings window on this computer: " + ", ".join(window_line(k, active[k]) for k in limits))
     else:
         cfg.update(limits)
     if args.end_batch_window:
         cfg.pop("batch_window", None)
+        change_windows(root, cleared=("max_open_prs", "max_in_uat"))
     if args.required_fields is not None:
         cfg["required_issue_fields"] = [x.strip() for x in args.required_fields.split(",") if x.strip()]
     if args.required_epic_fields is not None:
@@ -4539,31 +4542,122 @@ def limits_config(root):
     return cfg
 
 
-def effective_limits(cfg, today=None):
-    """(max_open_prs, max_in_uat, window): the batch window's raise until its last day, then the normal limits."""
+def effective_limits(cfg, today=None, now=None):
+    """(max_open_prs, max_in_uat, window): a settings window open on this computer, or the committed batch window's
+    raise until its last day, then the normal limits."""
     max_prs = int(cfg.get("max_open_prs") or DEFAULT_CONFIG["max_open_prs"])
     max_uat = int(cfg.get("max_in_uat") or DEFAULT_CONFIG["max_in_uat"])
     w = cfg.get("batch_window") or {}
+    window = None
     try:
         until = datetime.date.fromisoformat(str(w.get("until")))
     except ValueError:
-        return max_prs, max_uat, None
-    if (today or datetime.date.today()) > until:
-        return max_prs, max_uat, None
-    return int(w.get("max_open_prs") or max_prs), int(w.get("max_in_uat") or max_uat), w
+        until = None
+    if until and (today or datetime.date.today()) <= until:
+        max_prs, max_uat, window = int(w.get("max_open_prs") or max_prs), int(w.get("max_in_uat") or max_uat), dict(w)
+    machine = {k: v for k, v in active_windows(now=now).items() if k in ("max_open_prs", "max_in_uat")}
+    if machine:
+        window = dict(window or {})
+        ends = [v["until"] for v in machine.values()] + ([window["until"]] if window.get("until") else [])
+        window.update({k: v["value"] for k, v in machine.items()})
+        window["until"] = min(ends, key=lambda u: window_end(u) or datetime.datetime.max)
+        max_prs, max_uat = int(window.get("max_open_prs") or max_prs), int(window.get("max_in_uat") or max_uat)
+    return max_prs, max_uat, window
 
 
-def set_batch_window(cfg, until, limits):
-    """Store a temporary raise of the limits; refuses a day in the past."""
+# A settings window: a temporary value for a limit that counts at once for every chat on this computer (all worktrees
+# share the common git directory, where the file lives next to the machine lock) and ends by itself. It never touches
+# haam.config.json, so it works while the main folder has a branch checked out for a test.
+SETTINGS_WINDOW_FILE = "haam-settings-window.json"
+WINDOW_SETTINGS = ("max_open_prs", "max_in_uat", "max_review_rounds", "max_pr_lines")
+_COMMON_DIRS = {}
+
+
+def settings_window_path(cwd=None):
+    """`<common git dir>/haam-settings-window.json`, or None outside a git repository."""
+    cwd = Path(cwd or Path.cwd())
+    key = str(cwd)
+    if key not in _COMMON_DIRS:
+        common = git_out(cwd, "rev-parse", "--git-common-dir")
+        _COMMON_DIRS[key] = (cwd / common).resolve() if common else None
+    return _COMMON_DIRS[key] / SETTINGS_WINDOW_FILE if _COMMON_DIRS[key] else None
+
+
+def window_end(until):
+    """The local time a window ends: a day means the end of that day; a date and time, that moment."""
+    s = str(until or "").strip()
     try:
-        day = datetime.date.fromisoformat(until)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            return datetime.datetime.combine(datetime.date.fromisoformat(s), datetime.time.max)
+        end = datetime.datetime.fromisoformat(s)
     except ValueError:
-        sys.exit(f"--until takes the last day as YYYY-MM-DD, not '{until}'")
-    if day < datetime.date.today():
+        return None
+    return end.astimezone().replace(tzinfo=None) if end.tzinfo else end
+
+
+def parse_window_until(until):
+    """--until as stored: 'YYYY-MM-DD' (to the end of that day) or 'YYYY-MM-DDTHH:MM', local time; refuses the past."""
+    s = str(until or "").strip()
+    end = window_end(s)
+    if end is None:
+        sys.exit(f"--until takes the last day (YYYY-MM-DD) or a moment (YYYY-MM-DDTHH:MM, local time), not '{until}'")
+    if end < datetime.datetime.now():
         sys.exit(f"{until} is in the past")
+    return s if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s) else end.isoformat(timespec="minutes")
+
+
+def active_windows(cwd=None, now=None):
+    """{key: {value, until, set_at}} for the windows on this computer that haven't ended yet."""
+    p = settings_window_path(cwd)
+    if not p or not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}
+    now = now or datetime.datetime.now()
+    out = {}
+    for k, w in (data.items() if isinstance(data, dict) else []):
+        end = window_end(w.get("until")) if isinstance(w, dict) else None
+        if k in WINDOW_SETTINGS and end and end >= now and isinstance(w.get("value"), int):
+            out[k] = w
+    return out
+
+
+def change_windows(cwd, opened=None, until=None, cleared=()):
+    """Open windows ({key: value} until `until`) and end others early; drops the ended ones. Returns what's active."""
+    p = settings_window_path(cwd)
+    if not p:
+        sys.exit("A settings window lives in the project's git repository: run this inside it.")
+    data = active_windows(cwd)
+    for k in cleared:
+        data.pop(k, None)
+    stamp = datetime.datetime.now().isoformat(timespec="minutes")
+    for k, v in (opened or {}).items():
+        data[k] = {"value": v, "until": until, "set_at": stamp}
+    if data:
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(str(tmp), str(p))
+    elif p.exists():
+        p.unlink()
+    return data
+
+
+def window_line(key, w):
+    return f"{key} {w['value']} until {w['until']}"
+
+
+def open_limit_windows(root, limits, until):
+    """`--until` with the limits: a window on this computer (haam.config.json keeps the normal limits)."""
     if not limits:
-        sys.exit("--until goes with the limits to raise, e.g. --max-in-uat 30 --until 2026-10-27")
-    cfg["batch_window"] = {"until": day.isoformat(), **limits}
+        sys.exit("--until goes with the limits to raise, e.g. settings --set max_in_uat=30 --until 2026-10-27 --human")
+    other = [k for k in limits if k not in WINDOW_SETTINGS]
+    if other:
+        sys.exit(f"--until opens a temporary window only for the limits ({', '.join(WINDOW_SETTINGS)}); "
+                 f"{', '.join(other)} {'is a lasting choice' if len(other) == 1 else 'are lasting choices'}: "
+                 "set it without --until.")
+    return change_windows(root, limits, parse_window_until(until))
 
 
 def docs_only(files):
@@ -4954,9 +5048,19 @@ def cmd_ci_settings(args):
     return cmd_settings(args)
 
 
-def setting_value(cfg, key):
+def configured_value(cfg, key):
+    """The value in haam.config.json (or the default), without a window open on this computer."""
     v = cfg.get(key)
     return DEFAULT_CONFIG.get(key) if v in (None, "") else v
+
+
+def setting_value(cfg, key):
+    """What a setting is now: a limit's window on this computer while it lasts, else haam.config.json's value."""
+    if key in WINDOW_SETTINGS:
+        w = active_windows().get(key)
+        if w:
+            return w["value"]
+    return configured_value(cfg, key)
 
 
 def github_variables(cfg):
@@ -5073,17 +5177,15 @@ def cmd_settings(args):
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     rep = Report()
-    if (args.set or args.apply) and not args.human:
+    until = getattr(args, "until", None)
+    clear = [k.strip().replace("-", "_") for k in getattr(args, "clear_window", None) or []]
+    changing = bool(args.set or args.apply or until or clear)
+    if changing and not args.human:
         sys.exit("Settings are the owner's decision. Change them only inside /haam-settings, after the human chose, "
                  "with --human.")
-    if (args.set or args.apply) and git_paths(root)[2]:
+    if changing and git_paths(root)[2]:
         sys.exit("settings changes run only from the owner's own chat in the main project folder, never from an "
-                 "agent's worktree.")
-    raw = {}
-    try:
-        raw = json.loads((root / CONFIG_NAME).read_text())
-    except (OSError, json.JSONDecodeError):
-        pass
+                 "agent's worktree (a temporary window included).")
     changed = {}
     for item in args.set or []:
         k, _, v = item.partition("=")
@@ -5112,26 +5214,148 @@ def cmd_settings(args):
             changed.pop("runner")
             refused.append("runner=self-hosted: own runners only on private repositories (couldn't confirm this one "
                            "is private); on a public repository anyone's pull request could run code on your machine")
-    if getattr(args, "until", None):
-        lim = {k: changed.pop(k) for k in ("max_open_prs", "max_in_uat") if k in changed}
-        set_batch_window(cfg, args.until, lim)
-        changed["batch_window"] = cfg["batch_window"]
+    note = {"opened": {}, "ended": []}
+    if until:
+        # A temporary value: a window on this computer, in the common git dir. haam.config.json isn't touched.
+        if args.apply:
+            sys.exit("--until opens a window on this computer only and changes nothing on GitHub: run --apply on its own.")
+        note["opened"] = {k: w for k, w in open_limit_windows(root, changed, until).items() if k in changed}
+        changed = {}
+    if clear:
+        bad = [k for k in clear if k not in WINDOW_SETTINGS]
+        if bad:
+            sys.exit(f"Only the limits have windows ({', '.join(WINDOW_SETTINGS)}): {', '.join(bad)} has none.")
+        note["ended"] = [k for k in clear if k in active_windows(root)]
+        change_windows(root, cleared=clear)
+    pr = None
+    if changed or args.apply:
+        busy = main_folder_busy(root, cfg)
+        if busy:
+            # The main folder has a test (or other work) checked out: write the change in a temporary worktree of
+            # origin/main and open its PR, so the folder's own files stay exactly as they are.
+            pr = open_settings_worktree(root, cfg, busy)
+    try:
+        return settings_change(args, pr["path"] if pr else root, load_config(pr["path"]) if pr else cfg, rep,
+                               changed, refused, note, pr)
+    finally:
+        if pr:
+            close_settings_worktree(root, pr)
+
+
+def main_folder_busy(root, cfg):
+    """Why the main folder can't take a settings change in its own files ('' when it can): another branch or a
+    commit is checked out there (a test), or it has unsaved changes besides haam.config.json."""
+    if not git_out(root, "rev-parse", "--verify", "--quiet", "HEAD"):
+        return ""                                       # no commit yet (first setup): nothing to keep apart
+    base = cfg.get("default_branch") or "main"
+    branch = git_out(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch != base:
+        return f"it has {'a commit' if branch in ('HEAD', '') else branch} checked out, not {base}"
+    dirty = [f for f in git_out(root, "diff", "--name-only", "HEAD").splitlines() if f.strip() not in ("", CONFIG_NAME)]
+    return f"it has unsaved changes ({', '.join(dirty[:3])}{' …' if len(dirty) > 3 else ''})" if dirty else ""
+
+
+def open_settings_worktree(root, cfg, why):
+    """A temporary worktree of a fresh origin/main on a new chore/haam-settings-<time> branch, outside the project."""
+    base = cfg.get("default_branch") or "main"
+    code, _, err = run(["git", "fetch", "--quiet", "origin", base], cwd=root)
+    if code != 0:
+        sys.exit(f"The main folder is busy ({why}), so the change goes in a temporary copy of origin/{base}, but "
+                 f"fetching it failed: {(err or '')[:200]}. Try again, or once the main folder is back on {base}.")
+    stamp = time.strftime("%Y%m%d-%H%M")
+    branch, n = f"chore/haam-settings-{stamp}", 2
+    while git_out(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") or \
+            git_out(root, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"):
+        branch, n = f"chore/haam-settings-{stamp}-{n}", n + 1
+    path = Path(tempfile.mkdtemp(prefix="haam-settings-"))
+    code, _, err = run(["git", "worktree", "add", "-b", branch, str(path), f"origin/{base}"], cwd=root)
+    if code != 0:
+        shutil.rmtree(path, ignore_errors=True)
+        sys.exit(f"Couldn't make a temporary copy of origin/{base} for the change: {(err or '')[:200]}")
+    return {"path": path, "branch": branch, "base": base, "why": why, "url": "", "pushed": False, "error": "",
+            "changes": {}}
+
+
+def settings_pr(work, cfg, pr, changes, before):
+    """Commit a settings change made in the temporary worktree, push its branch and open its PR (or update it)."""
+    summary = ", ".join(f"{k}={v}" for k, v in changes.items())
+    run(["git", "add", CONFIG_NAME], cwd=work)
+    if not git_out(work, "diff", "--cached", "--name-only"):
+        return
+    code, _, err = run(["git", "commit", "-q", "-m", f"chore: haam settings {summary}"], cwd=work)
+    if code != 0:
+        pr["error"] = f"Couldn't commit the change: {(err or '')[:200]}"
+        return
+    code, _, err = run(["git", "push", "-q", "-u", "origin", pr["branch"]], cwd=work)
+    if code != 0:
+        pr["error"] = (f"Couldn't push {pr['branch']}: {(err or '')[:200]}. The change is committed there: push it "
+                       f"(git push -u origin {pr['branch']}) and open its PR.")
+        return
+    pr["pushed"] = True
+    pr["changes"].update(changes)
+    if pr["url"]:
+        return                                          # the push updated the PR
+    rows = "".join(f"| `{k}` | {before.get(k, '')} | {v} |\n" for k, v in changes.items())
+    body = (f"The owner changed these HAAM settings (`/haam-settings`):\n\n| Setting | Was | Now |\n|---|---|---|\n{rows}\n"
+            f"Made in a temporary copy of `{pr['base']}`, because the main folder was busy ({pr['why']}): its files "
+            "were left as they were.\n\n"
+            f"`{CONFIG_NAME}` is a protected file: review and merge this PR (on GitHub, or with `/test` and `ship`). "
+            f"Agents and the release gate read the settings from `{pr['base']}`, so the change counts once it's merged.\n")
+    fd, f = tempfile.mkstemp(prefix="haam-settings-pr-", suffix=".md")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    repo = cfg.get("github_repo") or detect_github_repo(work)
+    code, out, err = run(["gh", "pr", "create"] + (["-R", repo] if repo else []) + [
+        "--head", pr["branch"], "--base", pr["base"], "--title", f"chore: haam settings {summary}", "--body-file", f],
+        cwd=work)
+    os.unlink(f)
+    if code != 0:
+        pr["error"] = (f"Pushed {pr['branch']}, but couldn't open its PR: {(err or out or '')[:200]}. Open it on "
+                       "GitHub.")
+        return
+    pr["url"] = out.strip().splitlines()[-1] if out else ""
+
+
+def close_settings_worktree(root, pr):
+    """Remove the temporary worktree; keep its branch only when it holds a commit that didn't reach GitHub."""
+    run(["git", "worktree", "remove", "--force", str(pr["path"])], cwd=root)
+    shutil.rmtree(pr["path"], ignore_errors=True)
+    run(["git", "worktree", "prune"], cwd=root)
+    if pr["pushed"] or not git_out(root, "rev-list", f"origin/{pr['base']}..{pr['branch']}"):
+        run(["git", "branch", "-D", pr["branch"]], cwd=root)
+
+
+def settings_change(args, root, cfg, rep, changed, refused, note, pr):
+    """The rest of `settings`: save the changes in `root` (with `pr`, a temporary worktree of main: then commit them
+    and open their PR), show the settings, and --apply them on GitHub."""
+    raw = {}
+    try:
+        raw = json.loads((root / CONFIG_NAME).read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
     if (changed.get("grouping") or setting_value(cfg, "grouping")) == "release" and \
             (changed.get("flow") or setting_value(cfg, "flow")) == "checks-first":
         sys.exit("grouping release needs flow test-first: in checks-first every change already has its own PR.")
     if changed:
+        before = {k: configured_value(cfg, k) for k in changed}
         cfg.update(changed)
         save_config(root, cfg)
+        if pr:
+            settings_pr(root, cfg, pr, changed, before)
     rows = []
     _, _, window = effective_limits(cfg)
+    windows = active_windows(root)
     for group, key, opts, what, helps in SETTINGS:
         val = setting_value(cfg, key)
-        rows.append({"group": group, "key": key, "value": val, "default": DEFAULT_CONFIG.get(key),
+        rows.append({"group": group, "key": key, "value": val, "configured": configured_value(cfg, key),
+                     "window": windows.get(key), "default": DEFAULT_CONFIG.get(key),
                      "options": list(opts) if isinstance(opts, list) else [], "what": what, "options_help": helps,
-                     "changed_now": key in changed})
+                     "changed_now": key in changed or key in note["opened"]})
     res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "heavy_runs": cfg.get("heavy_runs") or [],
-           "batch_window": window, "github_variables": github_variables(cfg),
-           "required_checks": required_checks(cfg), "applied": [], "changed": changed, "refused": refused}
+           "batch_window": window, "windows": windows, "windows_opened": note["opened"], "windows_ended": note["ended"],
+           "github_variables": github_variables(cfg),
+           "required_checks": required_checks(cfg), "applied": [], "changed": changed, "refused": refused,
+           "settings_pr": None}
     for r_ in refused:
         rep.add("fail", "Not changed: " + r_)
     if args.apply:
@@ -5144,8 +5368,11 @@ def cmd_settings(args):
         current = {v["name"]: v["value"] for v in json.loads(out or "[]")} if code == 0 else {}
         if "runner" not in raw and "runner" not in changed and current.get("HAAM_RUNNER"):
             # Set up before 1.9.0 (a variable only): adopt it rather than move the jobs back to GitHub's runners.
+            before = {k: configured_value(cfg, k) for k in ("runner", "runner_label")}
             cfg["runner"], cfg["runner_label"] = "self-hosted", current["HAAM_RUNNER"]
             save_config(root, cfg)
+            if pr:
+                settings_pr(root, cfg, pr, {"runner": "self-hosted", "runner_label": current["HAAM_RUNNER"]}, before)
             rep.add("info", f"Kept your own runner ({current['HAAM_RUNNER']}) and recorded it in {CONFIG_NAME}")
         for name, value in github_variables(cfg).items():
             if (current.get(name) or "") == value:
@@ -5191,8 +5418,14 @@ def cmd_settings(args):
                 res["applied"].append("production")
         elif code != 0:
             rep.add("warn", "No production environment yet", "run haam.py github --apply first")
-        rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged: the gate and the agents read the settings "
-                   "from main (it's a protected file, so it needs your review)")
+        if pr and pr["url"]:
+            rep.action(WHO_TERMINAL, f"Review and merge the settings PR: the gate and the agents read the settings "
+                       f"from main ({pr['url']})")
+        elif not pr:
+            rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged: the gate and the agents read the settings "
+                       "from main (it's a protected file, so it needs your review)")
+    if pr:
+        res["settings_pr"] = {k: pr[k] for k in ("branch", "url", "error", "why")}
     if args.json:
         print(json.dumps(res, indent=2))
         return
@@ -5202,6 +5435,8 @@ def cmd_settings(args):
             group = r["group"]
             print(f"\n{group}")
         tag = "" if r["value"] == r["default"] else f"   (default: {r['default']})"
+        if r["window"]:
+            tag = f"   (window until {r['window']['until']}; normally {r['configured']})"
         mark = f"{OK} " if r["changed_now"] else "  "
         print(f"{mark}{r['key']:<18} {str(r['value']):<14} {r['what']}{tag}")
         if args.explain:
@@ -5211,16 +5446,32 @@ def cmd_settings(args):
     print(f"  heavy_runs         {', '.join(cfg.get('heavy_runs') or []) or '(none: haam.py exclusive only takes turns)'}")
     print(f"  production code    {', '.join(cfg.get('production_paths') or ['**'])}, except "
           f"{', '.join((cfg.get('non_production_paths') or NON_PRODUCTION_DEFAULT)[:6])} …")
-    if window:
+    if window and not windows:
         print(f"  batch window       until {window['until']}: " + ", ".join(f"{k} {v}" for k, v in window.items()
                                                                            if k != "until"))
-    if changed:
+    for k, w in windows.items():
+        print(f"  window             {window_line(k, w)} (on this computer, set {w.get('set_at', '?')}; then back "
+              f"to {configured_value(cfg, k)})")
+    if note["opened"]:
+        print(f"\n{OK} Window open on this computer, counting at once in every chat here: "
+              + ", ".join(window_line(k, w) for k, w in note["opened"].items())
+              + f". {CONFIG_NAME} keeps the normal value; the window ends by itself.")
+    for k in note["ended"]:
+        print(f"{OK} Window for {k} ended: back to {configured_value(cfg, k)}")
+    if pr and pr["url"]:
+        print(f"\n{OK} Opened {pr['url']} ({', '.join(f'{k}={v}' for k, v in pr['changes'].items())}). The main "
+              f"folder was left as it is: {pr['why']}. The change counts once the PR merges into {pr['base']}; for a "
+              "limit that must count at once, open a window (--set max_in_uat=N --until <last day> --human).")
+    elif pr and pr["error"]:
+        print(f"\n{BAD} {pr['error']}")
+    elif changed:
         print(f"\n{OK} Saved in {CONFIG_NAME}: " + ", ".join(f"{k}={v}" for k, v in changed.items()))
     for r_ in refused:
         print(f"{BAD} Not changed: {r_}")
-    if not args.apply:
+    if not args.apply and not note["opened"] and not note["ended"]:
         print(f"{INFO} Settings that change GitHub (runner, review, ci, nightly, deploy_approval) take effect with "
-              "--apply. Then commit haam.config.json.")
+              "--apply." + (" With the main folder busy, --apply reads main's settings: run it once this PR merges "
+                            "(or with these --set in one call)." if pr else " Then commit haam.config.json."))
     rep.print(False) if args.apply else None
 
 
@@ -7237,6 +7488,9 @@ def cmd_doctor(args):
         rep.add("ok" if cfg.get(k) else "fail", f"{k}: {cfg.get(k) or '(not set)'}")
     rep.add("ok" if cfg["team_key"] != PLACEHOLDER_KEY else "warn", f"team_key: {cfg['team_key']}",
             "still the placeholder" if cfg["team_key"] == PLACEHOLDER_KEY else "")
+    for k, w in active_windows(root).items():
+        rep.add("info", f"Settings window on this computer: {window_line(k, w)} (normally {configured_value(cfg, k)})",
+                f"ends by itself; settings --clear-window {k} --human ends it early")
     if cfg["_applied"].get("team_key") != cfg["team_key"]:
         rep.add("fail", "Team key not applied to the files yet")
         rep.action(WHO_AGENT, "Apply the config", "python3 tools/haam/haam.py config")
@@ -7415,9 +7669,10 @@ def main():
     p.add_argument("--max-open-prs", type=int, help="agents hold new builds at this many ready PRs (default 10; drafts "
                    "and docs-only PRs don't count)")
     p.add_argument("--max-in-uat", type=int, help="...or at this many changes waiting for you to test (default 10)")
-    p.add_argument("--until", help="with --max-in-uat / --max-open-prs: a batch window, a raise that ends by itself "
-                   "after this day (YYYY-MM-DD)")
-    p.add_argument("--end-batch-window", action="store_true", help="end the batch window now")
+    p.add_argument("--until", help="with --max-in-uat / --max-open-prs: a batch window on this computer, a raise that "
+                   "ends by itself after this day (YYYY-MM-DD) or moment (YYYY-MM-DDTHH:MM)")
+    p.add_argument("--end-batch-window", action="store_true", help="end the batch window now (both limits' windows "
+                   "on this computer, and an older one in haam.config.json)")
     p.add_argument("--required-fields", help="board fields every new issue must get on create, comma-separated "
                    "(e.g. 'Area,Kind,Code check'); empty clears the requirement. Needs --human")
     p.add_argument("--required-epic-fields", help="board fields every new epic must get (default: the issue list "
@@ -7579,8 +7834,10 @@ def main():
     p.add_argument("--explain", action="store_true", help="show every option and its trade-off")
     p.add_argument("--apply", action="store_true", help="sync GitHub: variables, required checks, production approval")
     p.add_argument("--human", action="store_true", help="the owner chose these settings in this session (/haam-settings)")
-    p.add_argument("--until", help="with --set max_in_uat=N / max_open_prs=N: a batch window that ends by itself "
-                   "after this day (YYYY-MM-DD)")
+    p.add_argument("--until", help="with --set on a limit (max_in_uat, max_open_prs, max_review_rounds, max_pr_lines): "
+                   "a window on this computer that counts at once and ends by itself after this day (YYYY-MM-DD) or "
+                   "at this moment (YYYY-MM-DDTHH:MM, local time); haam.config.json keeps the normal value")
+    p.add_argument("--clear-window", action="append", metavar="KEY", help="end a limit's window early (repeat for more)")
     p.add_argument("--recommend", action="store_true", help="suggest the limits for your team (changes nothing)")
     p.add_argument("--flow", choices=["test-first", "checks-first"], help="recommend: the testing order (default: "
                    "this project's setting)")

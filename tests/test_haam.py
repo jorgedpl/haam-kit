@@ -646,6 +646,61 @@ class TestAgentsDoctorDev(ToolTestCase):
         self.run_tool("ci-settings", "--review", "github", "--human", tool=tool)
         self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["review"], "github")
 
+    def test_settings_window_counts_at_once_everywhere_and_ends_by_itself(self):
+        import datetime
+        self.install()
+        tool = self.installed_tool()
+        self.run_tool("config", "--product", "Acme", "--max-in-uat", "10", tool=tool)
+        win = self.proj / ".git" / "haam-settings-window.json"
+        cfg_before = (self.proj / "haam.config.json").read_text()
+        day = str(datetime.date.today() + datetime.timedelta(days=5))
+        self.assertNotEqual(self.run_tool("settings", "--set", "max_in_uat=100", "--until", day, tool=tool,
+                                          check=False).returncode, 0)                 # the owner's choice only
+        self.run_tool("settings", "--set", "max_in_uat=100", "--until", day, "--human", tool=tool)
+        self.assertEqual((self.proj / "haam.config.json").read_text(), cfg_before)     # the file isn't touched
+        w = json.loads(win.read_text())["max_in_uat"]
+        self.assertEqual((w["value"], w["until"]), (100, day))
+        self.assertTrue(w["set_at"])
+        res = json.loads(self.run_tool("settings", "--json", tool=tool).stdout)
+        row = next(r for r in res["settings"] if r["key"] == "max_in_uat")
+        self.assertEqual((row["value"], row["configured"], row["window"]["until"]), (100, 10, day))
+        self.assertIn(f"max_in_uat 100 until {day}", self.run_tool("settings", tool=tool).stdout)
+        self.assertIn(f"Settings window on this computer: max_in_uat 100 until {day}",
+                      self.run_tool("doctor", tool=tool, check=False).stdout)
+        # An agent's worktree reads it too (the common git dir), but can't open or end one
+        git(self.proj, "worktree", "add", "-q", "-b", "agent-x", str(self.tmp / "wt"))
+        res = json.loads(self.run_tool("settings", "--json", tool=tool, cwd=self.tmp / "wt").stdout)
+        self.assertEqual(next(r for r in res["settings"] if r["key"] == "max_in_uat")["value"], 100)
+        for args in (("--set", "max_in_uat=5", "--until", day), ("--clear-window", "max_in_uat")):
+            p = self.run_tool("settings", *args, "--human", tool=tool, cwd=self.tmp / "wt", check=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("agent's worktree", p.stderr)
+        # A date and time (local); not in the past; only for the limits
+        tomorrow = str(datetime.date.today() + datetime.timedelta(days=1))
+        self.run_tool("settings", "--set", "max_pr_lines=900", "--until", f"{tomorrow} 08:30", "--human", tool=tool)
+        self.assertEqual(json.loads(win.read_text())["max_pr_lines"]["until"], f"{tomorrow}T08:30")
+        for args in (("--set", "max_in_uat=5", "--until", "2020-01-01"), ("--set", "max_in_uat=5", "--until", "soon"),
+                     ("--set", "flow=checks-first", "--until", day), ("--clear-window", "flow"),
+                     ("--set", "max_in_uat=5", "--set", "ci=off", "--until", day)):
+            self.assertNotEqual(self.run_tool("settings", *args, "--human", tool=tool, check=False).returncode, 0, args)
+        p = self.run_tool("settings", "--set", "flow=checks-first", "--until", day, "--human", tool=tool, check=False)
+        self.assertIn("only for the limits", p.stderr)
+        # An ended window is ignored, and dropped on the next write
+        data = json.loads(win.read_text())
+        data["max_in_uat"]["until"] = "2020-01-01T10:00"
+        win.write_text(json.dumps(data))
+        res = json.loads(self.run_tool("settings", "--json", tool=tool).stdout)
+        self.assertEqual(next(r for r in res["settings"] if r["key"] == "max_in_uat")["value"], 10)
+        self.assertEqual(list(res["windows"]), ["max_pr_lines"])
+        self.run_tool("settings", "--set", "max_open_prs=40", "--until", day, "--human", tool=tool)
+        self.assertEqual(sorted(json.loads(win.read_text())), ["max_open_prs", "max_pr_lines"])
+        # Ended early, one at a time
+        self.run_tool("settings", "--clear-window", "max_pr_lines", "--clear-window", "max_open_prs", "--human",
+                      tool=tool)
+        self.assertFalse(win.exists())
+        self.assertEqual(json.loads(self.run_tool("settings", "--json", tool=tool).stdout)["windows"], {})
+        self.assertEqual((self.proj / "haam.config.json").read_text(), cfg_before)
+
     def test_dev_keeps_the_repositorys_own_git_hooks(self):
         self.install()
         hooks = self.proj / ".git/hooks"
@@ -1369,11 +1424,22 @@ class TestGitHubProjects(ToolTestCase):
         self.assertNotEqual(self.tool("config", "--max-in-uat", "30", "--until", future, check=False).returncode, 0)
         self.tool("config", "--max-in-uat", "30", "--until", future, "--human")
         cfg = json.loads((self.proj / "haam.config.json").read_text())
-        self.assertEqual((cfg["max_in_uat"], cfg["batch_window"]), (2, {"until": future, "max_in_uat": 30}))
+        self.assertEqual(cfg["max_in_uat"], 2)                              # the normal limit stays as it is...
+        self.assertNotIn("batch_window", cfg)
+        win = self.proj / ".git" / "haam-settings-window.json"           # ...the raise is on this computer
+        self.assertEqual(json.loads(win.read_text())["max_in_uat"]["value"], 30)
         res = json.loads(self.tool("capacity", "--json").stdout)
         self.assertEqual(res["max_in_uat"], 30)
         self.assertFalse(res["hold"])
         self.assertIn(f"Batch window until {future}", self.tool("capacity").stdout)
+        w = json.loads(win.read_text())
+        w["max_in_uat"]["until"] = "2020-01-01"
+        win.write_text(json.dumps(w))
+        self.assertTrue(json.loads(self.tool("capacity", "--json").stdout)["hold"])
+        # An older batch window in haam.config.json still counts until its last day
+        cfg["batch_window"] = {"until": future, "max_in_uat": 30}
+        (self.proj / "haam.config.json").write_text(json.dumps(cfg))
+        self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
         cfg["batch_window"]["until"] = "2020-01-01"
         (self.proj / "haam.config.json").write_text(json.dumps(cfg))
         self.assertTrue(json.loads(self.tool("capacity", "--json").stdout)["hold"])
@@ -1383,6 +1449,59 @@ class TestGitHubProjects(ToolTestCase):
         self.assertEqual(json.loads(self.tool("capacity", "--json").stdout)["max_in_uat"], 12)
         self.tool("config", "--end-batch-window", "--human")
         self.assertNotIn("batch_window", json.loads((self.proj / "haam.config.json").read_text()))
+        self.assertFalse(win.exists())
+        self.assertTrue(json.loads(self.tool("capacity", "--json").stdout)["hold"])
+
+    def test_settings_change_from_a_busy_main_folder_goes_in_a_pr(self):
+        """The main folder has a test branch checked out with an unsaved change: the settings change is made in a
+        temporary worktree of origin/main and opened as a PR, and the main folder's files stay as they were."""
+        origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        git(self.proj, "remote", "set-url", "origin", str(origin))
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "adopt HAAM")
+        git(self.proj, "push", "-q", "-u", "origin", "main")
+        git(self.proj, "switch", "-q", "-c", "12-test")                 # checkout-pr for a /test
+        (self.proj / "README.md").write_text("# Example\nwork in progress\n")
+        before = {"status": git_status(self.proj), "config": (self.proj / "haam.config.json").read_text()}
+        res = json.loads(self.tool("settings", "--set", "max_in_uat=100", "--set", "review=local", "--human",
+                                   "--json").stdout)
+        pr = res["settings_pr"]
+        self.assertTrue(pr["url"], pr)
+        self.assertRegex(pr["branch"], r"^chore/haam-settings-\d{8}-\d{4}$")
+        self.assertIn("12-test", pr["why"])
+        # The main folder is untouched: same branch, same unsaved change, same settings file
+        self.assertEqual(subprocess.run(["git", "branch", "--show-current"], cwd=self.proj, capture_output=True,
+                                        text=True).stdout.strip(), "12-test")
+        self.assertEqual(git_status(self.proj), before["status"])
+        self.assertEqual((self.proj / "haam.config.json").read_text(), before["config"])
+        # The branch on origin has the commit, made from main
+        show = lambda *a: subprocess.run(["git", *a], cwd=origin, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(show("log", "-1", "--format=%s", pr["branch"]),
+                         "chore: haam settings max_in_uat=100, review=local")
+        self.assertEqual(show("rev-parse", f"{pr['branch']}~1"), show("rev-parse", "main"))
+        cfg = json.loads(show("show", f"{pr['branch']}:haam.config.json"))
+        self.assertEqual((cfg["max_in_uat"], cfg["review"]), (100, "local"))
+        # ...and its PR says what changed
+        made = [p for p in self.gh_state()["prs"].values() if p.get("headRefName") == pr["branch"]]
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0]["title"], "chore: haam settings max_in_uat=100, review=local")
+        self.assertIn("| `max_in_uat` | 10 | 100 |", made[0]["body"])
+        # The temporary worktree and its local branch are gone
+        wts = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=self.proj, capture_output=True,
+                             text=True).stdout
+        self.assertEqual(wts.count("worktree "), 1)
+        self.assertEqual(subprocess.run(["git", "branch", "--list", "chore/*"], cwd=self.proj, capture_output=True,
+                                        text=True).stdout.strip(), "")
+        # Back on a clean main: today's behaviour, the change is written in the folder (and again with it unsaved)
+        (self.proj / "README.md").write_text("# Example\n")
+        git(self.proj, "switch", "-q", "main")
+        for n in ("7", "8"):
+            res = json.loads(self.tool("settings", "--set", f"max_in_uat={n}", "--human", "--json").stdout)
+            self.assertIsNone(res["settings_pr"])
+            self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["max_in_uat"], int(n))
+        self.assertEqual(len([p for p in self.gh_state()["prs"].values()
+                              if str(p.get("headRefName")).startswith("chore/")]), 1)
 
     def test_settings_recommend_sizes_the_limits(self):
         r = json.loads(self.tool("settings", "--recommend", "--builders", "2", "--chats", "3", "--testing-hours", "5",

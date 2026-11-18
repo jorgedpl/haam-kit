@@ -1188,6 +1188,26 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("issue", "status", str(m), "In Review")
         git(self.proj, "switch", "-q", "main")
 
+    def test_handing_rework_over_again_clears_uat_failed_and_names_the_round(self):
+        self.setup_board()
+        n = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "Crash", "--status", "Ready",
+                                 "--json").stdout)["number"]
+        labels = lambda: self.gh_state()["issues"][str(n)]["labels"]  # noqa: E731
+        # A first hand-over isn't rework: nothing to remove, no round
+        res = json.loads(self.tool("issue", "status", str(n), "UAT", "--json").stdout)
+        self.assertNotIn("rework_round", res)
+        self.assertNotIn("rework", res["message"])
+        for rnd in (1, 2):    # each failed test sends it back; each hand-over after it is the next round
+            self.tool("issue", "comment", str(n), "--body", "❌ UAT failed\n- [ ] step 2: expected a total, saw 0")
+            self.tool("issue", "label", str(n), "--add", "uat-failed")
+            self.tool("issue", "status", str(n), "Ready")
+            self.assertIn("uat-failed", labels())
+            res = json.loads(self.tool("issue", "status", str(n), "UAT", "--json").stdout)
+            self.assertEqual(res["rework_round"], rnd)
+            self.assertIn(f"`🔁 Rework, round {rnd}`", res["message"])
+            self.assertNotIn("uat-failed", labels())    # in UAT again: nothing reads it as "not fixed yet"
+            self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "UAT")
+
     def test_a_claim_from_a_chat_that_died_is_listed_and_released_only_when_the_owner_allows(self):
         self.setup_board()
         origin = self.tmp / "origin.git"

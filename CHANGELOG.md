@@ -17,6 +17,7 @@ The machine-wide lock and the remote runner, from a project with two Macs and ma
 - **A fallback keeps its place in the queue.** A run that went to the other machine and couldn't start there waits here from where it was, not at the back.
 - **`.worktreeinclude` copies folders too** (a trailing `/`), with their symlinks kept as links, so an SDK's frameworks reach a new worktree intact.
 - **The other machine's lock can't be read** (on a Mac whose new Xcode licence nobody accepted, `python3` fails there like `make` does): the run stays here, and the wait says why once.
+- **Rework handed over for another test loses its `uat-failed` label.** The label stayed on until the pass, so a ticket back in `UAT` still read as "not fixed yet" to anything that looks at it (a test-branch composer left reworked tickets off its stack). `haam.py issue status <n> UAT` now removes it and prints the round, and `/uat` starts the hand-over comment with `🔁 Rework, round <N>` instead (N counts the `❌ UAT failed` comments). On Linear, `/uat` says to do the same by hand.
 
 ### Added
 - **`exclusive --max-run <minutes>`** stops the command and everything it started once it runs that long, and exits 125 (its result is unknown). A run sent to the other machine gets 180 minutes unless given, so one stuck run can no longer hold that machine for days.

@@ -7,11 +7,14 @@ temporary folder, so `git push host:path` and the remote script both land in a l
 
 Run: python -m unittest discover -s tests
 """
+import datetime
 import importlib.util
+import json
 import os
 import sys as _sys
 _sys.dont_write_bytecode = True  # keep the kit free of __pycache__
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -87,6 +90,136 @@ class TakeTurnsInOrder(unittest.TestCase):
         p.communicate(timeout=30)
         self.assertEqual(p.returncode, 0)
         self.assertEqual(list(queue.iterdir()), [])
+
+
+def run_log(repo):
+    common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    f = common / "haam-exclusive.log.jsonl"
+    return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
+
+
+def stamp(days_ago, clock):
+    """A local time with its offset, as the log writes it: `days_ago` days back at `clock` (HH:MM:SS)."""
+    day = datetime.date.today() - datetime.timedelta(days=days_ago)
+    t = datetime.datetime.combine(day, datetime.time(*map(int, clock.split(":"))))
+    return t.astimezone().isoformat(timespec="seconds")
+
+
+class EveryRunIsLogged(unittest.TestCase):
+    """Is the local queue a bottleneck? Each run leaves one line beside the lock (wait, run time, where it ran), and
+    `exclusive --report` adds them up per day."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="haam-exclusive-test-"))
+        self.repo = make_repo(self.tmp / "repo")
+        self.common = Path(git(self.repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        self.env = {k: v for k, v in os.environ.items() if k != "HAAM_REMOTE_RUNNER"}
+        self.sleeper = None
+
+    def tearDown(self):
+        if self.sleeper:
+            self.sleeper.kill()
+            self.sleeper.wait()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def exclusive(self, *args):
+        return subprocess.run([sys.executable, str(HAAM), "exclusive", *args], cwd=self.repo, env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_a_run_here_writes_one_line(self):
+        p = self.exclusive("chat A, #7", "--quiet", "0", "--", "sh", "-c", "sleep 1; exit 3")
+        self.assertEqual(p.returncode, 3, p.stderr)
+        lines = run_log(self.repo)
+        self.assertEqual(len(lines), 1, lines)
+        r = lines[0]
+        self.assertEqual((r["who"], r["command"], r["branch"], r["head"], r["exit"]),
+                         ("chat A, #7", "sh -c sleep 1; exit 3", "main", git(self.repo, "rev-parse", "--short", "HEAD"), 3))
+        self.assertEqual(r["machine"], socket.gethostname().split(".")[0])
+        self.assertEqual([r[k] for k in ("remote", "fell_back", "stopped", "nested")], [False] * 4)
+        asked, started, ended = (datetime.datetime.fromisoformat(r[k]) for k in ("asked", "started", "ended"))
+        self.assertLessEqual(asked, started)
+        self.assertGreaterEqual((ended - started).total_seconds(), 1)
+
+    def test_a_run_that_gave_up_waiting_is_logged(self):
+        self.sleeper = subprocess.Popen(["sleep", "120"])
+        hold(self.common, self.sleeper.pid, "someone else", since(0))
+        p = self.exclusive("chat B", "--quiet", "0", "--timeout", "0.03", "--", "true")
+        self.assertEqual(p.returncode, 124, p.stderr)
+        (r,) = run_log(self.repo)
+        self.assertEqual((r["exit"], r["started"]), (124, None))
+        self.assertIsNotNone(r["ended"])
+        self.assertEqual(load_haam().run_log_summary([r])["total"]["gave_up"], 1)
+
+    def test_a_nested_run_is_logged_as_nested_and_not_counted(self):
+        p = self.exclusive("outer", "--quiet", "0", "--", sys.executable, str(HAAM), "exclusive", "inner", "--", "true")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = run_log(self.repo)
+        self.assertEqual([(r["who"], r["nested"]) for r in lines], [("inner", True), ("outer", False)])
+        total = load_haam().run_log_summary(lines)["total"]
+        self.assertEqual((total["runs"], total["nested"]), (1, 1))
+
+    def test_a_log_that_cant_be_written_changes_nothing(self):
+        (self.common / "haam-exclusive.log.jsonl").mkdir()     # a folder where the file goes: every write fails
+        for code in (0, 3):
+            p = self.exclusive("chat C", "--quiet", "0", "--", "sh", "-c", f"exit {code}")
+            self.assertEqual(p.returncode, code, p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+
+    def test_the_log_is_kept_short(self):
+        haam = load_haam()
+        haam.EXCLUSIVE_LOG_MAX_BYTES, haam.EXCLUSIVE_LOG_KEEP = 400, 5
+        lock = self.common / "haam-exclusive.lock"
+        for i in range(60):
+            haam.log_run(lock, {"who": f"run {i}", "asked": "x"})
+        lines = (self.common / "haam-exclusive.log.jsonl").read_text().splitlines()
+        self.assertLessEqual(len(lines), 15)
+        self.assertEqual(json.loads(lines[-1])["who"], "run 59")
+        self.assertEqual(sorted(p.name for p in self.common.iterdir() if "trim" in p.name), [])
+
+    def test_the_report_adds_up_the_log(self):
+        def run(asked, started, ended, code, head="abc1234", command="make check", **flags):
+            rec = {"who": "w", "command": command, "branch": "b", "head": head, "asked": asked, "started": started,
+                   "ended": ended, "exit": code, "machine": "here", "remote": False, "fell_back": False,
+                   "stopped": False, "nested": False}
+            rec.update(flags)
+            return json.dumps(rec)
+        y, t = (lambda c: stamp(1, c)), (lambda c: stamp(0, c))
+        log = [
+            run(stamp(10, "10:00:00"), stamp(10, "10:00:00"), stamp(10, "10:05:00"), 0),     # before the window
+            # Yesterday: failed on the runner, passed here on the same commit; a give-up; a nested run.
+            run(y("10:00:00"), y("10:01:00"), y("10:11:00"), 2, remote=True, machine="studio"),
+            run(y("10:21:00"), y("10:21:00"), y("10:22:00"), 0, nested=True),
+            run(y("10:12:00"), y("10:20:00"), y("10:30:00"), 0),
+            run(y("11:00:00"), None, y("12:00:00"), 124),
+            "not json",
+            # Today: a run stopped at its ceiling; a failure there whose pass here was another command.
+            run(t("09:00:00"), t("09:00:30"), t("12:00:30"), 125, stopped=True),
+            run(t("13:00:00"), t("13:00:10"), t("13:05:10"), 1, head="def5678", remote=True, machine="studio"),
+            run(t("13:06:00"), t("13:06:05"), t("13:07:05"), 0, head="def5678", command="make lint"),
+        ]
+        (self.common / "haam-exclusive.log.jsonl").write_text("\n".join(log) + "\n")
+        p = self.exclusive("--report", "--days", "3", "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        rep = json.loads(p.stdout)
+        keys = ["runs", "nested", "wait_median_s", "wait_max_s", "run_median_s", "run_max_s", "remote", "gave_up",
+                "stopped", "failed_there_passed_here"]
+        days = {d["day"]: [d[k] for k in keys] for d in rep["per_day"]}
+        self.assertEqual(days, {stamp(1, "00:00:00")[:10]: [3, 1, 270, 480, 600, 600, 1, 1, 0, 1],
+                                stamp(0, "00:00:00")[:10]: [3, 0, 10, 30, 300, 10800, 1, 0, 1, 0]})
+        self.assertEqual([rep["total"][k] for k in keys], [6, 1, 30, 480, 600, 10800, 2, 1, 1, 1])
+        text = self.exclusive("--report", "--days", "3")
+        self.assertEqual(text.returncode, 0, text.stderr)
+        rows = [line.split() for line in text.stdout.splitlines()]
+        self.assertIn(["All", "6", "30s", "8m00s", "10m00s", "3h00m", "2", "1", "1", "1"], rows)
+        self.assertIn([stamp(1, "00:00:00")[:10], "3", "4m30s", "8m00s", "10m00s", "10m00s", "1", "1", "0", "1"], rows)
+        doctor = [x for x in load_haam().heavy_lock_report(self.repo) if "last 7 days" in x[1]]
+        self.assertEqual(len(doctor), 1)
+        self.assertIn("last 7 days: 6, median wait 30s", doctor[0][1])
+
+    def test_the_report_needs_no_log(self):
+        p = self.exclusive("--report")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("No heavy runs logged here", p.stdout)
 
 
 class CountsOnlyWhatAProcessItselfRuns(unittest.TestCase):
@@ -299,6 +432,26 @@ class RunsOnTheOtherMachineWhenFree(OtherMachine):
         self.assertEqual(git(self.remote, "for-each-ref", "refs/haam-remote"), "")
         self.assertEqual(len(git(self.remote, "worktree", "list").splitlines()), 1)
         self.assertEqual(git(self.local, "status", "--porcelain"), "?? uncommitted.txt")   # this tree is untouched
+
+    def test_a_run_there_is_logged_here_and_there(self):
+        """The asking machine logs the run as remote, with the exit code that came back; the runner's own exclusive
+        logs it there under its own who."""
+        p = self.exclusive("--quiet", "0")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        (here,) = run_log(self.local)
+        self.assertEqual((here["who"], here["exit"], here["machine"], here["remote"], here["fell_back"]),
+                         ("remote test", 2, "studio", True, False))
+        self.assertIsNotNone(here["started"])
+        (there,) = run_log(self.remote)
+        self.assertEqual(there["who"], f"remote test (from {socket.gethostname().split('.')[0]})")
+        self.assertEqual((there["exit"], there["remote"], there["branch"]), (2, False, None))
+
+    def test_a_run_that_did_not_start_there_is_logged_as_fallen_back(self):
+        p = self.exclusive("--timeout", "0.05", "--quiet", "0", run="refuse")
+        self.assertEqual(p.returncode, 124, p.stdout + p.stderr)
+        (r,) = run_log(self.local)
+        self.assertEqual((r["exit"], r["started"], r["remote"], r["fell_back"]), (124, None, False, True))
+        self.assertEqual(r["machine"], socket.gethostname().split(".")[0])
 
     def test_a_connection_that_drops_during_the_run_is_not_run_again_here(self):
         """#924: on 2 Nov the connection to brain timed out 40 minutes into `make check`; exit 255 read as "didn't

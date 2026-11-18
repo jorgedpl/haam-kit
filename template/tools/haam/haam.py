@@ -6115,6 +6115,11 @@ RUN_CEILING_EXIT = 125          # what exclusive exits with when it stopped its 
 EXCLUSIVE_STOPPED = "haam-exclusive.stopped"    # JSON lines: the runs this clone's exclusive stopped at their ceiling
 EXCLUSIVE_NOTICED = "haam-exclusive.noticed"    # the notices already posted from this clone, so each is posted once
 NOTICE_ENV = "HAAM_EXCLUSIVE_NOTICE"             # "off": don't comment on issues (a run sent here by another machine)
+# One JSON line per run beside the lock, so "is the queue a bottleneck?" has numbers (`exclusive --report`). Past
+# EXCLUSIVE_LOG_MAX_BYTES it is cut to its last EXCLUSIVE_LOG_KEEP lines: weeks of runs even on a busy machine.
+EXCLUSIVE_LOG = "haam-exclusive.log.jsonl"
+EXCLUSIVE_LOG_MAX_BYTES = 1_000_000
+EXCLUSIVE_LOG_KEEP = 3000
 
 
 class RemoteTurn(Exception):
@@ -6286,6 +6291,145 @@ def record_stopped(lock, record):
         f.write_text("\n".join(lines + [json.dumps(record)]) + "\n")
     except OSError:
         pass
+
+
+def now_stamp():
+    """Local time with its offset, to the second (parsed back by datetime.fromisoformat)."""
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def short_host():
+    return socket.gethostname().split(".")[0]
+
+
+def log_run(lock, rec):
+    """Add one run's line to the log beside the lock (EXCLUSIVE_LOG). Never fails the run it records: a log that
+    can't be written is skipped. Past EXCLUSIVE_LOG_MAX_BYTES the file keeps its last EXCLUSIVE_LOG_KEEP lines."""
+    f = lock.with_name(EXCLUSIVE_LOG)
+    tmp = None
+    try:
+        with open(f, "a", encoding="utf-8") as out:     # one short append: lines from parallel runs don't mix
+            out.write(json.dumps(rec) + "\n")
+        if f.stat().st_size > EXCLUSIVE_LOG_MAX_BYTES:
+            keep = f.read_text(encoding="utf-8", errors="replace").splitlines()[-EXCLUSIVE_LOG_KEEP:]
+            tmp = f.with_name(f"{f.name}.trim-{os.getpid()}")
+            tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
+            os.replace(tmp, f)
+            tmp = None
+    except Exception:   # noqa: BLE001 - the log is a by-product; the run's own exit code is what matters
+        pass
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def read_run_log(lock):
+    """The log's runs, oldest first; lines that aren't JSON objects are skipped."""
+    try:
+        text = lock.with_name(EXCLUSIVE_LOG).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    runs = []
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get("asked"), str):
+            runs.append(rec)
+    return runs
+
+
+def _stamp(s):
+    try:
+        return datetime.datetime.fromisoformat(s) if isinstance(s, str) else None
+    except ValueError:
+        return None
+
+
+def _seconds(a, b):
+    a, b = _stamp(a), _stamp(b)
+    if a is None or b is None or (a.tzinfo is None) != (b.tzinfo is None):
+        return None
+    return max(0.0, (b - a).total_seconds())
+
+
+def run_log_summary(runs, days=7, today=None):
+    """Per local day (of `asked`) over the last `days` days, and in total: runs, wait (started − asked) and run time
+    (ended − started) medians and maxima in seconds, and how many ran on the remote runner, gave up waiting (124,
+    nothing started), were stopped at their ceiling, and failed on the remote runner and then passed here on the
+    same head commit and command (the runner, not the change, was likely broken). Nested runs (straight through
+    inside their parent's turn) are left out of everything but their own count, so no wait is counted twice."""
+    today = today or datetime.date.today()
+    first = (today - datetime.timedelta(days=max(1, days) - 1)).isoformat()
+    last_pass = {}      # (head, command) -> the log index of its last pass here
+    for i, r in enumerate(runs):
+        if not r.get("remote") and not r.get("nested") and r.get("exit") == 0 and r.get("started") and r.get("head"):
+            last_pass[(r["head"], r.get("command"))] = i
+    broke = {i for i, r in enumerate(runs)      # a failure there, then a pass here, later in the log
+             if r.get("remote") and r.get("exit") not in (0, None) and not r.get("nested")
+             and last_pass.get((r.get("head"), r.get("command")), -1) > i}
+
+    def stats(group):
+        main = [(i, r) for i, r in group if not r.get("nested")]
+        waits = [w for w in (_seconds(r.get("asked"), r.get("started")) for _, r in main) if w is not None]
+        times = [t for t in (_seconds(r.get("started"), r.get("ended")) for _, r in main) if t is not None]
+
+        def med(xs):
+            xs = sorted(xs)
+            n = len(xs)
+            return round((xs[n // 2] + xs[(n - 1) // 2]) / 2, 1) if xs else None
+        return {"runs": len(main), "nested": len(group) - len(main),
+                "wait_median_s": med(waits), "wait_max_s": round(max(waits), 1) if waits else None,
+                "run_median_s": med(times), "run_max_s": round(max(times), 1) if times else None,
+                "remote": sum(1 for _, r in main if r.get("remote")),
+                "gave_up": sum(1 for _, r in main if not r.get("started") and r.get("exit") == 124),
+                "stopped": sum(1 for _, r in main if r.get("stopped")),
+                "failed_there_passed_here": sum(1 for i, _ in main if i in broke)}
+
+    window = [(i, r) for i, r in enumerate(runs) if r["asked"][:10] >= first]
+    by_day = {}
+    for i, r in window:
+        by_day.setdefault(r["asked"][:10], []).append((i, r))
+    return {"days": days, "since": first, "per_day": [dict(day=d, **stats(by_day[d])) for d in sorted(by_day)],
+            "total": stats(window)}
+
+
+def say_seconds(s):
+    if s is None:
+        return "-"
+    s = int(round(s))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{s % 3600 // 60:02d}m"
+
+
+def print_run_report(summary, where):
+    if not summary["per_day"]:
+        print(f"No heavy runs logged here in the last {summary['days']} days ({where}).")
+        return
+    print(f"Heavy runs through exclusive on this machine, the last {summary['days']} days ({where}).")
+    print("Wait: from asking to starting. Run: from starting to the end. Nested runs are left out.")
+    cols = [("Day", "day", 10), ("Runs", "runs", 4), ("Wait med", "wait_median_s", 8), ("Wait max", "wait_max_s", 8),
+            ("Run med", "run_median_s", 7), ("Run max", "run_max_s", 7), ("Remote", "remote", 6),
+            ("Gave up", "gave_up", 7), ("Stopped", "stopped", 7), ("Failed there, passed here", "failed_there_passed_here", 25)]
+
+    def row(d):
+        cells = []
+        for _title, key, width in cols:
+            v = d.get(key)
+            v = say_seconds(v) if key.endswith("_s") else v
+            cells.append(str(v).ljust(width) if key == "day" else str(v).rjust(width))
+        return "  ".join(cells)
+    print("  ".join(t.ljust(w) if k == "day" else t.rjust(w) for t, k, w in cols))
+    for d in summary["per_day"]:
+        print(row(d))
+    print(row(dict(summary["total"], day="All")))
 
 
 def post_notice(cfg, lock, key, who, body, say):
@@ -6768,6 +6912,11 @@ def heavy_lock_report(root):
                     + (f" ({say_age(age)}), far longer than any check takes" if long_ else ""),
                     f"pid {owner.get('pid', '?')}" + ("; compare its CPU time with its elapsed time "
                                                       "(ps -o pid,etime,time,command -p <pid>)" if long_ else "")))
+    if lock.with_name(EXCLUSIVE_LOG).exists():
+        week = run_log_summary(read_run_log(lock), 7)["total"]
+        out.append(("info", f"Heavy runs here, last 7 days: {week['runs']}, median wait "
+                    f"{say_seconds(week['wait_median_s'])}, longest {say_seconds(week['wait_max_s'])}",
+                    "per day: python3 tools/haam/haam.py exclusive --report"))
     host = os.environ.get(REMOTE_RUNNER_ENV, "").strip()
     if host:
         repo = os.environ.get(REMOTE_REPO_ENV, "").strip() or remote_repo_default(root)
@@ -6824,11 +6973,12 @@ def running_note(who, command):
     return f"{who}: running {' '.join(command)}"
 
 
-def run_remote(host, repo, command, who, root, say, timeout_min=60.0, quiet_s=10.0, max_run=None):
+def run_remote(host, repo, command, who, root, say, timeout_min=60.0, quiet_s=10.0, max_run=None, log=None):
     """Run `command` on `host` in a temporary worktree of the same commit, through that host's own `exclusive`,
     which waits as long as this run was told to (`timeout_min`, `quiet_s`) and stops the command after `max_run`
     minutes (REMOTE_MAX_RUN_MINUTES when not given: a run there must never hold that machine for days, #1796).
     Returns the command's exit code, or None when the command never started there (the caller waits here instead).
+    `log`, a run's log record, gets `started` when the command starts there.
 
     ⛔ A COMMAND THAT STARTED THERE IS NEVER RUN AGAIN HERE (#924). ssh's 255 means "the connection failed", before the
     run or in the middle of it: on 2 Nov 2026 the connection timed out 40 minutes into `make check`, and the whole
@@ -6900,6 +7050,8 @@ fi
             if not started:
                 seen = seen[-len(note):] + chunk
                 started = note in seen
+                if started and log is not None:
+                    log["started"] = now_stamp()
         code = p.wait()
     finally:
         if p.poll() is None:
@@ -6938,6 +7090,17 @@ def run_with_ceiling(command, max_run, say, who):
 
 def cmd_exclusive(args):
     """Run a heavy command (one that uses a machine-wide resource) when no other one is running on this machine."""
+    if getattr(args, "report", False):
+        lock = exclusive_lock_path(find_repo_root(Path.cwd()))
+        summary = run_log_summary(read_run_log(lock), args.days)
+        if args.json:
+            print(json.dumps(summary, indent=2))
+        else:
+            print_run_report(summary, str(lock.with_name(EXCLUSIVE_LOG)))
+        return
+    if not args.who:
+        sys.exit('Say who is asking, then the command after --, e.g. haam.py exclusive "chat A, #12" -- make check '
+                 '(or --report for how long runs waited)')
     command = list(args.command or [])
     if "--" in command:     # options given after <who> land here too: read them, then the command after --
         k = command.index("--")
@@ -6965,6 +7128,13 @@ def cmd_exclusive(args):
         repo = os.environ.get(REMOTE_REPO_ENV, "").strip() or remote_repo_default(root)
         remote_free = remote_watch(host, repo, cfg, lock, say, tool=Path(command[0]).name)
 
+    # This run's line in the log (log_run), written whatever the outcome. `machine` is where the command ran.
+    branch = git_out(root, "rev-parse", "--abbrev-ref", "HEAD")
+    rec = {"who": args.who, "command": " ".join(command)[:500], "branch": None if branch in ("", "HEAD") else branch,
+           "head": git_out(root, "rev-parse", "--short", "HEAD") or None, "asked": now_stamp(), "started": None,
+           "ended": None, "exit": None, "machine": short_host(), "remote": False, "fell_back": False,
+           "stopped": False, "nested": False}
+
     def long_hold(owner, age):
         post_notice(cfg, lock, f"held|{owner.get('host')}|{owner.get('pid')}|{owner.get('since')}", owner.get("who"),
                     long_hold_body(owner, "this machine", age), say)
@@ -6976,7 +7146,9 @@ def cmd_exclusive(args):
         turn = MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say, remote_free=remote_free,
                            place=place, on_long_hold=long_hold)
         with turn:
+            rec["nested"], rec["started"] = turn.nested, now_stamp()
             code, stopped = run_with_ceiling(command, args.max_run, say, args.who)
+        rec["stopped"] = bool(stopped)
         if stopped:
             record_stopped(lock, stopped)
             say(f"{BAD} {args.who}: stopped after {stopped['minutes']} min, its ceiling (--max-run {args.max_run:g}): "
@@ -6985,25 +7157,40 @@ def cmd_exclusive(args):
         return code
 
     turn = None
+    final = 1       # the exit code this process ends with, for the log
     try:
         try:
-            sys.exit(here())
-        except RemoteTurn as away:
-            remote_free = None
-            code = run_remote(host, repo, command, args.who, root, say, args.timeout, args.quiet, args.max_run)
-            if code == RUN_CEILING_EXIT:
-                state = remote_lock_state(host, repo)
-                notice_stopped(cfg, lock, (state or {}).get("stopped") or [], say)
-            if code is not None:
-                sys.exit(code)
-            sys.exit(here(away.place))
-    except TimeoutError:
-        waiting = f", waiting for {'; '.join(turn.blocking)}" if turn is not None and turn.blocking else ""
-        print(f"✘ Gave up after {args.timeout:g} minutes: the machine was still busy{waiting}. Nothing was run.",
-              file=sys.stderr)
-        sys.exit(124)
-    except FileNotFoundError:
-        sys.exit(f"Command not found: {command[0]}")
+            try:
+                sys.exit(here())
+            except RemoteTurn as away:
+                remote_free = None
+                rec["remote"], rec["machine"] = True, host
+                code = run_remote(host, repo, command, args.who, root, say, args.timeout, args.quiet, args.max_run,
+                                  log=rec)
+                if code == RUN_CEILING_EXIT:
+                    rec["stopped"] = True
+                    state = remote_lock_state(host, repo)
+                    notice_stopped(cfg, lock, (state or {}).get("stopped") or [], say)
+                if code is not None:
+                    sys.exit(code)
+                rec.update(remote=False, fell_back=True, machine=short_host(), started=None)
+                sys.exit(here(away.place))
+        except TimeoutError:
+            waiting = f", waiting for {'; '.join(turn.blocking)}" if turn is not None and turn.blocking else ""
+            print(f"✘ Gave up after {args.timeout:g} minutes: the machine was still busy{waiting}. Nothing was run.",
+                  file=sys.stderr)
+            sys.exit(124)
+        except FileNotFoundError:
+            sys.exit(f"Command not found: {command[0]}")
+    except SystemExit as e:
+        final = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        raise
+    except KeyboardInterrupt:
+        final = 130
+        raise
+    finally:
+        rec["exit"], rec["ended"] = final, now_stamp()
+        log_run(lock, rec)
 
 
 def paths_in_use():
@@ -7872,12 +8059,16 @@ def main():
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("exclusive", help="run a heavy command when no other one is running on this machine")
-    p.add_argument("who", help="who is asking, for the others' messages, e.g. 'chat A, #12'")
+    p.add_argument("who", nargs="?", help="who is asking, for the others' messages, e.g. 'chat A, #12'")
     p.add_argument("--timeout", type=float, default=60, help="minutes to wait before giving up (exit 124)")
     p.add_argument("--quiet", type=float, default=10, help="seconds with no other heavy run before starting")
     p.add_argument("--max-run", type=float, default=None,
                    help=f"minutes the command may run before it and everything it started are stopped (exit "
                         f"{RUN_CEILING_EXIT}); a run sent to the other machine gets {REMOTE_MAX_RUN_MINUTES:g} unless given")
+    p.add_argument("--report", action="store_true",
+                   help="no command: per day, how long runs here waited for the machine and ran (from the run log)")
+    p.add_argument("--days", type=int, default=7, help="--report: how many days back (default 7)")
+    p.add_argument("--json", action="store_true", help="--report: as JSON")
     p.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command, e.g. -- make check")
     p.set_defaults(func=cmd_exclusive)
 

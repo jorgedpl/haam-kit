@@ -6,6 +6,22 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+The machine-wide lock and the remote runner, from a project with two Macs and many agent chats (brought up from its copy, with its tests).
+
+### Fixed
+- **A run whose connection to the other machine drops is never run again here.** ssh's exit 255 used to read as "it didn't start there", so a connection that timed out 40 minutes into `make check` started the whole run again on this machine. `exclusive` now reads the output as it comes back: once the other machine says the command is running, its exit code is the answer, a dropped connection included. A connection that never opened still waits here.
+- **A dead run or a dead ticket on the other machine no longer blocks it.** A lock whose holder is gone, or a queue ticket left by a dropped connection, counted as busy, so no waiting run went there until someone cleared it by hand. The other machine's lock is now read with its holder, its age and its live waiters, and dead entries count as nothing.
+- **A run on the other machine checks against this machine's `main`.** It diffed against the other clone's own, older `origin/main`, so a changed-files check there ran everything. The run now carries this machine's commit and its base (`HAAM_BASE_COMMIT`), and `make setup`'s log goes in the temporary worktree's git folder, not its tree.
+- **The other machine's `exclusive` waits as long as this run was told to** (`--timeout`, `--quiet`), not its own 60 minutes.
+- **Only what a process itself runs counts as a heavy run.** A shell whose command text names a heavy run (a loop that reads a log, a waiter's own wrapper) runs nothing heavy itself, and counting it deadlocked the queue.
+- **A fallback keeps its place in the queue.** A run that went to the other machine and couldn't start there waits here from where it was, not at the back.
+- **`.worktreeinclude` copies folders too** (a trailing `/`), with their symlinks kept as links, so an SDK's frameworks reach a new worktree intact.
+- **The other machine's lock can't be read** (on a Mac whose new Xcode licence nobody accepted, `python3` fails there like `make` does): the run stays here, and the wait says why once.
+
+### Added
+- **`exclusive --max-run <minutes>`** stops the command and everything it started once it runs that long, and exits 125 (its result is unknown). A run sent to the other machine gets 180 minutes unless given, so one stuck run can no longer hold that machine for days.
+- **A lock held far longer than any check takes is said.** Past 3 hours, the waiting line says who holds it and since when, `doctor` warns (for this machine's lock and the other machine's), and the issue the run names (`"chat A, #12"`) gets one comment. A run stopped at its ceiling is commented on once the same way, from whichever machine sees it. Nothing is stopped automatically except at `--max-run`.
+
 ## [1.19.1] - 2026-11-13
 
 ### Fixed

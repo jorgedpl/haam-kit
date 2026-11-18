@@ -5046,8 +5046,14 @@ def include_patterns(main):
 
 
 def copy_includes(main, dest, cfg=None):
-    """Copy git-ignored local files listed in .worktreeinclude (e.g. .env) from the main folder into a
-    worktree. Never overwrites, never copies tracked files, never prints contents. Returns (copied, skipped)."""
+    """Copy git-ignored local files and folders listed in .worktreeinclude (e.g. .env, an SDK's frameworks) from the
+    main folder into a worktree. Never overwrites, never copies tracked files, never prints contents. Returns
+    (copied, skipped); a folder is listed with a trailing `/`.
+
+    ⛔ A FOLDER IS COPIED WITH ITS SYMLINKS AS LINKS (#1296). An iOS framework is mostly links (`Headers ->
+    Versions/Current/Headers`); a copy that followed or dropped them left the App target unable to find
+    `opencv2/core.hpp`, and this function skipped every pattern that was not a file, so prep said "none needed". A
+    folder already there gets back any link it is missing; nothing in it is overwritten."""
     copied, skipped = [], []
     if main.resolve() == dest.resolve():
         return copied, skipped
@@ -5055,7 +5061,7 @@ def copy_includes(main, dest, cfg=None):
     for pat in include_patterns(main):
         pat = pat.lstrip("/")
         for src in sorted(main.glob(pat)):
-            if not src.is_file():
+            if not (src.is_file() or src.is_dir()):
                 continue
             try:
                 if area in src.resolve().parents or src.resolve() == area:
@@ -5063,16 +5069,46 @@ def copy_includes(main, dest, cfg=None):
             except ValueError:
                 pass
             rel = src.relative_to(main).as_posix()
+            shown = rel + "/" if src.is_dir() else rel
             if run(["git", "check-ignore", "-q", rel], cwd=main)[0] != 0:
-                skipped.append(rel + " (tracked or not git-ignored)")
+                skipped.append(shown + " (tracked or not git-ignored)")
                 continue
             target = dest / rel
+            if src.is_dir():
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(src, target, symlinks=True)
+                    copied.append(shown)
+                else:
+                    restored = restore_links(src, target)
+                    if restored:
+                        copied.append(f"{shown} ({restored} missing link{'s' if restored != 1 else ''} restored)")
+                continue
             if target.exists():
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, target)
             copied.append(rel)
     return copied, skipped
+
+
+def restore_links(src, target):
+    """Every symlink under [src] that [target] has nothing at, made again as the same link. Returns how many.
+
+    Only adds: a path that exists in [target] in any form, file, folder or link, is left exactly as it is."""
+    restored = 0
+    for folder, dirs, files in os.walk(src):
+        here = Path(folder)
+        for name in dirs + files:
+            link = here / name
+            if not link.is_symlink():
+                continue
+            twin = target / link.relative_to(src)
+            if os.path.lexists(twin) or not twin.parent.is_dir():
+                continue
+            os.symlink(os.readlink(link), twin)
+            restored += 1
+    return restored
 
 
 def list_worktrees(root, cfg=None, also=None):
@@ -5349,10 +5385,23 @@ EXCLUSIVE_HELD_ENV = "HAAM_EXCLUSIVE_HELD"       # "<pid>@<lock>", set for every
 REMOTE_RUNNER_ENV = "HAAM_REMOTE_RUNNER"         # an ssh host this machine may hand heavy `make` runs to
 REMOTE_REPO_ENV = "HAAM_REMOTE_REPO"             # the clone's path there (default: this clone's path under ~)
 REMOTE_CHECK_SECONDS = 60.0
+# A stuck run must not hold a machine for days (#1796: the Mac Studio's lock was held from 4 Nov to 13 Nov by a run
+# with under a second of CPU, and nobody was told). The longest full check seen took 97 minutes.
+LONG_HOLD_MINUTES = 180.0       # a lock held longer than this is said in the waiting line, in doctor, and once on the issue
+REMOTE_MAX_RUN_MINUTES = 180.0  # a run sent to the other machine is stopped there after this long (--max-run changes it)
+RUN_CEILING_EXIT = 125          # what exclusive exits with when it stopped its command at --max-run
+EXCLUSIVE_STOPPED = "haam-exclusive.stopped"    # JSON lines: the runs this clone's exclusive stopped at their ceiling
+EXCLUSIVE_NOTICED = "haam-exclusive.noticed"    # the notices already posted from this clone, so each is posted once
+NOTICE_ENV = "HAAM_EXCLUSIVE_NOTICE"             # "off": don't comment on issues (a run sent here by another machine)
 
 
 class RemoteTurn(Exception):
-    """Raised inside `MachineTurn` when the remote runner is free before this machine's turn comes."""
+    """Raised inside `MachineTurn` when the remote runner is free before this machine's turn comes. `place` is the
+    name its ticket had: a run that comes back waits here under it again, so it keeps its place in line (#924)."""
+
+    def __init__(self, place=None):
+        super().__init__()
+        self.place = place
 
 
 def process_table():
@@ -5386,9 +5435,38 @@ def compile_patterns(patterns):
     return out
 
 
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+
+
+def run_line(command):
+    """What a process itself runs, for heavy_runs to match (#1039): its own program and arguments.
+
+    A shell given a command string (`zsh -c '…'`, `bash -lc …`) runs nothing heavy itself, whatever the string
+    mentions: a heavy command it starts is a process of its own, and is matched as one. Matching the shell's text
+    deadlocked the queue twice (23 and 26 Oct 2026): a watcher loop reading a log named `./gradlew check`, and a
+    waiter's own wrapper named its test command. A shell running a script file runs that script. None when the
+    process runs nothing to match."""
+    words = command.split()
+    if not words:
+        return None
+    if Path(words[0].lstrip("-")).name not in SHELLS:
+        return command
+    rest = words[1:]
+    while rest and rest[0][:1] in "-+" and rest[0] not in ("-", "--"):
+        flag = rest.pop(0)
+        if not flag.startswith("--") and "c" in flag[1:]:
+            return None
+        if flag in ("-o", "+o", "-O", "+O") and rest:
+            rest.pop(0)
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    return " ".join(rest) or None
+
+
 def heavy_runs_now(patterns):
     """Other processes matching the project's heavy_runs: never this process, its process group or its ancestors,
-    and never another `haam.py exclusive` (it waits for the lock, or holds it, so it isn't running anything free)."""
+    and never another `haam.py exclusive` (it waits for the lock, or holds it, so it isn't running anything free).
+    Each is matched by what it runs itself (`run_line`), never by a shell's command text."""
     regs = compile_patterns(patterns)
     rows = process_table()
     if not regs or rows is None:
@@ -5402,8 +5480,14 @@ def heavy_runs_now(patterns):
         group = os.getpgid(0)
     except (AttributeError, OSError):
         group = None
-    return [(pid, cmd) for pid, _, pgid, cmd in rows
-            if pid not in skip and pgid != group and not EXCLUSIVE_SELF.search(cmd) and any(r.search(cmd) for r in regs)]
+    found = []
+    for pid, _, pgid, cmd in rows:
+        line = run_line(cmd)
+        if pid in skip or pgid == group or line is None or EXCLUSIVE_SELF.search(line):
+            continue
+        if any(r.search(line) for r in regs):
+            found.append((pid, line))
+    return found
 
 
 def pid_alive(pid):
@@ -5414,6 +5498,118 @@ def pid_alive(pid):
     except (PermissionError, OSError):
         return True
     return True
+
+
+def lock_age_seconds(owner, owner_file=None):
+    """How long a lock's holder has held it, from its `since` (local time where it was written) or the file's age."""
+    try:
+        return max(0.0, time.time() - time.mktime(time.strptime(owner.get("since", ""), "%Y-%m-%d %H:%M:%S")))
+    except (ValueError, OverflowError, AttributeError):
+        pass
+    try:
+        return max(0.0, time.time() - Path(owner_file).stat().st_mtime) if owner_file else None
+    except OSError:
+        return None
+
+
+def held_long(age_s):
+    return age_s is not None and age_s > LONG_HOLD_MINUTES * 60
+
+
+def say_age(age_s):
+    h = int(age_s // 3600)
+    return f"{h // 24} d {h % 24} h" if h >= 24 else f"{h} h {int(age_s % 3600 // 60)} min"
+
+
+def descendants(pid):
+    """Every process below `pid` on this machine, children first."""
+    kids = {}
+    for p, pp, _, _ in process_table() or []:
+        kids.setdefault(pp, []).append(p)
+    out, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(0), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def stop_tree(child):
+    """End a command and everything it started: TERM, ten seconds, then KILL for whatever is left."""
+    pids = [child.pid] + descendants(child.pid)
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    try:
+        child.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    for p in pids:
+        if pid_alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+    child.wait()
+
+
+def record_stopped(lock, record):
+    """Keep what a ceiling stopped beside the lock (the last 20), so a machine that couldn't comment is still heard:
+    the other machine reads it in its next check and posts it once."""
+    f = lock.with_name(EXCLUSIVE_STOPPED)
+    try:
+        lines = f.read_text().splitlines()[-19:] if f.exists() else []
+        f.write_text("\n".join(lines + [json.dumps(record)]) + "\n")
+    except OSError:
+        pass
+
+
+def post_notice(cfg, lock, key, who, body, say):
+    """Comment `body` once on the issue `who` names (#123), from this clone. Never fails the run it reports."""
+    m = re.search(r"#(\d+)", who or "")
+    if not m or os.environ.get(NOTICE_ENV) == "off":
+        return
+    marker = lock.with_name(EXCLUSIVE_NOTICED)
+    try:
+        seen = json.loads(marker.read_text()) if marker.exists() else []
+    except (OSError, ValueError):
+        seen = []
+    if key in seen:
+        return
+    repo = (cfg or {}).get("github_repo")
+    if (cfg or {}).get("tracker", "github") != "github" or not repo or not have("gh"):
+        say(f"{WARN} Couldn't tell #{m.group(1)} (no GitHub tracker or gh here): {body.splitlines()[0]}")
+        return
+    try:
+        p = subprocess.run(["gh", "issue", "comment", m.group(1), "-R", repo, "--body", body],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        p = None
+    if p is None or p.returncode != 0:
+        say(f"{WARN} Couldn't comment on #{m.group(1)}: {((p.stderr if p else '') or 'gh failed').strip()[:160]}")
+        return
+    try:
+        marker.write_text(json.dumps((seen + [key])[-200:]) + "\n")
+    except OSError:
+        pass
+    say(f"{INFO} Told the owner on #{m.group(1)}.")
+
+
+def long_hold_body(owner, where, age_s):
+    return (f"⏳ `haam.py exclusive`: the heavy-run lock on {where} has been held since {owner.get('since', '?')} "
+            f"({say_age(age_s)}) by \"{owner.get('who', '?')}\" (pid {owner.get('pid', '?')}), far longer than any "
+            "check takes, and every other run waits for it. Nothing stops it automatically: check whether that run "
+            "still makes progress (its CPU time against its elapsed time: `ps -o pid,etime,time,command -p <pid>`), "
+            "and stop it on the owner's word.")
+
+
+def stopped_body(rec):
+    return (f"⏱️ `haam.py exclusive` stopped a heavy run for this issue at its ceiling on {rec.get('host', '?')}: "
+            f"`{rec.get('command', '?')}`, started {rec.get('since', '?')} by \"{rec.get('who', '?')}\", ran "
+            f"{rec.get('minutes', '?')} min without finishing. The machine's lock is free again. Its result is unknown: "
+            "run it again, and if it stops again, find what hangs.")
 
 
 def exclusive_lock_path(cwd=None):
@@ -5434,9 +5630,11 @@ class MachineTurn:
     (no ticket) still takes the lock whenever it is free; the ticket order holds among the others.
 
     `remote_free`, when given, is asked every REMOTE_CHECK_SECONDS while this machine's lock is busy; when it says
-    yes, the wait ends with `RemoteTurn` (the ticket is withdrawn first)."""
+    yes, the wait ends with `RemoteTurn` (the ticket is withdrawn first, so the line here moves on while the run is
+    away). `place`, a ticket name from that `RemoteTurn`, queues under that name again instead of a new one."""
 
-    def __init__(self, who, patterns, timeout_min=60.0, quiet_s=10.0, say=print, cwd=None, remote_free=None):
+    def __init__(self, who, patterns, timeout_min=60.0, quiet_s=10.0, say=print, cwd=None, remote_free=None,
+                 place=None, on_long_hold=None):
         self.who, self.patterns, self.say = who, patterns, say
         self.deadline = time.time() + timeout_min * 60
         self.quiet = quiet_s
@@ -5444,10 +5642,14 @@ class MachineTurn:
         self.lock = exclusive_lock_path(cwd)
         self.queue = self.lock.with_name(EXCLUSIVE_QUEUE)
         self.ticket = None
+        self.place = place
         self.remote_free = remote_free
+        self.on_long_hold = on_long_hold     # called once with (owner, age in seconds) for a lock held past LONG_HOLD
         self.held = False
         self.nested = False
         self._old = {}
+        # What this turn last waited for, said when it gives up (#1039): the lock's owner, runs ahead, or heavy runs.
+        self.blocking = []
         self._old_env = None
 
     def _owner(self):
@@ -5459,7 +5661,7 @@ class MachineTurn:
     def _enqueue(self):
         try:
             self.queue.mkdir(exist_ok=True)
-            t = self.queue / f"{time.time_ns():020d}-{os.getpid()}"
+            t = self.queue / (self.place or f"{time.time_ns():020d}-{os.getpid()}")
             t.write_text(json.dumps({"who": self.who, "pid": os.getpid(),
                                      "since": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
             self.ticket = t
@@ -5473,6 +5675,11 @@ class MachineTurn:
             except OSError:
                 pass
             self.ticket = None
+
+    def _away(self):
+        place = self.ticket.name if self.ticket is not None else None
+        self._dequeue()
+        raise RemoteTurn(place)
 
     def _ahead(self):
         """Live tickets older than this one, oldest first; a dead process's ticket is removed on the way."""
@@ -5522,7 +5729,7 @@ class MachineTurn:
         return None
 
     def _acquire(self):
-        told, told_ahead, next_remote = False, None, 0.0
+        told, told_ahead, next_remote, told_long = False, None, 0.0, None
         holder = self._inside_holder()
         if holder:
             self.nested = True
@@ -5533,14 +5740,14 @@ class MachineTurn:
         while True:
             ahead = self._ahead()
             if ahead:
+                self.blocking = [f"{len(ahead)} run(s) ahead in line"]
                 if len(ahead) != told_ahead:
                     self.say(f"{INFO} In line for the machine: {len(ahead)} run(s) ahead of {self.who}.")
                     told_ahead = len(ahead)
                 if self.remote_free is not None and time.time() >= next_remote:
                     next_remote = time.time() + REMOTE_CHECK_SECONDS
                     if self.remote_free():
-                        self._dequeue()
-                        raise RemoteTurn()
+                        self._away()
                 if time.time() > self.deadline:
                     self._dequeue()
                     return False
@@ -5566,15 +5773,24 @@ class MachineTurn:
                     except OSError:
                         pass
                     continue
+                self.blocking = [f"the lock, held by {owner.get('who', '?')} (pid {owner.get('pid', '?')}, "
+                                 f"since {owner.get('since', '?')})"]
                 if not told:
                     self.say(f"{INFO} Waiting for {owner.get('who', '?')} (running since {owner.get('since', '?')}, "
                              f"pid {owner.get('pid', '?')}) to finish…")
                     told = True
+                age = lock_age_seconds(owner, self.lock / "owner")
+                key = (owner.get("pid"), owner.get("since"))
+                if held_long(age) and told_long != key:
+                    told_long = key
+                    self.say(f"{WARN} This machine's lock has been held since {owner.get('since', '?')} "
+                             f"({say_age(age)}) by {owner.get('who', '?')}, far longer than any check takes.")
+                    if self.on_long_hold is not None:
+                        self.on_long_hold(owner, age)
                 if self.remote_free is not None and time.time() >= next_remote:
                     next_remote = time.time() + REMOTE_CHECK_SECONDS
                     if self.remote_free():
-                        self._dequeue()
-                        raise RemoteTurn()
+                        self._away()
                 if time.time() > self.deadline:
                     self._dequeue()
                     return False
@@ -5598,6 +5814,7 @@ class MachineTurn:
             now = time.time()
             if busy:
                 quiet_since = None
+                self.blocking = [f"pid {pid}: {cmd[:120]}" for pid, cmd in busy[:3]]
                 if not told:
                     self.say(f"{INFO} Waiting for {len(busy)} other heavy run(s) that don't use the lock: "
                              + "; ".join(f"pid {pid}: {cmd[:80]}" for pid, cmd in busy[:3]))
@@ -5668,44 +5885,184 @@ def ssh_args(host):
     return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=60", host]
 
 
-REMOTE_NOT_READY = 4   # remote_lock_free's script: the other machine cannot run the command's tool
+# Sent to the other machine as a script of its own (that machine may run an older haam.py, or none outside a run).
+# It answers in JSON: the lock's live holder with its age, the live waiters, and the runs a ceiling stopped there.
+# A holder or a ticket whose process is gone counts as nothing (#1807): that machine's own exclusive takes a lock
+# left behind over, and drops a dead ticket, the moment it runs.
+# Given a tool (its second argument) and a free lock, it also runs `<tool> --version` in the login zsh a run there
+# uses, and answers `not_ready` with the first error line when that fails (kit #20): a new Xcode whose licence nobody
+# accepted makes every `make` exit 69, and a run handed over would fail at once and, by #924, never run here again.
+REMOTE_PROBE = r"""
+import json, os, subprocess, sys, time
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+repo = sys.argv[1] if os.path.isabs(sys.argv[1]) else os.path.join(os.path.expanduser("~"), sys.argv[1])
+try:
+    os.chdir(repo)
+    d = os.path.abspath(subprocess.run(["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True,
+                                       check=True).stdout.strip())
+except Exception:
+    sys.exit(3)
+lock, out = os.path.join(d, "%(lock)s"), {"holder": None, "waiting": 0, "stopped": []}
+if os.path.isdir(lock):
+    f = os.path.join(lock, "owner")
+    try:
+        owner = json.load(open(f))
+        pid = int(owner.get("pid") or 0)
+    except Exception:
+        owner, pid = None, 0
+    try:
+        age = time.time() - time.mktime(time.strptime(owner.get("since", ""), "%%Y-%%m-%%d %%H:%%M:%%S"))
+    except Exception:
+        try:
+            age = time.time() - os.stat(f if owner else lock).st_mtime
+        except OSError:
+            age = None
+    if owner is None:
+        if age is not None and age <= 30:
+            out["holder"] = {"who": "a run starting", "age_s": age}
+    elif owner.get("host") != os.uname().nodename or (pid > 0 and alive(pid)):
+        owner["age_s"] = age
+        out["holder"] = owner
+try:
+    names = os.listdir(os.path.join(d, "%(queue)s"))
+except OSError:
+    names = []
+for name in names:
+    pid = name.rsplit("-", 1)[-1]
+    if not (pid.isdigit() and not alive(int(pid))):
+        out["waiting"] += 1
+try:
+    out["stopped"] = [json.loads(x) for x in open(os.path.join(d, "%(stopped)s")).read().splitlines() if x.strip()]
+except (OSError, ValueError):
+    pass
+tool = sys.argv[2] if len(sys.argv) > 2 else ""
+if tool and not out["holder"] and not out["waiting"]:
+    try:
+        p = subprocess.run(["zsh", "-l", "-c", tool + " --version"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, text=True, timeout=20)
+        bad, err = p.returncode != 0, p.stderr
+    except Exception as e:
+        bad, err = True, str(e)
+    if bad:
+        lines = [x.strip() for x in (err or "").splitlines() if x.strip()]
+        out["not_ready"] = lines[0] if lines else tool + " --version failed"
+print(json.dumps(out))
+""" % {"lock": EXCLUSIVE_LOCK, "queue": EXCLUSIVE_QUEUE, "stopped": EXCLUSIVE_STOPPED}
+
+
+def remote_lock_state(host, repo, tool=None, errors=None):
+    """The other machine's lock as REMOTE_PROBE reads it there, with `free` added; None when it can't be read (then
+    `errors`, when given, gets the first error line). With `tool`, a machine that can't run it isn't free."""
+    first = ""
+    try:
+        cmd = f"python3 - {shlex.quote(repo)}" + (f" {shlex.quote(tool)}" if tool else "")
+        p = subprocess.run(ssh_args(host) + [cmd], input=REMOTE_PROBE, capture_output=True, text=True, timeout=60)
+        first = next((x.strip() for x in (p.stderr or "").splitlines() if x.strip()), "")
+        state = json.loads(p.stdout.strip().splitlines()[-1]) if p.returncode == 0 and p.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        state, first = None, first or str(e)
+    if not isinstance(state, dict):
+        if errors is not None:
+            errors.append(first or f"ssh {host} answered nothing")
+        return None
+    state["free"] = not state.get("holder") and not state.get("waiting") and not state.get("not_ready")
+    return state
 
 
 def remote_lock_free(host, repo, tool=None, warn=None):
-    """True when the other machine's clone has no heavy run holding or waiting for its lock, and, with `tool`, when
-    that machine can run it: `<tool> --version` in the login zsh the run itself uses. A runner whose tool fails (a new
-    Xcode whose licence nobody accepted makes every `make` exit 69) is not free, because a run handed to it would fail
-    at once and, by #924, never run here again. `warn` gets the probe's first error line."""
-    probe = ''
-    if tool:
-        cmd = shlex.quote(f'{shlex.quote(tool)} --version')
-        probe = (f'out=$(zsh -l -c {cmd} 2>&1 >/dev/null) || '
-                 f'{{ printf "%s\\n" "${{out:-{tool} --version failed}}" | head -n 1 >&2; exit {REMOTE_NOT_READY}; }}\n')
-    script = (f'cd {shlex.quote(repo)} 2>/dev/null || exit 3\n'
-              'd=$(git rev-parse --git-common-dir) || exit 3\n'
-              f'[ -d "$d/{EXCLUSIVE_LOCK}" ] && exit 1\n'
-              f'[ -n "$(ls -A "$d/{EXCLUSIVE_QUEUE}" 2>/dev/null)" ] && exit 1\n'
-              + probe +
-              'exit 0\n')
-    try:
-        p = subprocess.run(ssh_args(host) + ["sh -s"], input=script, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if p.returncode == REMOTE_NOT_READY and warn is not None:
-        warn((p.stderr or "").strip().splitlines()[0] if (p.stderr or "").strip() else f"{tool} --version failed")
-    return p.returncode == 0
+    """True when the other machine's clone has no live heavy run holding or waiting for its lock, and, with `tool`,
+    when that machine can run it. `warn` gets the probe's first error line when it can't."""
+    state = remote_lock_state(host, repo, tool)
+    if state and state.get("not_ready") and warn is not None:
+        warn(state["not_ready"])
+    return bool(state and state["free"])
 
 
-def remote_free_check(host, repo, tool, say):
-    """remote_lock_free for one wait, saying once (not on every poll) that the runner cannot run the tool."""
-    warned = []
+def remote_watch(host, repo, cfg, lock, say, tool=None):
+    """The `remote_free` check a waiting run makes: free or not, and on the way it says (once) when the other
+    machine's lock has been held far longer than any check takes, and posts once each notice that machine left:
+    a long hold, or a run its ceiling stopped (#1796). It also says once when that machine can't run `tool`
+    (kit #20) or its lock can't be read at all, since the run then stays here."""
+    told = set()
 
-    def warn(line):
-        if not warned:
-            warned.append(line)
-            say(f"{WARN} {host} can't run {tool} ({line[:200]}); staying here.")
+    def once(key, text):
+        if key not in told:
+            told.add(key)
+            say(text)
 
-    return lambda: remote_lock_free(host, repo, tool=tool, warn=warn)
+    def check():
+        errors = []
+        state = remote_lock_state(host, repo, tool, errors)
+        if not state:
+            once("unreadable", f"{WARN} Couldn't read {host}'s lock ({errors[0][:200]}); staying here.")
+            return False
+        if state.get("not_ready"):
+            once("not_ready", f"{WARN} {host} can't run {tool} ({state['not_ready'][:200]}); staying here.")
+        holder = state.get("holder") or {}
+        if holder.get("pid") and held_long(holder.get("age_s")):
+            key = f"held|{host}|{holder.get('pid')}|{holder.get('since')}"
+            if key not in told:
+                told.add(key)
+                say(f"{WARN} {host}'s lock has been held since {holder.get('since', '?')} "
+                    f"({say_age(holder['age_s'])}) by {holder.get('who', '?')}, far longer than any check takes: "
+                    "no run here goes there until it ends.")
+                post_notice(cfg, lock, key, holder.get("who"), long_hold_body(holder, host, holder["age_s"]), say)
+        notice_stopped(cfg, lock, state.get("stopped") or [], say)
+        return state["free"]
+    return check
+
+
+def notice_stopped(cfg, lock, records, say):
+    for rec in records:
+        post_notice(cfg, lock, f"stopped|{rec.get('host')}|{rec.get('pid')}|{rec.get('since')}", rec.get("who"),
+                    stopped_body(rec), say)
+
+
+def heavy_lock_report(root):
+    """[(level, text, detail)] for doctor: this machine's heavy-run lock, and the other machine's when one is set."""
+    out, lock = [], exclusive_lock_path(root)
+    owner = None
+    if lock.is_dir():
+        try:
+            owner = json.loads((lock / "owner").read_text())
+        except (OSError, ValueError):
+            owner = {}
+    if owner is None:
+        out.append(("ok", "Heavy-run lock here: free", ""))
+    elif owner.get("host") == os.uname().nodename and not pid_alive(int(owner.get("pid") or 0)):
+        out.append(("info", "Heavy-run lock here: left by a run that ended", "the next exclusive takes it over"))
+    else:
+        age = lock_age_seconds(owner, lock / "owner")
+        long_ = held_long(age)
+        out.append(("warn" if long_ else "info",
+                    f"Heavy-run lock here: held by {owner.get('who', '?')} since {owner.get('since', '?')}"
+                    + (f" ({say_age(age)}), far longer than any check takes" if long_ else ""),
+                    f"pid {owner.get('pid', '?')}" + ("; compare its CPU time with its elapsed time "
+                                                      "(ps -o pid,etime,time,command -p <pid>)" if long_ else "")))
+    host = os.environ.get(REMOTE_RUNNER_ENV, "").strip()
+    if host:
+        repo = os.environ.get(REMOTE_REPO_ENV, "").strip() or remote_repo_default(root)
+        state = remote_lock_state(host, repo)
+        holder = (state or {}).get("holder") or {}
+        if state is None:
+            out.append(("warn", f"{host}'s heavy-run lock: couldn't be read", f"ssh {host}, repo {repo}"))
+        elif holder and held_long(holder.get("age_s")):
+            out.append(("warn", f"{host}'s heavy-run lock: held by {holder.get('who', '?')} since "
+                        f"{holder.get('since', '?')} ({say_age(holder['age_s'])}), far longer than any check takes",
+                        f"pid {holder.get('pid', '?')} there; no run goes there until it ends"))
+        elif holder or state.get("waiting"):
+            out.append(("info", f"{host}'s heavy-run lock: busy", f"held by {holder.get('who', 'nobody')}, "
+                        f"{state.get('waiting', 0)} waiting"))
+        else:
+            out.append(("ok", f"{host}'s heavy-run lock: free", "make runs go there when this machine is busy"))
+    return out
 
 
 def snapshot_commit(root):
@@ -5739,9 +6096,22 @@ def snapshot_commit(root):
 REMOTE_SETUP_FAILED = 97
 
 
-def run_remote(host, repo, command, who, root, say):
-    """Run `command` on `host` in a temporary worktree of the same commit, through that host's own `exclusive`.
-    Returns the command's exit code, or None when the run could not start there (the caller waits here instead)."""
+def running_note(who, command):
+    """What `exclusive` says as its command starts. A remote run's is how this machine knows the command started
+    there (#924)."""
+    return f"{who}: running {' '.join(command)}"
+
+
+def run_remote(host, repo, command, who, root, say, timeout_min=60.0, quiet_s=10.0, max_run=None):
+    """Run `command` on `host` in a temporary worktree of the same commit, through that host's own `exclusive`,
+    which waits as long as this run was told to (`timeout_min`, `quiet_s`) and stops the command after `max_run`
+    minutes (REMOTE_MAX_RUN_MINUTES when not given: a run there must never hold that machine for days, #1796).
+    Returns the command's exit code, or None when the command never started there (the caller waits here instead).
+
+    ⛔ A COMMAND THAT STARTED THERE IS NEVER RUN AGAIN HERE (#924). ssh's 255 means "the connection failed", before the
+    run or in the middle of it: on 2 Nov 2026 the connection timed out 40 minutes into `make check`, and the whole
+    run started again on the laptop. So the output is read as it streams back, and once the other machine's
+    `exclusive` says its command is running, its exit code is the answer, a dropped connection included."""
     sha = snapshot_commit(root)
     if not sha:
         say(f"{WARN} Couldn't make a commit of this tree to send to {host}; staying here.")
@@ -5750,41 +6120,98 @@ def run_remote(host, repo, command, who, root, say):
     ref = f"refs/haam-remote/{run_id}"
     # The clone's own core.sshCommand may pin a GitHub key the other machine doesn't accept: use plain ssh there.
     ssh_cmd = " ".join(shlex.quote(a) for a in ssh_args(host)[:-1])
-    push = subprocess.run(["git", "-c", f"core.sshCommand={ssh_cmd}", "push", "--quiet", f"{host}:{repo}", f"{sha}:{ref}"],
+    # This machine's main goes too (#1869): the other clone's origin/main is its own and may be days older, so a
+    # check that diffs the branch against main (check-changed) saw every file merged since and ran everything.
+    # The run gets it as HAAM_BASE_COMMIT, and the commit itself rides along under <ref>-base.
+    default = load_config(root).get("default_branch") or "main"
+    base = git_out(root, "rev-parse", "--verify", "-q", f"refs/remotes/origin/{default}^{{commit}}")
+    refspecs = [f"{sha}:{ref}"] + ([f"{base}:{ref}-base"] if base else [])
+    push = subprocess.run(["git", "-c", f"core.sshCommand={ssh_cmd}", "push", "--quiet", f"{host}:{repo}", *refspecs],
                           cwd=root, capture_output=True, text=True)
     if push.returncode != 0:
         say(f"{WARN} Couldn't send commit {sha[:9]} to {host} ({(push.stderr or push.stdout).strip()[:200]}); staying here.")
         return None
     remote_cmd = " ".join(shlex.quote(c) for c in command)
-    remote_who = shlex.quote(f"{who} (from {socket.gethostname().split('.')[0]})")
+    there_who = f"{who} (from {socket.gethostname().split('.')[0]})"
+    remote_who = shlex.quote(there_who)
     script = f"""set -u
 repo={shlex.quote(repo)}
 case "$repo" in /*) ;; *) repo="$HOME/$repo" ;; esac
 ref={shlex.quote(ref)}
 wt="$(dirname "$repo")/connect-wt/haam-remote-{run_id}"
 mkdir -p "$(dirname "$wt")"
-cleanup() {{ cd "$HOME"; git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1; git -C "$repo" update-ref -d "$ref" >/dev/null 2>&1; }}
+cleanup() {{ cd "$HOME"; git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1; git -C "$repo" update-ref -d "$ref" >/dev/null 2>&1; git -C "$repo" update-ref -d "$ref-base" >/dev/null 2>&1; }}
 trap cleanup EXIT
 git -C "$repo" worktree add --quiet --detach "$wt" "$ref" < /dev/null || exit {REMOTE_SETUP_FAILED}
 cd "$wt" || exit {REMOTE_SETUP_FAILED}
+{f"export HAAM_BASE_COMMIT={base}" if base else "unset HAAM_BASE_COMMIT"}
 echo "▶ $(hostname -s): {sha[:9]} in a temporary worktree"
 python3 tools/haam/haam.py worktree prep < /dev/null > /dev/null 2>&1
 if [ -f Makefile ] && grep -qE '^setup:' Makefile; then
-  make setup < /dev/null > .haam-remote-setup.log 2>&1 || {{ tail -20 .haam-remote-setup.log; exit {REMOTE_SETUP_FAILED}; }}
+  # The log goes in the worktree's own git folder, never its tree: an untracked file there is a change to every
+  # check that reads the tree (#1869: check-changed planned everything for it).
+  setup_log="$(git rev-parse --git-dir)/haam-remote-setup.log"
+  make setup < /dev/null > "$setup_log" 2>&1 || {{ tail -20 "$setup_log"; exit {REMOTE_SETUP_FAILED}; }}
 fi
-python3 tools/haam/haam.py exclusive {remote_who} -- {remote_cmd} < /dev/null
+{NOTICE_ENV}=off python3 tools/haam/haam.py exclusive --timeout {timeout_min:g} --quiet {quiet_s:g} --max-run {max_run or REMOTE_MAX_RUN_MINUTES:g} {remote_who} -- {remote_cmd} < /dev/null 2>&1
 """
     say(f"{INFO} {host} is free: running {remote_cmd} there on {sha[:9]}.")
+    started, seen, note = False, b"", running_note(there_who, command).encode()
     try:
-        p = subprocess.run(ssh_args(host) + ["zsh -l -s"], input=script, text=True)
-    except (OSError, subprocess.SubprocessError) as e:
+        p = subprocess.Popen(ssh_args(host) + ["zsh -l -s"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    except OSError as e:
         say(f"{WARN} ssh to {host} failed ({e}); staying here.")
         return None
-    if p.returncode in (REMOTE_SETUP_FAILED, 124, 255):
-        say(f"{WARN} The run didn't start on {host} (exit {p.returncode}); staying here.")
+    try:
+        try:
+            p.stdin.write(script.encode())
+            p.stdin.close()
+        except OSError:
+            pass                # ssh ended before reading the script: its exit code says why
+        out = sys.stdout.buffer
+        while True:
+            chunk = os.read(p.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            out.write(chunk)
+            out.flush()
+            if not started:
+                seen = seen[-len(note):] + chunk
+                started = note in seen
+        code = p.wait()
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+    if started and code == 255:
+        say(f"{BAD} The connection to {host} dropped during the run (exit 255). It is not run again here: "
+            "its result is unknown, so run it again.")
+        return code
+    if not started and code in (REMOTE_SETUP_FAILED, 124, 255):
+        say(f"{WARN} The run didn't start on {host} (exit {code}); staying here.")
         return None
-    say(f"{INFO} {who}: finished on {host} with exit {p.returncode}.")
-    return p.returncode
+    say(f"{INFO} {who}: finished on {host} with exit {code}.")
+    return code
+
+
+def run_with_ceiling(command, max_run, say, who):
+    """Run `command` and wait for it; past `max_run` minutes (None: no limit), end it and everything it started.
+    Returns (exit code, None) or (RUN_CEILING_EXIT, a record of the stop). Interrupted (Ctrl-C, a signal), it ends
+    the command before passing the interruption on, so the lock is never released under a run still going."""
+    since, started = time.strftime("%Y-%m-%d %H:%M:%S"), time.time()
+    say(f"{INFO} {running_note(who, command)}")
+    child = subprocess.Popen(command)
+    try:
+        return child.wait(timeout=max_run * 60 if max_run else None), None
+    except subprocess.TimeoutExpired:
+        stop_tree(child)
+        return RUN_CEILING_EXIT, {"who": who, "pid": os.getpid(), "since": since, "command": " ".join(command),
+                                  "host": os.uname().nodename if hasattr(os, "uname") else "",
+                                  "minutes": round((time.time() - started) / 60)}
+    except BaseException:
+        if child.poll() is None:
+            stop_tree(child)
+        raise
 
 
 def cmd_exclusive(args):
@@ -5795,11 +6222,13 @@ def cmd_exclusive(args):
         pre = argparse.ArgumentParser(prog="haam.py exclusive", add_help=False)
         pre.add_argument("--timeout", type=float)
         pre.add_argument("--quiet", type=float)
+        pre.add_argument("--max-run", type=float)
         opts, extra = pre.parse_known_args(command[:k])
         if extra:
             sys.exit(f"Unknown option(s) before --: {' '.join(extra)}")
         args.timeout = opts.timeout if opts.timeout is not None else args.timeout
         args.quiet = opts.quiet if opts.quiet is not None else args.quiet
+        args.max_run = opts.max_run if opts.max_run is not None else args.max_run
         command = command[k + 1:]
     if not command:
         sys.exit('Give the command after --, e.g. haam.py exclusive "chat A, #12" -- make check')
@@ -5807,43 +6236,52 @@ def cmd_exclusive(args):
     cfg = load_config(root)
     patterns = cfg.get("heavy_runs") or []
     say = lambda m: print(m, file=sys.stderr, flush=True)  # noqa: E731
+    lock = exclusive_lock_path(root)
     host = os.environ.get(REMOTE_RUNNER_ENV, "").strip()
     remote_free = None
     if host and remote_eligible(command):
         repo = os.environ.get(REMOTE_REPO_ENV, "").strip() or remote_repo_default(root)
-        remote_free = remote_free_check(host, repo, Path(command[0]).name, say)
-    child = None
+        remote_free = remote_watch(host, repo, cfg, lock, say, tool=Path(command[0]).name)
+
+    def long_hold(owner, age):
+        post_notice(cfg, lock, f"held|{owner.get('host')}|{owner.get('pid')}|{owner.get('since')}", owner.get("who"),
+                    long_hold_body(owner, "this machine", age), say)
+
+    def here(place=None):
+        """Wait for this machine and run the command here. The lock is free again before a stop is reported, so a
+        report that can't be written (the connection that started this run is gone) never holds the machine."""
+        nonlocal turn
+        turn = MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say, remote_free=remote_free,
+                           place=place, on_long_hold=long_hold)
+        with turn:
+            code, stopped = run_with_ceiling(command, args.max_run, say, args.who)
+        if stopped:
+            record_stopped(lock, stopped)
+            say(f"{BAD} {args.who}: stopped after {stopped['minutes']} min, its ceiling (--max-run {args.max_run:g}): "
+                f"the run made no end, and the lock is free again. Its result is unknown (exit {RUN_CEILING_EXIT}).")
+            notice_stopped(cfg, lock, [stopped], say)
+        return code
+
+    turn = None
     try:
         try:
-            turn = MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say, remote_free=remote_free)
-            with turn:
-                say(f"{INFO} {args.who}: running {' '.join(command)}")
-                child = subprocess.Popen(command)
-                code = child.wait()
-                child = None
-                sys.exit(code)
-        except RemoteTurn:
-            code = run_remote(host, repo, command, args.who, root, say)
+            sys.exit(here())
+        except RemoteTurn as away:
+            remote_free = None
+            code = run_remote(host, repo, command, args.who, root, say, args.timeout, args.quiet, args.max_run)
+            if code == RUN_CEILING_EXIT:
+                state = remote_lock_state(host, repo)
+                notice_stopped(cfg, lock, (state or {}).get("stopped") or [], say)
             if code is not None:
                 sys.exit(code)
-            with MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say):
-                say(f"{INFO} {args.who}: running {' '.join(command)}")
-                child = subprocess.Popen(command)
-                code = child.wait()
-                child = None
-                sys.exit(code)
+            sys.exit(here(away.place))
     except TimeoutError:
-        print(f"✘ Gave up after {args.timeout:g} minutes: the machine was still busy. Nothing was run.", file=sys.stderr)
+        waiting = f", waiting for {'; '.join(turn.blocking)}" if turn is not None and turn.blocking else ""
+        print(f"✘ Gave up after {args.timeout:g} minutes: the machine was still busy{waiting}. Nothing was run.",
+              file=sys.stderr)
         sys.exit(124)
     except FileNotFoundError:
         sys.exit(f"Command not found: {command[0]}")
-    finally:
-        if child is not None and child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                child.kill()
 
 
 def paths_in_use():
@@ -6373,6 +6811,8 @@ def cmd_doctor(args):
     others = [w for w in list_worktrees(root, cfg) if not w["main"]]
     if others:
         rep.add("info", f"{len(others)} other worktree(s)", "python3 tools/haam/haam.py worktree list")
+    for level, text, detail in heavy_lock_report(root):
+        rep.add(level, text, detail)
     tool_own = (main_dir / ".haam").resolve()      # ship's and local-ci's short-lived checkouts
     stray_w = [w for w in others if not w["haam_area"] and tool_own not in Path(w["path"]).resolve().parents]
     stray = sorted({str(Path(w["path"]).parent) for w in stray_w})
@@ -6482,8 +6922,8 @@ def main():
     p.add_argument("--project-owner", help="GitHub user/org that owns the board (default: repo owner)")
     p.add_argument("--deploy", help="github (deploy.yml on merge, default) or manual (you deploy by hand)")
     p.add_argument("--flow", help="test-first (default: owner tests before the PR) or checks-first")
-    p.add_argument("--heavy-run", action="append", help="add a heavy run (regex on the process list) for haam.py "
-                   "exclusive, e.g. 'make (check|test-integration)' (repeatable)")
+    p.add_argument("--heavy-run", action="append", help="add a heavy run (regex on what each process runs itself, "
+                   "never a shell's -c text) for haam.py exclusive, e.g. 'make (check|test-integration)' (repeatable)")
     p.add_argument("--clear-heavy-runs", action="store_true", help="empty the heavy_runs list")
     p.add_argument("--production", help="what counts as production code: path patterns, comma-separated, replacing "
                    "the list (default: everything, e.g. 'src/**,api/**')")
@@ -6683,6 +7123,9 @@ def main():
     p.add_argument("who", help="who is asking, for the others' messages, e.g. 'chat A, #12'")
     p.add_argument("--timeout", type=float, default=60, help="minutes to wait before giving up (exit 124)")
     p.add_argument("--quiet", type=float, default=10, help="seconds with no other heavy run before starting")
+    p.add_argument("--max-run", type=float, default=None,
+                   help=f"minutes the command may run before it and everything it started are stopped (exit "
+                        f"{RUN_CEILING_EXIT}); a run sent to the other machine gets {REMOTE_MAX_RUN_MINUTES:g} unless given")
     p.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command, e.g. -- make check")
     p.set_defaults(func=cmd_exclusive)
 

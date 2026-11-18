@@ -1987,6 +1987,7 @@ GH_ISSUE_LABELS = [
 ]
 CLAIMED_LABEL = "claimed"
 CLAIM_MARK, RELEASE_MARK = "🤖 Claimed by", "🔓 Claim released"
+UAT_FAILED_LABEL, FAILED_MARK, REWORK_MARK = "uat-failed", "❌ UAT failed", "🔁 Rework, round"
 CLAIM_RACE_MINUTES = 10
 EPIC_LABEL = "epic"
 # Issue labels only a human's decision adds (agents pass --human only inside the skill where the human decided)
@@ -2775,6 +2776,17 @@ def issue_action(args, cfg, board):
                                "the human typed (/triage, /epic, /decide, /release …), and add --human.")
         board.set_option(iss, "Status", canon)
         msg = f"#{number}: {iss['status'] or '-'} → {canon}"
+        rework = None
+        if canon == "UAT" and UAT_FAILED_LABEL in (iss["labels"] or []):
+            # Rework handed over again: the label means "send back to the agents", so it goes now (anything reading
+            # it would treat a ticket waiting for its test as not fixed yet); the hand-over comment says the round.
+            code, out, err = run(["gh", "issue", "edit", str(number), "-R", repo, "--remove-label", UAT_FAILED_LABEL])
+            if code != 0:
+                raise RuntimeError(err or out)
+            fails = sum(FAILED_MARK in (c.get("body") or "") for c in issue_comments(repo, number))
+            rework = max(fails, 1)
+            msg += (f" · rework, round {rework}: removed {UAT_FAILED_LABEL}. Start the hand-over comment with "
+                    f"`{REWORK_MARK} {rework}`.")
         if canon == "Canceled" and iss["state"] == "OPEN":
             code, out, err = run(["gh", "issue", "close", str(number), "-R", repo, "--reason", "not planned"])
             if code != 0:
@@ -2787,7 +2799,7 @@ def issue_action(args, cfg, board):
                 time.sleep(settle)
             board.set_option(iss, "Status", "Canceled")
             msg += "; Canceled re-applied after close"
-        return {"number": number, "status": canon, "message": msg}
+        return {"number": number, "status": canon, "message": msg, **({"rework_round": rework} if rework else {})}
 
     if a == "priority":
         if not args.value:

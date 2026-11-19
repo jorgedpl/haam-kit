@@ -6,6 +6,8 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-11-19
+
 Fixes and features from a busy test-first project with two Macs and many agent chats: its machine-lock and gate changes, brought up from its copy with their tests, and what its owner asked for next.
 
 ### Security
@@ -14,6 +16,7 @@ Fixes and features from a busy test-first project with two Macs and many agent c
 - **Both AI reviewers read the steering files from the base branch:** every `AGENTS.md` and `CLAUDE.md`, the files the root `CLAUDE.md` imports, `.agents/`, `.claude/`, `.mcp.json`, `docs/process/GATES.md`. A PR's changes to them are in its diff, never in the instructions of the review that judges it.
 
 ### Fixed
+- **`exclusive` hands a run to the other machine only when that machine can run it.** Before handing a waiting `make` run to `HAAM_REMOTE_RUNNER`, it now runs `make --version` there, in the same login shell the run uses. A runner that fails it isn't counted as free: the run waits here instead, with one warning that names the runner and its first error line. Before, a runner that couldn't run `make` (for example a new Xcode whose licence nobody had accepted, where every `make` exits 69) failed every run it was handed at once. By design such a run is never repeated here, so each one looked like a failed check of the change.
 - **A run whose connection to the other machine drops is never run again here.** ssh's exit 255 used to read as "it didn't start there", so a connection that timed out 40 minutes into `make check` started the whole run again on this machine. `exclusive` now reads the output as it comes back: once the other machine says the command is running, its exit code is the answer, a dropped connection included. A connection that never opened still waits here.
 - **A dead run or a dead ticket on the other machine no longer blocks it.** A lock whose holder is gone, or a queue ticket left by a dropped connection, counted as busy, so no waiting run went there until someone cleared it by hand. The other machine's lock is now read with its holder, its age and its live waiters, and dead entries count as nothing.
 - **A run on the other machine checks against this machine's `main`.** It diffed against the other clone's own, older `origin/main`, so a changed-files check there ran everything. The run now carries this machine's commit and its base (`HAAM_BASE_COMMIT`), and `make setup`'s log goes in the temporary worktree's git folder, not its tree.
@@ -52,11 +55,6 @@ Fixes and features from a busy test-first project with two Macs and many agent c
 - **The gate changes over in two steps.** The PR that brings the new `gates.yml` is judged before main has it, and main's old copy knows no `pull_request_target`, so `update` writes it with a `pull_request` trigger too (the report says "step 1 of 2"): that run, the PR's own copy, posts `release-gate` only while main's copy is the old one, and nothing afterwards. **Once the update is on main, run `/haam-update` again, or `haam.py changeover --apply` on a branch:** it removes that trigger, so a PR can no longer run its own copy of the gate. `doctor` warns until it's done. A security review of the step-1 PR may flag that window; it closes with step 2.
 - Optional, to turn on the agents' lane (GitHub Projects): run `python3 tools/haam/haam.py github --apply` for the new labels (`verifying`, `verified-by-agents`, `verify-failed`, `owner-test`, `spot-check`). Then, in `/haam-settings`, name the areas that always stay yours (`settings --set owner_test_paths=<area>=<pattern>,<pattern> --human`, once per area; include the gates: `AGENTS.md`, `.agents/**`, `tools/haam/**`, `.github/**`, `haam.config.json`), then `settings --set uat=agents-verify --human`, and merge `haam.config.json` to `main`: the lane reads its settings from there.
 - `haam.py update`.
-
-## [1.19.1] - 2026-11-13
-
-### Fixed
-- **`exclusive` hands a run to the other machine only when that machine can run it.** Before handing a waiting `make` run to `HAAM_REMOTE_RUNNER`, it now runs `make --version` there, in the same login shell the run uses. A runner that fails it isn't counted as free: the run waits here instead, with one warning that names the runner and its first error line. Before, a runner that couldn't run `make` (for example a new Xcode whose licence nobody had accepted, where every `make` exits 69) failed every run it was handed at once. By design such a run is never repeated here, so each one looked like a failed check of the change.
 
 ## [1.19.0] - 2026-11-13
 
@@ -561,8 +559,8 @@ First public release.
 - Setup tool `haam.py`: `install`, `update`, `config`, `agents`, `github`, `linear`, `invite`, `dev`, `doctor`, `version`, with version tracking in `haam.lock.json`.
 - Docs: methodology, gates, adoption guide, per-agent setup, GitHub and Linear setup, developer onboarding, templates (idea, bug, assessment, spec, UAT plan, ADR).
 
-[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.19.1...HEAD
-[1.19.1]: https://github.com/jorgedpl/haam-kit/compare/v1.19.0...v1.19.1
+[Unreleased]: https://github.com/jorgedpl/haam-kit/compare/v1.20.0...HEAD
+[1.20.0]: https://github.com/jorgedpl/haam-kit/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/jorgedpl/haam-kit/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/jorgedpl/haam-kit/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/jorgedpl/haam-kit/compare/v1.16.0...v1.17.0

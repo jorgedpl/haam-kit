@@ -8,7 +8,12 @@
 #
 # Results are published as commit statuses named "ai-review" and "security-review".
 # Branch protection on `main` requires both. Only two things can turn them green:
-# a passing review, or a human adding the PR label `ai-review-overruled`.
+# a passing review, or the owner adding the PR label `ai-review-overruled` (only the login that is
+# `product_owner_github` or one of `backup_approvers_github` in haam.config.json on the base branch, never a bot;
+# anyone else's is ignored).
+# The files that steer the reviewers (AGENTS.md, CLAUDE.md and its imports, nested AGENTS.md and CLAUDE.md, .agents/,
+# .claude/, docs/process/GATES.md) are the base branch's in both review jobs: a PR's changes to them are in
+# its diff, never in the instructions of the review that judges it.
 # (Statuses are used instead of job results because a skipped job counts as passing.)
 #
 # Needs one repository secret: ANTHROPIC_API_KEY (billed per review, separate from Claude
@@ -59,6 +64,8 @@ jobs:
           LABEL: ${{ github.event.label.name }}
           DRAFT: ${{ github.event.pull_request.draft }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          SENDER_LOGIN: ${{ github.event.sender.login }}
+          SENDER_TYPE: ${{ github.event.sender.type }}
         run: |
           status() {  # context state description
             gh api "repos/$REPO/statuses/$SHA" -f context="$1" -f state="$2" -f description="$3" >/dev/null
@@ -66,18 +73,53 @@ jobs:
           both() { status ai-review "$1" "$2"; status security-review "$1" "$2"; }
           labels=$(gh pr view "$PR" -R "$REPO" --json labels -q '.labels[].name')
 
+          # >>> owner-only labels
+          # ai-review-overruled counts only from the owner's login or a backup approver's: product_owner_github and
+          # backup_approvers_github in haam.config.json on the base branch, compared without regard to case, never a
+          # bot. With no owner there, it never counts.
+          owner_logins=$(gh api "repos/$REPO/contents/haam.config.json?ref=$BASE_REF" --jq .content 2>/dev/null | base64 -d 2>/dev/null \
+            | jq -r 'def l: if type == "string" then ascii_downcase | ltrimstr("@") else "" end;
+                     if ((.product_owner_github // "") | l) == "" then empty
+                     else ([.product_owner_github] + ((.backup_approvers_github // []) | if type == "array" then . else [] end))
+                          | map(l) | map(select(. != "")) | .[] end' 2>/dev/null || true)
+          is_owner() {  # login type
+            [ -n "$owner_logins" ] && [ -n "$1" ] && [ "$2" != "Bot" ] || return 1
+            case "$1" in *"[bot]") return 1 ;; esac
+            printf '%s\n' "$owner_logins" | grep -qxF -- "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+          }
+          # Whether the owner added the overrule label: the sender while that label event is handled, else the actor of
+          # the latest `labeled` event for it. Sets overruled_by.
+          overruled_by=""
+          overruled_by_owner() {
+            local who
+            if [ "$EVENT_ACTION" = "labeled" ] && [ "$LABEL" = "ai-review-overruled" ]; then
+              overruled_by="$SENDER_LOGIN"; is_owner "$SENDER_LOGIN" "$SENDER_TYPE"; return
+            fi
+            who=$(gh api "repos/$REPO/issues/$PR/events" --paginate --jq '.[] | select(.event == "labeled" and .label.name == "ai-review-overruled") | "\(.actor.login) \(.actor.type)"' | tail -n 1 || true)
+            overruled_by="${who% *}"
+            [ -n "$who" ] && is_owner "${who% *}" "${who##* }"
+          }
+          # <<< owner-only labels
+
           # Label events: only the overrule label matters (and, when reviews normally run locally, the
           # human-review label, which brings the review back to GitHub); anything else changes nothing.
           if [ "$EVENT_ACTION" = "labeled" ] && [ "$LABEL" != "human-review" ]; then
             if [ "$LABEL" = "ai-review-overruled" ]; then
-              both success "Overruled by a human (label ai-review-overruled)"
+              if overruled_by_owner; then
+                both success "Overruled by @$overruled_by (label ai-review-overruled)"
+              else
+                echo "::warning::ai-review-overruled added by @$SENDER_LOGIN, not the owner: ignored"
+              fi
             fi
             echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
 
           if echo "$labels" | grep -qx "ai-review-overruled"; then
-            both success "Overruled by a human (label ai-review-overruled)"
-            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+            if overruled_by_owner; then
+              both success "Overruled by @$overruled_by (label ai-review-overruled)"
+              echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "::warning::ai-review-overruled is not the owner's: ignored, so the reviews run as if it were absent"
           fi
 
           if [ "$DRAFT" = "true" ]; then
@@ -157,6 +199,40 @@ jobs:
           git show "origin/$BASE:.github/review/REVIEWER.md" > .haam-review/REVIEWER.md 2>/dev/null \
             || cp .github/review/REVIEWER.md .haam-review/REVIEWER.md   # first PR, before the kit is on main
           rm -f review-verdict.txt review-comment.md   # only the reviewer writes these, never the PR
+          # >>> reviewer reads the base's steering files
+          # The files that steer the reviewer are the base branch's: every AGENTS.md and CLAUDE.md at any depth,
+          # every file the base's root CLAUDE.md imports, .agents/, .claude/, CLAUDE.local.md, .mcp.json and
+          # docs/process/GATES.md. A file the PR added is removed, one it deleted is put back; every other file keeps the
+          # PR's version. The kit's tests run both copies of this block, which must stay identical.
+          if ! git rev-parse --verify --quiet "origin/$BASE^{commit}" > /dev/null; then
+            echo "::error::origin/$BASE can't be read: the review can't start from the base branch's steering files"
+            exit 1
+          fi
+          if ! git cat-file -e "origin/$BASE:AGENTS.md" 2> /dev/null && ! git cat-file -e "origin/$BASE:CLAUDE.md" 2> /dev/null; then
+            echo "The base branch has neither AGENTS.md nor CLAUDE.md (the kit's first PR): the PR's steering files stay"
+          else
+            steer="$RUNNER_TEMP/haam-steering"
+            mkdir -p "$steer"
+            git show "origin/$BASE:CLAUDE.md" 2> /dev/null | sed -n 's/^@\([^[:space:]]\{1,\}\)[[:space:]]*$/\1/p' > "$steer/imports" || true
+            {
+              printf '%s\0' AGENTS.md CLAUDE.md CLAUDE.local.md .mcp.json docs/process/GATES.md
+              tr '\n' '\0' < "$steer/imports"
+              git ls-files -z
+              git ls-tree -r -z --name-only "origin/$BASE"
+            } | sort -zu > "$steer/paths"
+            restored=0
+            while IFS= read -r -d '' p; do
+              case "$p" in
+                AGENTS.md|CLAUDE.md|CLAUDE.local.md|.mcp.json|docs/process/GATES.md|*/AGENTS.md|*/CLAUDE.md|.agents|.agents/*|.claude|.claude/*) ;;
+                *) grep -qxF -- "$p" "$steer/imports" || continue ;;
+              esac
+              rm -rf -- "$p"
+              if git cat-file -e "origin/$BASE:$p" 2> /dev/null; then git checkout -q "origin/$BASE" -- "$p"; fi
+              restored=$((restored + 1))
+            done < "$steer/paths"
+            echo "Steering files from origin/$BASE: $restored paths"
+          fi
+          # <<< reviewer reads the base's steering files
 
       - name: Independent review
         uses: anthropics/claude-code-action@v1
@@ -170,6 +246,8 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
             Follow the instructions in .haam-review/REVIEWER.md exactly to review this pull request.
+            The files that steer agents and reviewers in this checkout (AGENTS.md, CLAUDE.md and the files it imports, any
+            nested AGENTS.md or CLAUDE.md, .agents/, .claude/, docs/process/GATES.md) are the base branch's, not the PR's. The PR's versions are in its diff: git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- <path>, or git show HEAD:<path>.
             How to report (this wins over any older wording in those instructions, e.g. right after a kit update):
             you can't post comments or reviews yourself. Write your review comment to the file review-comment.md
             and the one-word verdict (APPROVE or CHANGES_REQUESTED) to review-verdict.txt, both in the workspace
@@ -216,6 +294,45 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      - name: Steering files from the base branch
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          # >>> reviewer reads the base's steering files
+          # The files that steer the reviewer are the base branch's: every AGENTS.md and CLAUDE.md at any depth,
+          # every file the base's root CLAUDE.md imports, .agents/, .claude/, CLAUDE.local.md, .mcp.json and
+          # docs/process/GATES.md. A file the PR added is removed, one it deleted is put back; every other file keeps the
+          # PR's version. The kit's tests run both copies of this block, which must stay identical.
+          if ! git rev-parse --verify --quiet "origin/$BASE^{commit}" > /dev/null; then
+            echo "::error::origin/$BASE can't be read: the review can't start from the base branch's steering files"
+            exit 1
+          fi
+          if ! git cat-file -e "origin/$BASE:AGENTS.md" 2> /dev/null && ! git cat-file -e "origin/$BASE:CLAUDE.md" 2> /dev/null; then
+            echo "The base branch has neither AGENTS.md nor CLAUDE.md (the kit's first PR): the PR's steering files stay"
+          else
+            steer="$RUNNER_TEMP/haam-steering"
+            mkdir -p "$steer"
+            git show "origin/$BASE:CLAUDE.md" 2> /dev/null | sed -n 's/^@\([^[:space:]]\{1,\}\)[[:space:]]*$/\1/p' > "$steer/imports" || true
+            {
+              printf '%s\0' AGENTS.md CLAUDE.md CLAUDE.local.md .mcp.json docs/process/GATES.md
+              tr '\n' '\0' < "$steer/imports"
+              git ls-files -z
+              git ls-tree -r -z --name-only "origin/$BASE"
+            } | sort -zu > "$steer/paths"
+            restored=0
+            while IFS= read -r -d '' p; do
+              case "$p" in
+                AGENTS.md|CLAUDE.md|CLAUDE.local.md|.mcp.json|docs/process/GATES.md|*/AGENTS.md|*/CLAUDE.md|.agents|.agents/*|.claude|.claude/*) ;;
+                *) grep -qxF -- "$p" "$steer/imports" || continue ;;
+              esac
+              rm -rf -- "$p"
+              if git cat-file -e "origin/$BASE:$p" 2> /dev/null; then git checkout -q "origin/$BASE" -- "$p"; fi
+              restored=$((restored + 1))
+            done < "$steer/paths"
+            echo "Steering files from origin/$BASE: $restored paths"
+          fi
+          # <<< reviewer reads the base's steering files
+
       - name: Claude Code security review (API key)
         id: security
         if: env.HAS_API_KEY == 'true'
@@ -254,6 +371,8 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
             Follow the instructions in .haam-review/SECURITY-REVIEWER.md exactly to review this pull request.
             Its references to .github/review/REVIEWER.md mean .haam-review/REVIEWER.md.
+            The files that steer agents and reviewers in this checkout (AGENTS.md, CLAUDE.md and the files it imports, any
+            nested AGENTS.md or CLAUDE.md, .agents/, .claude/, docs/process/GATES.md) are the base branch's, not the PR's. The PR's versions are in its diff: git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- <path>, or git show HEAD:<path>.
             How to report (this wins over any older wording in those instructions, e.g. right after a kit update):
             you can't post comments yourself. If you found anything, write your comment to the file
             security-comment.md; always write the number of findings, digits only, to security-findings.txt; both

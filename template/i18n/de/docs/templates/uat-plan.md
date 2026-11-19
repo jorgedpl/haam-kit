@@ -29,6 +29,10 @@ make dev
 ## Vorabprüfung durch den Agenten (Agent pre-check)
 <!-- Vom Agenten ausgefüllt: was er selbst geprüft hat (Tests, `make e2e`, ein Browser-Tool) und was er gesehen hat. -->
 - **Fully verified by the agent:** no  <!-- „yes“ nur unter den Regeln in /uat Schritt 3; dann kann der Product Owner es mit „pass all verified“ bestehen lassen -->
+- **Needs a person:** yes (<warum>)  <!-- mit `uat: agents-verify`: „no“ nur unter den Regeln in /uat Schritt 3; dann prüft es ein unabhängiger Agent statt des Product Owners -->
+- **Verified at:** <der Commit mit 40 Zeichen, von dem deine Nachweise stammen>
+- **Risk:** <low | medium | high>: <eine Zeile>
+- **Undo:** <wie man es rückgängig macht>
 - Belege: <die Befehle oder Läufe und ihre Ergebnisse, eine Zeile pro Akzeptanzkriterium>
 
 ## Ergebnisse

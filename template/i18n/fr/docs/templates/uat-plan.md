@@ -29,6 +29,10 @@ make dev
 ## Vérification préalable par l'agent (Agent pre-check)
 <!-- Remplie par l'agent : ce qu'il a vérifié lui-même (tests, `make e2e`, un outil de navigateur) et ce qu'il a constaté. -->
 - **Fully verified by the agent:** no  <!-- « yes » uniquement selon les règles de l'étape 3 de /uat ; le product owner peut alors le valider avec « pass all verified ». Ce libellé reste en anglais : les skills le lisent tel quel. -->
+- **Needs a person:** yes (<pourquoi>)  <!-- avec `uat: agents-verify` : « no » uniquement selon les règles de l'étape 3 de /uat ; un agent indépendant le vérifie alors à la place du product owner -->
+- **Verified at:** <le commit de 40 caractères dont viennent vos preuves>
+- **Risk:** <low | medium | high> : <une ligne>
+- **Undo:** <comment l'annuler>
 - Preuves : <les commandes ou exécutions, et leurs résultats, une ligne par critère d'acceptation>
 
 ## Résultats

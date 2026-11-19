@@ -10,6 +10,7 @@ run to adopt HAAM in a repository and to onboard new developers.
 Admin (first-time adoption and upgrades):
     install   --target DIR     Copy the HAAM kit into a repository (never overwrites)
     update    --target DIR     Upgrade a project to this kit version (keeps your customisations)
+    changeover [--apply]       Finish the release gate's move to main's copy (after the update that starts it)
     config                     Create/update haam.config.json and apply team key + names
     agents    [--apply]        Wire up Claude Code, Cursor, Codex, Grok, Gemini, Copilot
     github    [--apply]        Labels, branch rules, required checks, production env, security
@@ -24,6 +25,8 @@ Testing and shipping (inside /test, after the human's verdict):
     checkout-pr ISSUE | --back              Put a change on this machine to test it (its PR, or the agent's branch)
     publish ISSUE --human                   Test-first: push the tested commit and open its PR (uat-passed)
     ship ISSUE... | --all --human           Merge, approve the production deploy (one for several), wait, close (exit 2: run again)
+    ship --all --plan                       What ship would do: the release's changes in order, left out, clashes, files
+    cadence [--json] | --built TARGET --human   Is a release (or a phone build) due by the owner's cadence?
 
 CI cost:
     ci-usage [--days 7]                     Where the Actions minutes went (by workflow, job, trigger, day)
@@ -76,7 +79,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.19.0"
+VERSION = "1.20.0"
 CONFIG_NAME = "haam.config.json"
 LOCK_NAME = "haam.lock.json"
 KIT_REPO = "jorgedpl/haam-kit"
@@ -117,7 +120,11 @@ DEFAULT_CONFIG = {
     "grouping": "per-issue",     # per-issue | per-epic | release
     "ci": "every-pr",            # every-pr | local | off
     "nightly": "on",             # on | off: the full check and dependency audit on main every night
-    "uat": "owner-decides",      # owner-decides | always | bugs-skip
+    "uat": "owner-decides",      # owner-decides | always | bugs-skip | agents-verify
+    # uat: agents-verify. Areas that always keep the owner's own test, as {area name: [path patterns]}
+    # (settings --set owner_test_paths=<area>=<pattern>,<pattern> --human). Everything else may be verified by agents.
+    "owner_test_paths": {},
+    "agents_verify_shadow": 10,  # the first N verified tickets still go to the owner's test too (0: off)
     "deploy_approval": "each",   # each: you approve every production deploy; automatic: deploys start on merge
     "runner": "github",          # github | self-hosted
     "worktree_cleanup": "after-ship",  # after-ship | manual
@@ -127,6 +134,9 @@ DEFAULT_CONFIG = {
     # Days with no sign of life (no comment on the issue, no commit on its branch) after which an agent may release
     # another chat's claim (issue release --stale) and pick the work up. 0: never; `issue stale` only lists them.
     "stale_claim_days": 0,
+    "release_after_passed": 0,
+    "release_after_days": 0,
+    "release_targets": {},
     # Board fields every new issue must get on create (GitHub Projects). Empty: agents set a field only when
     # the text clearly answers it. Example: ["Area", "Kind", "Code check"]. Epics use required_epic_fields
     # when set, otherwise the same list without "Code check".
@@ -173,13 +183,20 @@ SETTINGS = [
                       "once. Fewest Actions minutes. (Recommended)",
         "checks-first": "PR and checks first, then your test. You only test code that already passed the checks, "
                         "but every rework round runs the checks again."}),
-    ("Testing", "uat", ["owner-decides", "always", "bugs-skip"], "Which changes you test yourself.", {
+    ("Testing", "uat", ["owner-decides", "always", "bugs-skip", "agents-verify"], "Which changes you test yourself.", {
         "owner-decides": "You test everything, except issues you mark uat:skip (config, dependency bumps, invisible "
                          "refactors): those merge once the checks and reviews pass. (Recommended)",
         "always": "You test every change. Most control, most of your time.",
         "bugs-skip": "When you triage a bug, it's marked uat:skip unless you say test: it then merges once the checks "
                      "and reviews pass, without your test. Features still come to you; protected areas always do. "
-                     "Fast for bug fixes; you rely on the tests and the reviews to catch a wrong fix."}),
+                     "Fast for bug fixes; you rely on the tests and the reviews to catch a wrong fix.",
+        "agents-verify": "A change that needs no person to judge it (its plan says `Needs a person: no`) and touches "
+                         "none of your owner_test_paths is verified by an independent agent at the handed-over "
+                         "commit, with its own marks (never your pass). You are told, can pull any ticket back "
+                         "(`test <ID> myself`), and it ships only on your `ship`. The rest come to you as today. "
+                         "Needs owner_test_paths and the GitHub tracker."}),
+    ("Testing", "agents_verify_shadow", int, "uat: agents-verify starts in shadow: this many verified tickets "
+     "still come to your test too, so you can compare. 0: off.", {}),
     ("Grouping", "grouping", ["per-issue", "per-epic", "release"], "How changes become pull requests.", {
         "per-issue": "One PR per issue: easy to follow and to revert. The checks run once per issue. (Recommended "
                      "to start)",
@@ -222,6 +239,10 @@ SETTINGS = [
                 "merged before it). (Recommended)",
         "automatic": "Deploys start as soon as a PR merges: fastest, but a merged change goes live without a last "
                      "look. Best with uat: always."}),
+    ("Shipping", "release_after_passed", int, "grouping release: /cadence prepares a release once this many changes "
+     "have passed. 0 (default): only when you ask. You still say ship, the deploy and live.", {}),
+    ("Shipping", "release_after_days", int, "...or once the oldest passed change has waited this many days, so a quiet "
+     "week still ships. 0 (default): off. An Urgent issue, or one labelled security, is due at once.", {}),
     ("Limits", "max_open_prs", int, "Agents hold new builds at this many ready PRs (CI cost).", {}),
     ("Limits", "max_in_uat", int, "...or at this many changes waiting for your test.", {}),
     ("Limits", "max_review_rounds", int, "Failing AI review rounds before an agent stops and hands over to you.", {}),
@@ -236,7 +257,7 @@ SETTINGS = [
      "before an agent may release that claim and pick the work up (a chat that died: session limit, laptop asleep, "
      "crash). 0 (default): never; /next lists them for you and /triage stale frees them.", {}),
 ]
-INT_SETTINGS_ZERO_OK = {"stale_claim_days"}     # 0 means off
+INT_SETTINGS_ZERO_OK = {"stale_claim_days", "release_after_passed", "release_after_days", "agents_verify_shadow"}     # 0 means off
 SETTING_KEYS = {k: (g, opts, what, helps) for g, k, opts, what, helps in SETTINGS}
 
 GITHUB_LABELS = [
@@ -246,6 +267,12 @@ GITHUB_LABELS = [
     ("ai-review-overruled", "5319E7", "Human overrules the AI reviews on this PR"),
     ("uat:skip", "C2E0C6", "Owner decided: no UAT; merges once the checks and reviews pass"),
     ("epic-build", "3E4B9E", "One PR for a whole epic, built slice by slice: review it per slice"),
+    # uat: agents-verify (issue labels; `github --apply` creates them)
+    ("verifying", "BFD4F2", "Handed over: waiting for an independent agent to verify it (uat: agents-verify)"),
+    ("verified-by-agents", "0E8A16", "Verified by an independent agent at its head; not the owner's pass"),
+    ("verify-failed", "D93F0B", "The verifier sent it back: rework first, then verify again"),
+    ("owner-test", "FBCA04", "The owner tests this one themselves; only the owner removes it"),
+    ("spot-check", "C5DEF5", "A verified ticket picked for a second verification on another model"),
 ]
 
 # (name, Linear state type, colour)
@@ -637,8 +664,43 @@ def project_language(target, override=None):
     return lang
 
 
+GATES_WORKFLOW = ".github/workflows/gates.yml"
+CHANGEOVER_NOTE = ("gates.yml: step 1 of 2 (it also listens to pull_request, so the PR that brings it gets a gate)",
+                   "once this is on main, run haam.py update again: it removes that trigger, so a PR can't run its "
+                   "own copy of the gate")
+CHANGEOVER_RE = re.compile(r"^[ \t]*(?:#|//) >>> haam:changeover.*\n.*?^[ \t]*(?:#|//) <<< haam:changeover.*\n",
+                           re.M | re.S)
+LISTENS_TARGET_RE = re.compile(r"^ {2}pull_request_target:\s*$", re.M)
+
+
+def main_gates_listens_target(target):
+    """Whether the gate GitHub runs for this project's PRs (main's gates.yml) already listens to pull_request_target.
+    Read from origin's default branch (never this folder: running update twice on one branch must not skip a step).
+    False when main has no gates.yml or can't be read here: keeping the changeover lines is the safe side."""
+    for ref in ("origin/HEAD", "origin/main", "origin/master"):
+        p = subprocess.run(["git", "-C", str(target), "show", f"{ref}:{GATES_WORKFLOW}"], capture_output=True,
+                           text=True)
+        if p.returncode == 0:
+            return bool(LISTENS_TARGET_RE.search(p.stdout))
+        if "exists on disk, but not in" in (p.stderr or "") or "does not exist in" in (p.stderr or ""):
+            return False      # the branch is there, without a gates.yml: the first install
+    return False
+
+
+def gates_changeover(data, target):
+    """gates.yml for this project, and whether it is the changeover's first step. The gate runs on
+    `pull_request_target` (GitHub runs main's copy, so a PR can't rewrite the gate that judges it), but the PR that
+    first brings that copy is judged before main has it, and main's old copy knows no `pull_request_target`: that PR
+    would get no gate at all. So while main's copy doesn't listen to it, the lines between the `haam:changeover`
+    markers stay (a `pull_request` trigger whose run posts only in that case), and the next update removes them."""
+    if main_gates_listens_target(target):
+        return CHANGEOVER_RE.sub("", data.decode()).encode(), False
+    return data, CHANGEOVER_RE.search(data.decode()) is not None
+
+
 def make_renderer(target, language=None):
-    """Return render(path, rel) -> bytes: kit file content as it should look in this project."""
+    """Return render(path, rel) -> bytes: kit file content as it should look in this project. `render.changeover`
+    is True once gates.yml was rendered as the changeover's first step (see gates_changeover)."""
     tcfg = load_config(target) if (target / CONFIG_NAME).exists() else None
     lang = project_language(target, language)
     i18n = kit_root() / I18N_DIR / lang
@@ -652,6 +714,9 @@ def make_renderer(target, language=None):
         if lang != "en" and (i18n / rel_s).is_file():
             path = i18n / rel_s            # this project's language
         data = path.read_bytes()
+        if rel_s == GATES_WORKFLOW:
+            data, first_step = gates_changeover(data, target)
+            render.changeover = render.changeover or first_step
         if github_tracker and rel_s in LINEAR_FILES:
             kit = without_linear(json.loads(data))
             if kit == {"mcpServers": {}}:
@@ -675,6 +740,7 @@ def make_renderer(target, language=None):
         if applied_product:
             text = text.replace("`TODO(setup): product name`", applied_product)
         return text.encode()
+    render.changeover = False
     return render
 
 
@@ -856,6 +922,8 @@ def cmd_install(args):
     for cf in conflicts:
         rep.add("warn", f"Kept your existing {cf}", f"kit version saved to .haam/incoming/{cf}")
     rep.add("info", f"Kit version {VERSION} recorded in {LOCK_NAME} (commit it)")
+    if render.changeover:
+        rep.add("warn", *CHANGEOVER_NOTE)
     if conflicts:
         rep.action(WHO_AGENT, "Merge each conflicting file using the kit version in .haam/incoming/ "
                    "(rules in docs/setup/HAAM-ADOPTION-GUIDE.md, Phase 1 table). For an existing CLAUDE.md or AGENTS.md: "
@@ -993,6 +1061,8 @@ def cmd_update(args):
         rep.add("ok", f"Restored {r}", "it was missing because .gitignore hid it, not because you removed it")
     for r in conflicts:
         rep.add("warn", f"Needs a merge: {r}", f"you and the kit both changed it; new kit version → .haam/incoming/{r}")
+    if render.changeover and GATES_WORKFLOW in added + updated + conflicts + patched:
+        rep.add("warn", *CHANGEOVER_NOTE)
     for r in removed:
         rep.add("warn", f"No longer in the kit: {r}", "delete it if you don't use it (nothing is deleted automatically)")
 
@@ -1014,6 +1084,33 @@ def cmd_update(args):
                "Linear statuses), then re-run the plans", "python3 tools/haam/haam.py github  ·  python3 tools/haam/haam.py linear")
     rep.action(WHO_AGENT, "Check everything", "python3 tools/haam/haam.py agents --apply && python3 tools/haam/haam.py doctor")
     rep.print(args.json)
+
+
+def cmd_changeover(args):
+    """Finish the gate's changeover: once main's gates.yml listens to pull_request_target, remove the
+    `haam:changeover` lines from this folder's copy (what `update` does when a newer kit comes)."""
+    root = find_repo_root(Path.cwd())
+    f = root / GATES_WORKFLOW
+    text = f.read_text() if f.is_file() else ""
+    if not CHANGEOVER_RE.search(text):
+        print(f"Nothing to do: {GATES_WORKFLOW} has no changeover lines.")
+        return
+    if not main_gates_listens_target(root):
+        sys.exit(f"Not yet: main's {GATES_WORKFLOW} doesn't listen to pull_request_target. Merge the update that "
+                 "brings it first (git fetch, then run this again).")
+    done = CHANGEOVER_RE.sub("", text)
+    if not args.apply:
+        print(f"Plan: remove the pull_request trigger and its check from {GATES_WORKFLOW} "
+              f"({len(text.splitlines()) - len(done.splitlines())} lines). Re-run with --apply on a branch.")
+        return
+    lock = load_lock(root)
+    untouched = (lock.get("files") or {}).get(GATES_WORKFLOW) == sha(text.encode())
+    f.write_text(done)
+    if untouched:          # still the kit's copy: record the new one, so the next update sees it untouched
+        lock["files"][GATES_WORKFLOW] = sha(done.encode())
+        save_lock(root, lock)
+    print(f"✔ {GATES_WORKFLOW} now listens to pull_request_target alone. Commit it"
+          + (f" with {LOCK_NAME}" if untouched else "") + " and open a PR: main's copy of the gate judges it.")
 
 
 def latest_release():
@@ -1103,7 +1200,8 @@ def cmd_config(args):
                                   ("--end-batch-window", args.end_batch_window or None),
                                   ("--required-fields", args.required_fields),
                                   ("--required-epic-fields", args.required_epic_fields),
-                                  ("--worktree-dir", args.worktree_dir)) if v is not None]
+                                  ("--worktree-dir", args.worktree_dir), ("--release-target", args.release_target),
+                                  ("--clear-release-targets", args.clear_release_targets or None)) if v is not None]
     if owner_flags and (root / CONFIG_NAME).exists() and not args.human:
         sys.exit(f"{', '.join(owner_flags)}: these are the owner's settings. Change them inside /haam-settings (or "
                  "/haam-setup) after the human chose, with --human.")
@@ -1147,6 +1245,15 @@ def cmd_config(args):
         cfg["backup_approvers_github"] = [x.strip() for x in args.backup_approvers.split(",") if x.strip()]
     if args.agents is not None:
         cfg["agents"] = [x.strip().lower() for x in args.agents.split(",") if x.strip()]
+    if args.release_target or args.clear_release_targets:
+        targets = {} if args.clear_release_targets else dict(cfg.get("release_targets") or {})
+        for spec in args.release_target or []:
+            name, _, pats = spec.partition("=")
+            pats = [x.strip() for x in pats.split(",") if x.strip()]
+            if not name.strip() or not pats:
+                sys.exit(f"--release-target {spec!r}: give NAME=PATTERNS, e.g. ios='apps/ios/**,packages/core/**'")
+            targets[name.strip()] = pats
+        cfg["release_targets"] = targets
     if args.protected or args.unprotected:
         cur = list(cfg.get("protected_paths") or [])
         for x in (args.protected or "").split(","):
@@ -1193,11 +1300,14 @@ def cmd_config(args):
         cfg["deploy"] = args.deploy
     limits = {k: int(v) for k, v in (("max_open_prs", args.max_open_prs), ("max_in_uat", args.max_in_uat)) if v is not None}
     if args.until:
-        set_batch_window(cfg, args.until, limits)           # a temporary raise; the normal limits stay as they are
+        # A temporary raise on this computer, outside haam.config.json: the normal limits stay as they are.
+        active = open_limit_windows(root, limits, args.until)
+        rep.add("ok", "Settings window on this computer: " + ", ".join(window_line(k, active[k]) for k in limits))
     else:
         cfg.update(limits)
     if args.end_batch_window:
         cfg.pop("batch_window", None)
+        change_windows(root, cleared=("max_open_prs", "max_in_uat"))
     if args.required_fields is not None:
         cfg["required_issue_fields"] = [x.strip() for x in args.required_fields.split(",") if x.strip()]
     if args.required_epic_fields is not None:
@@ -1897,13 +2007,15 @@ GH_ISSUE_LABELS = [
 ]
 CLAIMED_LABEL = "claimed"
 CLAIM_MARK, RELEASE_MARK = "🤖 Claimed by", "🔓 Claim released"
+UAT_FAILED_LABEL, FAILED_MARK, REWORK_MARK = "uat-failed", "❌ UAT failed", "🔁 Rework, round"
 CLAIM_RACE_MINUTES = 10
 EPIC_LABEL = "epic"
 # Issue labels only a human's decision adds (agents pass --human only inside the skill where the human decided)
 HUMAN_LABELS = {"agent-ready": "agent-ready is added only after a human approves the spec",
                 "uat:skip": "uat:skip (no UAT, merges by itself) is the owner's decision",
                 "mode:prototype": "mode:prototype (an agent builds a prototype first) is the owner's decision",
-                "mode:epic-build": "mode:epic-build (one agent builds the whole epic) is the owner's decision"}
+                "mode:epic-build": "mode:epic-build (one agent builds the whole epic) is the owner's decision",
+                "verified-by-agents": "verified-by-agents is recorded only by `haam.py verify-result`"}
 # Moving into these needs a human decision (they're done through human-only skills)
 HUMAN_STATUSES = {"Done", "Parked", "Canceled"}
 PROJECT_TOKEN_SECRET = "HAAM_PROJECT_TOKEN"
@@ -2685,6 +2797,17 @@ def issue_action(args, cfg, board):
                                "the human typed (/triage, /epic, /decide, /release …), and add --human.")
         board.set_option(iss, "Status", canon)
         msg = f"#{number}: {iss['status'] or '-'} → {canon}"
+        rework = None
+        if canon == "UAT" and UAT_FAILED_LABEL in (iss["labels"] or []):
+            # Rework handed over again: the label means "send back to the agents", so it goes now (anything reading
+            # it would treat a ticket waiting for its test as not fixed yet); the hand-over comment says the round.
+            code, out, err = run(["gh", "issue", "edit", str(number), "-R", repo, "--remove-label", UAT_FAILED_LABEL])
+            if code != 0:
+                raise RuntimeError(err or out)
+            fails = sum(FAILED_MARK in (c.get("body") or "") for c in issue_comments(repo, number))
+            rework = max(fails, 1)
+            msg += (f" · rework, round {rework}: removed {UAT_FAILED_LABEL}. Start the hand-over comment with "
+                    f"`{REWORK_MARK} {rework}`.")
         if canon == "Canceled" and iss["state"] == "OPEN":
             code, out, err = run(["gh", "issue", "close", str(number), "-R", repo, "--reason", "not planned"])
             if code != 0:
@@ -2697,7 +2820,7 @@ def issue_action(args, cfg, board):
                 time.sleep(settle)
             board.set_option(iss, "Status", "Canceled")
             msg += "; Canceled re-applied after close"
-        return {"number": number, "status": canon, "message": msg}
+        return {"number": number, "status": canon, "message": msg, **({"rework_round": rework} if rework else {})}
 
     if a == "priority":
         if not args.value:
@@ -2712,11 +2835,23 @@ def issue_action(args, cfg, board):
                 raise RuntimeError(f"{HUMAN_LABELS[lab]}; add --human only when they decided it in this session")
             cmd += ["--add-label", lab]
         for lab in args.remove or []:
+            if lab == OWNER_TEST_LABEL and not args.human:
+                raise RuntimeError("Only the owner removes owner-test (their own test). Add --human only when they "
+                                   "said so in this session.")
             cmd += ["--remove-label", lab]
+        pull_back = OWNER_TEST_LABEL in (args.add or []) and OWNER_TEST_LABEL not in iss["labels"]
+        if pull_back and "verifying" in iss["labels"]:
+            cmd += ["--remove-label", "verifying"]
         code, out, err = run(cmd)
+        if code != 0 and any(x in LANE_LABEL_NAMES for x in args.add or []) and "not found" in (err or out or "").lower():
+            ensure_labels(repo, [x for x in args.add if x in LANE_LABEL_NAMES])
+            code, out, err = run(cmd)
         if code != 0:
             raise RuntimeError(err or out)
-        return {"number": number, "message": f"#{number}: labels updated"}
+        msg = f"#{number}: labels updated"
+        if pull_back:
+            msg += pull_back_to_owner(cfg, board, iss)
+        return {"number": number, "message": msg}
 
     if a == "comment":
         body = Path(args.body_file).read_text() if args.body_file else (args.body or "")
@@ -2759,6 +2894,10 @@ def issue_action(args, cfg, board):
                                    "(or bugs that need a fix plan).")
             if EPIC_LABEL in iss["labels"]:
                 raise RuntimeError(f"#{number} is an epic: write a spec for each of its sub-issues instead")
+        elif phase == "verify":
+            why = verify_claim_refusal(cfg, iss)
+            if why:
+                raise RuntimeError(why)
         token = os.urandom(3).hex()
         cmd = ["gh", "issue", "edit", str(number), "-R", repo, "--add-assignee", "@me"]
         if phase != "build":
@@ -2778,7 +2917,7 @@ def issue_action(args, cfg, board):
         where = f" on {args.machine}" if args.machine else ""
         branch = args.branch or (f"{number}-<short-title>" if phase == "build" else "")
         what = {"build": "", "assess": " to assess it", "spec": " to write its spec",
-                "spike": " to build a prototype"}[phase]
+                "spike": " to build a prototype", "verify": VERIFY_CLAIM_WHAT}[phase]
         body = (f"{CLAIM_MARK} @{me} via {tool}{where}{what}" + (f" · branch `{branch}`" if branch else "")
                 + f" · claim {token}")
         code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
@@ -2793,6 +2932,8 @@ def issue_action(args, cfg, board):
         for c in claims:
             if c is mine:
                 break
+            if phase == "verify" and VERIFY_CLAIM_WHAT not in (c.get("body") or ""):
+                continue                    # the build's own claim, still open in test-first: not a rival verifier
             t = parse_when(c.get("createdAt"))
             if not when or not t or (when - t).total_seconds() <= CLAIM_RACE_MINUTES * 60:
                 rivals.append(c)
@@ -2806,7 +2947,10 @@ def issue_action(args, cfg, board):
                "assess": f"When the assessment is pushed: {release} --status Decision",
                "spec": f"When the spec is pushed: {release}",
                "spike": "Branch spike/<branch name>; when the prototype is pushed, label it spike-ready and "
-                        + (f"{release} --status Decision" if "stream:idea" in iss["labels"] else release)}[phase]
+                        + (f"{release} --status Decision" if "stream:idea" in iss["labels"] else release),
+               "verify": f"Work detached at the handed-over head, in your own worktree, then record the verdict: "
+                         f"python3 tools/haam/haam.py verify-result {number} --verdict verified|not-verified|needs-owner "
+                         f"--head <sha> --claim {token} --body-file <card> (it releases the claim)"}[phase]
         return {"number": number, "assignee": me, "claim": token, "phase": phase,
                 "message": f"Claimed #{number} for @{me}{what} (claim {token}). {nxt}"}
 
@@ -3532,15 +3676,371 @@ def tidy_worktrees(root, cfg, say):
         say(f"{INFO} Worktrees tidied: {last[-1].strip()}")
 
 
+MIGRATION_PATTERNS = ["**/migrations/**", "**/migration/**", "**/migrate/**", "**/*.sql"]
+
+
+def issue_number_key(key):
+    """Sort key for an issue ID by its number as a number: #852 before #1879 (as text, "#1879" < "#852")."""
+    m = re.search(r"(\d+)\D*$", str(key or ""))
+    return (int(m.group(1)) if m else 10 ** 9, str(key))
+
+
+def release_order(items, first=()):
+    """The order a release takes passed changes in: the ones the owner named with --first (in the order given), then
+    by issue number as a number, a change for several issues by its lowest."""
+    pos = {k: i for i, k in enumerate(first)}
+
+    def key(kv):
+        k, v = kv
+        if k in pos:
+            return (0, (pos[k], ""))
+        return (1, min(issue_number_key(i) for i in (v.get("issues") or [k])))
+    return sorted(items, key=key)
+
+
+def merges_cleanly(cwd, a, b):
+    """True when commits a and b merge without a conflict, False when they conflict, None when git can't say (older
+    than 2.38). Nothing is written to any branch or worktree."""
+    p = subprocess.run(["git", "merge-tree", "--write-tree", "--quiet", a, b], cwd=cwd, capture_output=True, text=True)
+    return True if p.returncode == 0 else False if p.returncode == 1 else None
+
+
+def compose_release(root, wt, base_sha, items, first=()):
+    """Merge passed changes, in order, into the detached worktree `wt` (made from base_sha). The real ship and
+    `ship --plan` both run this, so a plan can't disagree with the merge. Returns (included, left_out, clashes):
+    included [(key, v)]; left_out [{key, why}] (changed after the test, or conflicts with main itself); clashes
+    [{key, with}]: a change that conflicts with one already in (`with`: its key, or None when only with the changes
+    before it together), which the owner decides (`--first`), unless the change it clashes with is one they put first."""
+    included, left_out, clashes = [], [], []
+    for key, v in items:
+        tip = git_out(root, "rev-parse", "--verify", "--quiet", f"origin/{v['branch']}")
+        if tip and tip != v["sha"]:
+            left_out.append({"key": key, "why": f"changed after your test ({v['sha'][:8]} → {tip[:8]}): test it again"})
+            continue
+        c2, _, _ = run(["git", "merge", "--no-ff", "--no-edit", "-m", f"{' '.join(v['issues'])}: {v['title']}",
+                        v["sha"]], cwd=wt)
+        if c2 == 0:
+            included.append((key, v))
+            continue
+        run(["git", "merge", "--abort"], cwd=wt)
+        if merges_cleanly(wt, base_sha, v["sha"]) is not True:
+            left_out.append({"key": key, "why": "conflicts with main: send it back to an agent to rebase on main, then "
+                                                "test it again"})
+            continue
+        partner = next((k2 for k2, v2 in included if merges_cleanly(wt, v2["sha"], v["sha"]) is False), None)
+        if partner is not None and partner in first:
+            left_out.append({"key": key, "why": f"clashes with {partner}, which you put first: send it back to an agent "
+                                                "to rebase on main, then test it again"})
+        else:
+            clashes.append({"key": key, "with": partner})
+    return included, left_out, clashes
+
+
+def clash_question(clashes):
+    """What the owner is asked when passed changes clash: never left to the sort order."""
+    lines = []
+    for c in clashes:
+        k, w = c["key"], c["with"]
+        if w:
+            lines.append(f"{k} and {w} change the same lines. Say which goes first: `--first {k.lstrip('#')}` puts {k} "
+                         f"in and leaves {w} out (to rebase and test again); `--first {w.lstrip('#')}` the other way.")
+        else:
+            lines.append(f"{k} conflicts with the changes before it together. `--first {k.lstrip('#')}` puts it in first "
+                         f"(what it clashes with is then left out), or `--without {k.lstrip('#')}` leaves it out.")
+    return lines
+
+
+def release_composition(root, cfg, items, first=(), keep=False):
+    """Compose a release from `items` in a temporary worktree from a fresh origin/<base>. Returns a dict: base, wt
+    (when keep, the caller removes it), head, included, left_out, clashes, files, protected, migrations."""
+    run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+    base = cfg.get("default_branch") or "main"
+    _, main, _ = git_paths(root)
+    wt = main / ".haam" / ("release-build" if keep else "release-plan")
+    run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+    code, _, err = run(["git", "worktree", "add", "--detach", str(wt), f"origin/{base}"], cwd=root)
+    if code != 0:
+        raise RuntimeError(f"Couldn't prepare the release: {err[:200]}")
+    try:
+        base_sha = git_out(wt, "rev-parse", "HEAD")
+        included, left_out, clashes = compose_release(root, wt, base_sha, items, first)
+        head = git_out(wt, "rev-parse", "HEAD")
+        _, names, _ = run(["git", "diff", "--name-only", "--no-renames", base_sha, head], cwd=wt)
+        files = [f for f in (names or "").splitlines() if f]
+    finally:
+        if not keep:
+            run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+    return {"base": base, "base_sha": base_sha, "wt": wt if keep else None, "head": head, "included": included,
+            "left_out": left_out, "clashes": clashes, "files": files,
+            "protected": protected_matches(cfg.get("protected_paths"), files),
+            "migrations": protected_matches(MIGRATION_PATTERNS, files)}
+
+
+def release_items(args, cfg, data):
+    """The passed changes a new release may take: not already in a release that is merged and waiting for its
+    deploy (the same tested commit), and not left out with --without; only those named, when ship names issues."""
+    passed = data.get("passed") or {}
+    taken = {}
+    for r in (data.get("awaiting_live") or []) + ([data["release"]] if data.get("release") else []):
+        taken.update({k: v.get("sha") for k, v in (r.get("included") or {}).items()})
+    wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
+    without = {show_ref(issue_ref(cfg, x)) for x in (getattr(args, "without", None) or [])}
+    return [(k, v) for k, v in passed.items()
+            if taken.get(k) != v.get("sha") and k not in without and (not wanted or k in wanted)]
+
+
+def verified_release_items(root, cfg, data, args):
+    """uat: agents-verify (as main has it): the tickets an independent verifier verified, for the owner's `ship` to
+    take into the release beside the ones they passed. Returns (items, left_out): an item goes in only while its
+    verification still covers the branch's tip (the agent-verified status on the verified commit), its lane is still
+    `agents` against today's main, it has no owner-test, and it wasn't verified during the shadow start (then only
+    the owner's own pass ships it). Each one kept out is named with its reason."""
+    if cfg.get("tracker") != "github":
+        return [], []
+    lcfg = lane_config(root)
+    if setting_value(lcfg, "uat") != "agents-verify":
+        return [], []          # the lane is off: ship ignores agent-verified
+    repo = cfg["github_repo"]
+    c, o, _ = run(["gh", "issue", "list", "-R", repo, "--state", "open", "--label", "verified-by-agents", "--limit",
+                   "200", "--json", "number,title,labels"])
+    found = json.loads(o) if c == 0 and o else []
+    passed = data.get("passed") or {}
+    taken = set()
+    for r in (data.get("awaiting_live") or []) + ([data["release"]] if data.get("release") else []):
+        taken.update(r.get("included") or {})
+    wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
+    without = {show_ref(issue_ref(cfg, x)) for x in (getattr(args, "without", None) or [])}
+    items, left = [], []
+    for it in found:
+        key = f"#{it['number']}"
+        if key in passed or key in taken or key in without or (wanted and key not in wanted):
+            continue
+        labels = [l["name"] if isinstance(l, dict) else l for l in it.get("labels") or []]
+        d = lane_details(root, lcfg, it["number"], labels=labels)
+        if d["lane"] != "agents":
+            left.append({"key": key, "why": f"verified by agents, but it's your test now: {d['reason']}"})
+            continue
+        st = verification_state(root, lcfg, it["number"], labels, issue_comments(repo, it["number"]), d["head"])
+        if not st["verified"]:
+            left.append({"key": key, "why": f"not verified any more: {st['why']}"})
+            continue
+        if st["shadow"]:
+            left.append({"key": key, "why": "verified during the shadow start: it ships on your own pass"})
+            continue
+        items.append((key, {"sha": d["head"], "branch": d["branch"], "title": it["title"], "issues": [key],
+                            "by": None, "on": (st["at"] or "")[:10], "labels": [l for l in labels if l == "human-review"],
+                            "verified": {"claim": st["claim"], "tool": st["tool"], "at": st["at"],
+                                         "risk": (d.get("plan_fields") or {}).get("risk")}}))
+    return items, left
+
+
+def how_checked(v):
+    """The release table's wording: the owner's pass, or the agents' verification. Never one for the other."""
+    if v.get("verified"):
+        return f"Verified by agents (claim {v['verified'].get('claim') or '?'}) on {v.get('on') or '?'}"
+    return f"Tested and passed by @{v.get('by') or '?'} on {v.get('on') or '?'}"
+
+
+def print_release_plan(comp, args, awaiting):
+    """`ship --plan`: what the release would be, in the tool's own order, with nothing merged or pushed."""
+    plan = {"in": [{"key": k, "issues": v["issues"], "title": v["title"], "sha": v["sha"], "by": v.get("by"),
+                    "on": v.get("on"), "checked": "verified" if v.get("verified") else "passed",
+                    **({"claim": v["verified"].get("claim"), "risk": v["verified"].get("risk")} if v.get("verified")
+                       else {})} for k, v in comp["included"]],
+            "left_out": comp["left_out"], "clashes": comp["clashes"], "question": clash_question(comp["clashes"]),
+            "files": comp["files"], "protected": comp["protected"], "migrations": comp["migrations"],
+            "base": comp["base_sha"], "waiting_for_deploy": [r["pr"] for r in awaiting]}
+    if args.json:
+        print(json.dumps(plan, indent=2))
+        return
+    print(f"Release plan on {comp['base']} ({comp['base_sha'][:8]}); nothing is merged or pushed. "
+          "Order: --first, then by issue number.")
+    if awaiting:
+        print(f"{INFO} Merged and waiting for the deploy: " + ", ".join(f"release PR #{r['pr']} ({', '.join(r['issues'])})"
+                                                                      for r in awaiting))
+    print("In, in this order:" if comp["included"] else "Nothing would go in.")
+    for i, (k, v) in enumerate(comp["included"], 1):
+        if v.get("verified"):
+            continue
+        print(f"  {i}. {' '.join(v['issues'])}: {v['title']} · tested {v['sha'][:8]}"
+              + (f" · passed by @{v['by']} on {v['on']}" if v.get("by") else ""))
+    ver = [(i, v) for i, (_, v) in enumerate(comp["included"], 1) if v.get("verified")]
+    if ver:
+        print("Verified by agents, not passed by you (`ship without <IDs>` leaves any out):")
+        for i, v in ver:
+            print(f"  {i}. {' '.join(v['issues'])}: {v['title']} · verified {v['sha'][:8]} "
+                  f"(claim {v['verified'].get('claim')}) · risk {v['verified'].get('risk') or '?'}")
+    for x in comp["left_out"]:
+        print(f"{WARN} Left out: {x['key']}: {x['why']}")
+    for q in clash_question(comp["clashes"]):
+        print(f"{WARN} Clash: {q}")
+    shown = comp["files"][:15]
+    print(f"Files: {len(comp['files'])} changed" + (f" ({', '.join(shown)}{' …' if len(comp['files']) > 15 else ''})"
+                                                    if shown else ""))
+    if comp["protected"]:
+        print(f"{WARN} Protected areas: {', '.join(comp['protected'][:15])}")
+    if comp["migrations"]:
+        print(f"{WARN} Looks like database migrations: {', '.join(comp['migrations'][:15])}")
+
+
+def release_merge_commit(repo, rel):
+    """The merge commit of a release PR on GitHub, or None."""
+    c, o, _ = run(["gh", "pr", "view", str(rel["pr"]), "-R", repo, "--json", "state,mergeCommit"])
+    v = json.loads(o) if c == 0 and o else {}
+    return (v.get("mergeCommit") or {}).get("oid") if v.get("state") == "MERGED" else None
+
+
+def forget_release(repo, data, rel):
+    """A release is live: forget its passes (unless re-passed since) and delete its changes' branches (if nobody
+    pushed since)."""
+    for k, v in (rel.get("included") or {}).items():
+        if ((data.get("passed") or {}).get(k) or {}).get("sha") == v["sha"]:
+            data["passed"].pop(k, None)
+        c6, ref_, _ = gh_api("GET", f"repos/{repo}/git/ref/heads/{v['branch']}")
+        if c6 == 0 and isinstance(ref_, dict) and (ref_.get("object") or {}).get("sha") == v["sha"]:
+            gh_api("DELETE", f"repos/{repo}/git/refs/heads/{v['branch']}")
+
+
+def cadence_file(root):
+    _, main, _ = git_paths(root)
+    return main / ".haam" / "cadence.json"
+
+
+ISSUE_IN_SUBJECT_RE = re.compile(r"^((?:(?:#\d+|[A-Z][A-Z0-9]+-\d+)[\s,]*)+):")
+
+
+def cadence_report(root, cfg):
+    """What /cadence reads: the passed changes waiting for a release, whether a release is due (and why), and for
+    each release target (a build that ships on its own, e.g. a phone app) how many changes touch it since its last
+    build. Nothing is changed."""
+    tf = tested_file(root)
+    data = json.loads(tf.read_text()) if tf.exists() else {}
+    args_ = argparse.Namespace(issue=None, without=None)
+    items = release_items(args_, cfg, data)
+    awaiting = (data.get("awaiting_live") or []) + ([data["release"]] if data.get("release") else [])
+    every = int(setting_value(cfg, "release_after_passed") or 0)
+    days = int(setting_value(cfg, "release_after_days") or 0)
+    today = time.time()
+
+    def age_days(v):
+        try:
+            return (today - time.mktime(time.strptime(v.get("on") or "", "%Y-%m-%d"))) / 86400
+        except ValueError:
+            return 0.0
+    ages = [age_days(v) for _, v in items]
+    oldest = max(ages) if ages else 0.0
+    urgent = []
+    if items and cfg.get("tracker") == "github":
+        try:
+            board = GHProject(cfg)
+            board.load()
+            byn = {f"#{i['number']}": i for i in board.items()}
+            for k, v in items:
+                for ref in v.get("issues") or [k]:
+                    it = byn.get(ref) or {}
+                    if it.get("priority") == "Urgent" or "security" in (it.get("labels") or []) \
+                            or "security" in (v.get("labels") or []):
+                        urgent.append(ref)
+        except RuntimeError:
+            pass
+    reasons = []
+    if urgent:
+        reasons.append(f"urgent: {', '.join(urgent)}")
+    if every and len(items) >= every:
+        reasons.append(f"{len(items)} changes passed (the setting is {every})")
+    if days and items and oldest >= days:
+        reasons.append(f"the oldest passed change has waited {int(oldest)} days (the setting is {days})")
+
+    targets = []
+    run(["git", "fetch", "--quiet", "origin"], cwd=root)
+    base = f"origin/{cfg.get('default_branch') or 'main'}"
+    built = (json.loads(cadence_file(root).read_text()) if cadence_file(root).exists() else {}).get("built") or {}
+    for name, pats in (cfg.get("release_targets") or {}).items():
+        refs = set()
+        last = (built.get(name) or {}).get("sha")
+        if last and git_out(root, "cat-file", "-t", last) == "commit":
+            # Each change's own merge commit ("#12: …") names the issue; its files say whether it touches the target.
+            _, names, _ = run(["git", "log", "--format=%x00%s", "--name-only", "--no-renames", f"{last}..{base}"],
+                              cwd=root)
+            for block in (names or "").split("\x00"):
+                lines = [x for x in block.splitlines() if x.strip()]
+                if not lines:
+                    continue
+                m = ISSUE_IN_SUBJECT_RE.match(lines[0])
+                if m and protected_matches(pats, lines[1:]):
+                    refs.update(re.findall(r"#\d+|[A-Z][A-Z0-9]+-\d+", m.group(1)))
+        for k, v in items:
+            mb = git_out(root, "merge-base", base, v["sha"]) if v.get("sha") else ""
+            if mb:
+                _, names, _ = run(["git", "diff", "--name-only", "--no-renames", mb, v["sha"]], cwd=root)
+                if protected_matches(pats, [x for x in (names or "").splitlines() if x]):
+                    refs.update(v.get("issues") or [k])
+        due = bool(every) and len(refs) >= every
+        targets.append({"name": name, "changes": sorted(refs, key=issue_number_key), "count": len(refs), "due": due,
+                        "last_build": built.get(name), "since": "its last build" if last else "ever (no build recorded)"})
+    return {"passed": [k for k, _ in release_order(items)], "count": len(items), "oldest_days": round(oldest, 1),
+            "urgent": urgent, "due": bool(reasons), "reasons": reasons, "settings": {"release_after_passed": every,
+            "release_after_days": days}, "waiting_for_deploy": [r["pr"] for r in awaiting], "targets": targets}
+
+
+def cmd_cadence(args):
+    """Whether a release is due by the owner's cadence (release_after_passed, release_after_days, an urgent change),
+    and how many changes each release target (a phone build) has waiting. /cadence reads it; it changes nothing,
+    except `--built <target>`, which records that the owner's build of that target took origin's main now."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if args.built:
+        if not args.human:
+            sys.exit("--built records the owner's build: add --human (inside /cadence, after the owner's word).")
+        if args.built not in (cfg.get("release_targets") or {}):
+            sys.exit(f"No release target named {args.built!r} (config --release-target {args.built}=<paths> --human).")
+        run(["git", "fetch", "--quiet", "origin"], cwd=root)
+        sha = args.sha or git_out(root, "rev-parse", f"origin/{cfg.get('default_branch') or 'main'}")
+        f = cadence_file(root)
+        state = json.loads(f.read_text()) if f.exists() else {}
+        state.setdefault("built", {})[args.built] = {"sha": sha, "at": time.strftime("%Y-%m-%d %H:%M")}
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(state, indent=2) + "\n")
+        print(f"{OK} {args.built}: build recorded at {sha[:8]}; its count starts again from there.")
+        return
+    rep = cadence_report(root, cfg)
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return
+    st = rep["settings"]
+    rule = (f"release after {st['release_after_passed'] or '–'} passed changes or {st['release_after_days'] or '–'} "
+            "days; urgent at once")
+    if rep["due"]:
+        print(f"{OK} A release is due ({rule}): " + "; ".join(rep["reasons"]) + ".")
+    elif rep["count"]:
+        print(f"{INFO} Not due yet ({rule}): {rep['count']} passed, the oldest {rep['oldest_days']:g} days.")
+    else:
+        print(f"{INFO} Nothing has passed since the last release ({rule}).")
+    if rep["count"]:
+        print("Passed, in release order: " + ", ".join(rep["passed"]))
+    if rep["waiting_for_deploy"]:
+        print(f"{INFO} Merged and waiting for the deploy: " + ", ".join(f"release PR #{n}" for n in rep["waiting_for_deploy"]))
+    for t in rep["targets"]:
+        print(f"{OK if t['due'] else INFO} {t['name']}: {t['count']} change(s) since {t['since']}"
+              + (" — a build is due" if t["due"] else "") + (f": {', '.join(t['changes'][:20])}" if t["changes"] else ""))
+
+
 def ship_release(args, root, cfg):
     """grouping = release: everything the owner passed goes into ONE release PR (merged together on a fresh branch
     from main), which gets the checks and the AI reviews once, then merges and deploys once.
+    With `deploy: manual`, a merged release waits for the owner's deploy without holding up the next one: the next
+    `ship` builds a new release from what passed since, and `--live` closes every release the deploy contained.
+    `--plan` shows what the release would be and does nothing else.
     Returns the exit code (0 also when nothing had passed); exits itself only when it can't go on."""
     repo = cfg["github_repo"]
     me = [sys.executable, str(Path(__file__).resolve())]
     tf = tested_file(root)
     data = json.loads(tf.read_text()) if tf.exists() else {}
-    passed = data.get("passed") or {}
+    manual = cfg.get("deploy") == "manual"
+
+    def save():
+        tf.parent.mkdir(parents=True, exist_ok=True)
+        tf.write_text(json.dumps(data, indent=2) + "\n")
 
     def out(state, code, message):
         if args.json:
@@ -3549,8 +4049,14 @@ def ship_release(args, root, cfg):
             print(message, flush=True)
         sys.exit(code)
 
+    def result(state, code, message):
+        if not args.json:
+            print(message, flush=True)
+        args._release_result = {"ok": code == 0, "state": state, "message": message}
+        return code
+
     rel = data.get("release")
-    if rel:
+    if rel and not args.plan:
         c_v, o_v, _ = run(["gh", "pr", "view", str(rel["pr"]), "-R", repo, "--json", "state,headRefOid"])
         live = json.loads(o_v) if c_v == 0 and o_v else {}
         if live.get("state") == "MERGED" and args.abandon_release:
@@ -3570,63 +4076,123 @@ def ship_release(args, root, cfg):
             if lead0:
                 data.pop(lead0, None)
                 (data.get("branches") or {}).pop(lead0, None)
-            tf.write_text(json.dumps(data, indent=2) + "\n")
+            save()
             if not args.json:
                 print(f"{INFO} Release PR #{rel['pr']} dropped ({why}); building a new one from what has passed.", flush=True)
-            passed = data.get("passed") or {}
             rel = None
-    if not rel:
-        wanted = {show_ref(issue_ref(cfg, x)) for x in (args.issue or [])}
-        items = [(k, v) for k, v in sorted(passed.items()) if not wanted or k in wanted]
-        if not items:
+        elif live.get("state") == "MERGED" and manual:
+            # Merged, waiting for the owner's deploy: it no longer holds up the next release.
+            data.setdefault("awaiting_live", []).append(rel)
+            data.pop("release", None)
+            save()
+            rel = None
+    elif rel and args.plan:         # read only: a merged release waiting for its deploy doesn't hold up the plan
+        c_v, o_v, _ = run(["gh", "pr", "view", str(rel["pr"]), "-R", repo, "--json", "state"])
+        if (json.loads(o_v) if c_v == 0 and o_v else {}).get("state") == "MERGED" and manual:
+            data.setdefault("awaiting_live", []).append(rel)
+            rel = None
+    awaiting = data.get("awaiting_live") or []
+
+    if args.live and awaiting and not rel and not args.plan:
+        # The owner deployed and said it's live: close every release the deployed commit contains.
+        run(["git", "fetch", "--quiet", "origin"], cwd=root)
+        deployed = args.deployed or git_out(root, "rev-parse", f"origin/{cfg.get('default_branch') or 'main'}")
+        closed, waiting, failed, cache = [], [], [], {}
+        for r in list(awaiting):
+            m = release_merge_commit(repo, r)
+            if not m or not commit_contains(repo, m, deployed, cache):
+                waiting.append(r)
+                continue
+            c5, o5, e5 = run(me + ["ship", r["issues"][0].lstrip("#"), "--human", "--release-pr", "--pr-number",
+                                   str(r["pr"]), "--live"], cwd=root)
             if not args.json:
-                print(f"{INFO} Nothing has passed since the last release.", flush=True)
-            args._release_result = {"ok": True, "state": "nothing to ship", "message": "Nothing has passed since the last release."}
-            return 0
-        run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
-        base = cfg.get("default_branch") or "main"
-        _, main, _ = git_paths(root)
-        wt = main / ".haam" / "release-build"
-        run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
-        code, _, err = run(["git", "worktree", "add", "--detach", str(wt), f"origin/{base}"], cwd=root)
-        if code != 0:
-            out("stopped", 1, f"Couldn't prepare the release: {err[:200]}")
-        included, skipped = [], []
+                print(o5 + (e5 or ""), end="")
+            if c5 == 0:
+                forget_release(repo, data, r)
+                closed.append(r)
+            else:
+                failed.append(r)
+                waiting.append(r)
+        data["awaiting_live"] = waiting
+        if not waiting:
+            data.pop("awaiting_live", None)
+        save()
+        msg = (f"Live: release PR{'s' if len(closed) > 1 else ''} " + ", ".join(f"#{r['pr']}" for r in closed) + "."
+               if closed else "No release was closed.")
+        rest = [r for r in waiting if r not in failed]
+        if rest:
+            msg += (" Not in the deployed commit, still waiting: " + ", ".join(f"#{r['pr']}" for r in rest)
+                    + ". Deploy again, then say it's live.")
+        if failed:
+            msg += " Couldn't close " + ", ".join(f"#{r['pr']}" for r in failed) + ": run the same command again."
+        return result("live" if closed and not failed else "stopped", 0 if closed and not failed else 1, msg)
+
+    if not rel:
+        vitems, vleft = verified_release_items(root, cfg, data, args)
+        items = release_order(release_items(args, cfg, data) + vitems,
+                              [show_ref(issue_ref(cfg, x)) for x in (getattr(args, "first", None) or [])])
+        if args.plan:
+            if not items:
+                return result("nothing to ship", 0, f"{INFO} Nothing has passed since the last release."
+                              + (" Waiting for the deploy of " + ", ".join(f"release PR #{r['pr']}" for r in awaiting)
+                                 if awaiting else ""))
+            try:
+                comp = release_composition(root, cfg, items, [show_ref(issue_ref(cfg, x)) for x in (args.first or [])])
+            except RuntimeError as e:
+                out("stopped", 1, str(e))
+            comp["left_out"] += vleft
+            print_release_plan(comp, args, awaiting)
+            args._release_result = None
+            return 3 if comp["clashes"] else 0
+        if not items:
+            if awaiting:
+                names = ", ".join(f"release PR #{r['pr']} ({', '.join(r['issues'])})" for r in awaiting)
+                return result("deploy by hand", SHIP_WAITING_HUMAN,
+                              f"Nothing new has passed. Merged and waiting for the deploy: {names}. Deploy it your "
+                              "usual way, then say it's live (ship --all --human --live).")
+            return result("nothing to ship", 0, f"{INFO} Nothing has passed since the last release.")
         try:
-            for key, v in items:
-                tip = git_out(root, "rev-parse", "--verify", "--quiet", f"origin/{v['branch']}")
-                if tip and tip != v["sha"]:
-                    skipped.append(f"{key}: changed after your test ({v['sha'][:8]} → {tip[:8]}): test it again")
-                    continue
-                c2, _, _ = run(["git", "merge", "--no-ff", "--no-edit", "-m", f"{' '.join(v['issues'])}: {v['title']}",
-                                v["sha"]], cwd=wt)
-                if c2 != 0:
-                    run(["git", "merge", "--abort"], cwd=wt)
-                    skipped.append(f"{key}: conflicts with the rest of the release: send it back to an agent to "
-                                   "rebase on main, then test it again")
-                    continue
-                included.append((key, v))
+            comp = release_composition(root, cfg, items, [show_ref(issue_ref(cfg, x)) for x in (args.first or [])],
+                                       keep=True)
+        except RuntimeError as e:
+            out("stopped", 1, str(e))
+        wt = comp["wt"]
+        included, skipped = comp["included"], [f"{x['key']}: {x['why']}" for x in comp["left_out"] + vleft]
+        try:
+            if comp["clashes"]:
+                out("stopped", 1, "Two passed changes clash, so nothing was built: the owner says which goes first. "
+                    + " ".join(clash_question(comp["clashes"])) + " (`ship --plan` shows the whole release.)")
             if not included:
                 out("stopped", 1, "Nothing could go into the release. " + " ".join(skipped))
-            head = git_out(wt, "rev-parse", "HEAD")
+            head = comp["head"]
             name = f"release/{time.strftime('%Y%m%d-%H%M%S')}"
             c3, _, e3 = run(["git", "push", "--quiet", "origin", f"HEAD:refs/heads/{name}"], cwd=wt)
             if c3 != 0:
                 out("stopped", 1, f"Couldn't push the release branch: {e3[:200]}")
         finally:
             run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+        base = comp["base"]
+        _, main, _ = git_paths(root)
         ids, labels = [], ["uat-passed"]
         for _, v in included:
             ids += [i for i in v["issues"] if i not in ids]
             labels += [l for l in v.get("labels") or [] if l not in labels]
         who = gh_login() or "the owner"
+        any_verified = any(v.get("verified") for _, v in included)
         gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "success", "context": "uat",
-               "description": f"Release of changes each passed by @{who}"[:140]})
-        body = ("\n".join(f"Refs {i}" for i in ids) + "\n\n## Release\nEach change was tested and passed on its own "
-                "before going in (HAAM release grouping); the checks and the AI reviews run once, on the whole "
-                "release.\n\n| Change | Tested commit | Passed by |\n|---|---|---|\n"
-                + "".join(f"| {' '.join(v['issues'])}: {v['title']} | `{v['sha'][:8]}` | @{v['by']} on {v['on']} |\n"
-                          for _, v in included))
+               "description": (f"Release shipped by @{who}: each change passed by them or verified by agents"
+                               if any_verified else f"Release of changes each passed by @{who}")[:140]})
+        body = ("\n".join(f"Refs {i}" for i in ids) + "\n\n## Release\nEach change was "
+                + ("tested and passed by the owner, or verified by an independent agent (`uat: agents-verify`), "
+                   if any_verified else "tested and passed on its own ")
+                + "before going in (HAAM release grouping), in issue-number order; the checks and the AI reviews run "
+                "once, on the whole release, and it merges on the owner's `ship`.\n\n"
+                "| Change | Commit | How it was checked |\n|---|---|---|\n"
+                + "".join(f"| {' '.join(v['issues'])}: {v['title']} | `{v['sha'][:8]}` | {how_checked(v)} |\n"
+                          for _, v in included)
+                + (("\n" + "\n".join(f"- Not in this release: {s}" for s in skipped) + "\n") if skipped else "")
+                + (f"\nProtected areas: {', '.join(comp['protected'][:30])}\n" if comp["protected"] else "")
+                + (f"\nLooks like database migrations: {', '.join(comp['migrations'][:30])}\n" if comp["migrations"] else ""))
         f = main / ".haam" / "pr-release.md"
         f.write_text(body)
         cmd = ["gh", "pr", "create", "-R", repo, "--head", name, "--base", base, "--title",
@@ -3644,11 +4210,14 @@ def ship_release(args, root, cfg):
         data[ids[0]] = head                              # ship merges exactly this combination
         data.setdefault("branches", {})[ids[0]] = name
         data["release"] = rel
-        tf.write_text(json.dumps(data, indent=2) + "\n")
+        save()
         if not args.json:
             print(f"{OK} Release PR opened with {', '.join(ids)}: {url}", flush=True)
             for sk in skipped:
                 print(f"{WARN} Not in this release: {sk}", flush=True)
+    elif args.plan:
+        return result("release open", 0, f"{INFO} Release PR #{rel['pr']} ({', '.join(rel['issues'])}) is open; ship "
+                      "carries on with it. Nothing else is planned until it merges.")
     elif not args.json:
         print(f"{INFO} Carrying on with release PR #{rel['pr']} ({', '.join(rel['issues'])})", flush=True)
     lead = rel["issues"][0]
@@ -3665,16 +4234,19 @@ def ship_release(args, root, cfg):
         if c5 == 1:
             print(f"{INFO} If a release check failed: send the change it's about back (its /test fail), then "
                   "`ship --all --human --abandon-release` builds a new release without it.", flush=True)
-    if c5 == 0:     # released: forget the passes, delete the merged changes' branches (if nobody pushed since)
-        data = json.loads(tf.read_text()) if tf.exists() else {}
-        rel = data.pop("release", {}) or {}
-        for k, v in (rel.get("included") or {}).items():
-            if ((data.get("passed") or {}).get(k) or {}).get("sha") == v["sha"]:    # not re-passed since
-                data["passed"].pop(k, None)
-            c6, ref_, _ = gh_api("GET", f"repos/{repo}/git/ref/heads/{v['branch']}")
-            if c6 == 0 and isinstance(ref_, dict) and (ref_.get("object") or {}).get("sha") == v["sha"]:
-                gh_api("DELETE", f"repos/{repo}/git/refs/heads/{v['branch']}")
-        tf.write_text(json.dumps(data, indent=2) + "\n")
+    data = json.loads(tf.read_text()) if tf.exists() else {}
+    if c5 == 0:     # released
+        forget_release(repo, data, data.pop("release", {}) or rel)
+        save()
+    elif c5 == SHIP_WAITING_HUMAN and manual:
+        # Merged: it waits for the owner's deploy, and the next ship may build the next release meanwhile.
+        cur = data.pop("release", None) or rel
+        data.setdefault("awaiting_live", []).append(cur)
+        save()
+        if len(data["awaiting_live"]) > 1 and not args.json:
+            print(f"{INFO} Waiting for the deploy: " + ", ".join(f"release PR #{r['pr']}" for r in data["awaiting_live"])
+                  + ". One deploy of main carries them all; then `ship --all --human --live` closes every one.",
+                  flush=True)
     return c5
 
 
@@ -3684,6 +4256,8 @@ def ship_batch(args, root, cfg):
     Safe to run again; exit codes as for one issue."""
     if setting_value(cfg, "grouping") == "release" and not getattr(args, "_release_done", False):
         code = ship_release(args, root, cfg)
+        if args.plan:
+            sys.exit(code)
         others = []
         if code == 0 and args.all and cfg.get("tracker") == "github":
             try:
@@ -3726,6 +4300,10 @@ def ship_batch(args, root, cfg):
             finish("stopped", 1, f"Couldn't list what's ready: {e}")
     if not refs:
         finish("nothing to ship", 0, "Nothing is ready to ship: no PR has passed UAT or is in the no-UAT lane.")
+    if args.plan:       # one PR per change: each merges on its own checks; this only lists them, in order
+        refs = sorted(refs, key=lambda r: issue_number_key(show_ref(r)))
+        finish("plan", 0, "Would ship, in this order (each PR merges on its own checks): "
+               + ", ".join(show_ref(r) for r in refs) + ". Nothing was merged.")
     say(f"{INFO} Shipping together: " + ", ".join(show_ref(r) for r in refs))
     me = [sys.executable, str(Path(__file__).resolve())]
     for r in refs:
@@ -3810,15 +4388,18 @@ def cmd_ship(args):
     Exit codes: 0 live, 2 not finished yet (run again), 3 waiting for the human to deploy by hand, 1 stopped."""
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
-    if not args.human:
+    if args.plan:       # shows what ship would do, and does nothing else
+        if args.release_pr or args.merge_only or args.merged_only or args.live:
+            sys.exit("--plan shows what `ship --all` (or `ship <IDs>`) would do; give it nothing else.")
+    elif not args.human:
         sys.exit("Shipping is the human's decision. Run it only inside /test (after the human said 'pass' and "
                  "'ship') or /release (with --merged-only), and add --human.")
-    if git_paths(root)[2]:
+    if git_paths(root)[2] and not args.plan:
         sys.exit("ship runs only from the owner's own chat in the main project folder, never from an agent's worktree.")
     issues = args.issue or []
     release = (setting_value(cfg, "grouping") == "release" and not args.release_pr and not args.merge_only
                and not args.released_in and not args.merged_only)
-    if args.all or len(issues) > 1 or release:
+    if args.all or len(issues) > 1 or release or args.plan:
         return ship_batch(args, root, cfg)
     if not issues:
         sys.exit("Give the issue (ship 12), several (ship 12 13 14), or --all")
@@ -4069,31 +4650,122 @@ def limits_config(root):
     return cfg
 
 
-def effective_limits(cfg, today=None):
-    """(max_open_prs, max_in_uat, window): the batch window's raise until its last day, then the normal limits."""
+def effective_limits(cfg, today=None, now=None):
+    """(max_open_prs, max_in_uat, window): a settings window open on this computer, or the committed batch window's
+    raise until its last day, then the normal limits."""
     max_prs = int(cfg.get("max_open_prs") or DEFAULT_CONFIG["max_open_prs"])
     max_uat = int(cfg.get("max_in_uat") or DEFAULT_CONFIG["max_in_uat"])
     w = cfg.get("batch_window") or {}
+    window = None
     try:
         until = datetime.date.fromisoformat(str(w.get("until")))
     except ValueError:
-        return max_prs, max_uat, None
-    if (today or datetime.date.today()) > until:
-        return max_prs, max_uat, None
-    return int(w.get("max_open_prs") or max_prs), int(w.get("max_in_uat") or max_uat), w
+        until = None
+    if until and (today or datetime.date.today()) <= until:
+        max_prs, max_uat, window = int(w.get("max_open_prs") or max_prs), int(w.get("max_in_uat") or max_uat), dict(w)
+    machine = {k: v for k, v in active_windows(now=now).items() if k in ("max_open_prs", "max_in_uat")}
+    if machine:
+        window = dict(window or {})
+        ends = [v["until"] for v in machine.values()] + ([window["until"]] if window.get("until") else [])
+        window.update({k: v["value"] for k, v in machine.items()})
+        window["until"] = min(ends, key=lambda u: window_end(u) or datetime.datetime.max)
+        max_prs, max_uat = int(window.get("max_open_prs") or max_prs), int(window.get("max_in_uat") or max_uat)
+    return max_prs, max_uat, window
 
 
-def set_batch_window(cfg, until, limits):
-    """Store a temporary raise of the limits; refuses a day in the past."""
+# A settings window: a temporary value for a limit that counts at once for every chat on this computer (all worktrees
+# share the common git directory, where the file lives next to the machine lock) and ends by itself. It never touches
+# haam.config.json, so it works while the main folder has a branch checked out for a test.
+SETTINGS_WINDOW_FILE = "haam-settings-window.json"
+WINDOW_SETTINGS = ("max_open_prs", "max_in_uat", "max_review_rounds", "max_pr_lines")
+_COMMON_DIRS = {}
+
+
+def settings_window_path(cwd=None):
+    """`<common git dir>/haam-settings-window.json`, or None outside a git repository."""
+    cwd = Path(cwd or Path.cwd())
+    key = str(cwd)
+    if key not in _COMMON_DIRS:
+        common = git_out(cwd, "rev-parse", "--git-common-dir")
+        _COMMON_DIRS[key] = (cwd / common).resolve() if common else None
+    return _COMMON_DIRS[key] / SETTINGS_WINDOW_FILE if _COMMON_DIRS[key] else None
+
+
+def window_end(until):
+    """The local time a window ends: a day means the end of that day; a date and time, that moment."""
+    s = str(until or "").strip()
     try:
-        day = datetime.date.fromisoformat(until)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            return datetime.datetime.combine(datetime.date.fromisoformat(s), datetime.time.max)
+        end = datetime.datetime.fromisoformat(s)
     except ValueError:
-        sys.exit(f"--until takes the last day as YYYY-MM-DD, not '{until}'")
-    if day < datetime.date.today():
+        return None
+    return end.astimezone().replace(tzinfo=None) if end.tzinfo else end
+
+
+def parse_window_until(until):
+    """--until as stored: 'YYYY-MM-DD' (to the end of that day) or 'YYYY-MM-DDTHH:MM', local time; refuses the past."""
+    s = str(until or "").strip()
+    end = window_end(s)
+    if end is None:
+        sys.exit(f"--until takes the last day (YYYY-MM-DD) or a moment (YYYY-MM-DDTHH:MM, local time), not '{until}'")
+    if end < datetime.datetime.now():
         sys.exit(f"{until} is in the past")
+    return s if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s) else end.isoformat(timespec="minutes")
+
+
+def active_windows(cwd=None, now=None):
+    """{key: {value, until, set_at}} for the windows on this computer that haven't ended yet."""
+    p = settings_window_path(cwd)
+    if not p or not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}
+    now = now or datetime.datetime.now()
+    out = {}
+    for k, w in (data.items() if isinstance(data, dict) else []):
+        end = window_end(w.get("until")) if isinstance(w, dict) else None
+        if k in WINDOW_SETTINGS and end and end >= now and isinstance(w.get("value"), int):
+            out[k] = w
+    return out
+
+
+def change_windows(cwd, opened=None, until=None, cleared=()):
+    """Open windows ({key: value} until `until`) and end others early; drops the ended ones. Returns what's active."""
+    p = settings_window_path(cwd)
+    if not p:
+        sys.exit("A settings window lives in the project's git repository: run this inside it.")
+    data = active_windows(cwd)
+    for k in cleared:
+        data.pop(k, None)
+    stamp = datetime.datetime.now().isoformat(timespec="minutes")
+    for k, v in (opened or {}).items():
+        data[k] = {"value": v, "until": until, "set_at": stamp}
+    if data:
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(str(tmp), str(p))
+    elif p.exists():
+        p.unlink()
+    return data
+
+
+def window_line(key, w):
+    return f"{key} {w['value']} until {w['until']}"
+
+
+def open_limit_windows(root, limits, until):
+    """`--until` with the limits: a window on this computer (haam.config.json keeps the normal limits)."""
     if not limits:
-        sys.exit("--until goes with the limits to raise, e.g. --max-in-uat 30 --until 2026-10-27")
-    cfg["batch_window"] = {"until": day.isoformat(), **limits}
+        sys.exit("--until goes with the limits to raise, e.g. settings --set max_in_uat=30 --until 2026-10-27 --human")
+    other = [k for k in limits if k not in WINDOW_SETTINGS]
+    if other:
+        sys.exit(f"--until opens a temporary window only for the limits ({', '.join(WINDOW_SETTINGS)}); "
+                 f"{', '.join(other)} {'is a lasting choice' if len(other) == 1 else 'are lasting choices'}: "
+                 "set it without --until.")
+    return change_windows(root, limits, parse_window_until(until))
 
 
 def docs_only(files):
@@ -4300,7 +4972,7 @@ def issue_markers(iss):
             body = ev.get("body") or ""
             if "Approved at G1" in body and not m["decided"]:
                 m["decided"] = at
-            elif body.startswith("🤖 Claimed by") and not re.search(r"\bto (assess|write|prototype)\b", body) and not m["claimed"]:
+            elif body.startswith("🤖 Claimed by") and not re.search(r"\bto (assess|write|prototype|verify)\b", body) and not m["claimed"]:
                 m["claimed"] = at
             elif ("docs/uat/" in body or "Fully verified by the agent" in body) and not m["uat"]:
                 m["uat"] = at
@@ -4319,6 +4991,33 @@ def issue_markers(iss):
     if "stream:feature" in labels and not m["decided"] and not was_idea:
         m["decided"] = created                        # born a feature (roadmap item): no decision to wait for
         m["created"] = None                           # so it isn't counted as a 0-hour decision
+    return m
+
+
+def verify_markers(iss):
+    """uat: agents-verify on one issue: the first hand-over to a verifier, the verdicts, and a pull-back (owner-test)
+    after a verification, with whether the owner's own test then failed."""
+    m = {"handed": None, "verdicts": [], "first_verdict": None, "verified_at": None, "pulled_back": False,
+         "pulled_back_failed": False}
+    for ev in (iss.get("timelineItems") or {}).get("nodes") or []:
+        if not ev or not ev.get("createdAt"):
+            continue
+        at, kind = iso_time(ev["createdAt"]), ev.get("__typename")
+        if kind == "IssueComment":
+            body = ev.get("body") or ""
+            rec = verdict_records([{"body": body}])
+            if body.startswith(READY_VERIFY_MARK) and not m["handed"]:
+                m["handed"] = at
+            elif rec:
+                m["verdicts"].append(rec[0]["verdict"])
+                m["first_verdict"] = m["first_verdict"] or at
+                if rec[0]["verdict"] == "verified" and not m["verified_at"]:
+                    m["verified_at"] = at
+            elif "❌ UAT failed" in body and m["pulled_back"]:
+                m["pulled_back_failed"] = True
+        elif kind == "LabeledEvent" and (ev.get("label") or {}).get("name") == OWNER_TEST_LABEL and m["verified_at"] \
+                and at >= m["verified_at"]:
+            m["pulled_back"] = True
     return m
 
 
@@ -4377,6 +5076,8 @@ def cmd_metrics(args):
     rows, queues = [], {k: [] for k, _, _, _ in QUEUES}
     to_done = {"all": [], "stream:bug": [], "stream:feature": [], "stream:idea": []}
     reruns, failures, found_in_uat, bugs_later, judge = [], 0, 0, [], {"decided": 0, "malformed": 0, "escalated": 0}
+    ver = {"handed_over": 0, "verified": [], "not_verified": 0, "sent_back": [], "needs_owner": [], "pulled_back": [],
+           "pulled_back_failed": [], "hours": []}
     closed_at = {i["number"]: iso_time(i["closedAt"]) for i in issues if i.get("closedAt")}
     for iss in issues:
         labels = [l["name"] for l in (iss.get("labels") or {}).get("nodes") or []]
@@ -4401,6 +5102,19 @@ def cmd_metrics(args):
                 h = hours(start, end)
                 queues[key].append(h)
                 row["queues_h"][key] = h
+        vm = verify_markers(iss)
+        if vm["handed"]:
+            ver["handed_over"] += 1
+            if vm["first_verdict"] and vm["first_verdict"] >= vm["handed"]:
+                ver["hours"].append(hours(vm["handed"], vm["first_verdict"]))
+        for key, verdict in (("verified", "verified"), ("sent_back", "not-verified"), ("needs_owner", "needs-owner")):
+            if verdict in vm["verdicts"]:
+                ver[key].append(iss["number"])
+        ver["not_verified"] += vm["verdicts"].count("not-verified")
+        if vm["pulled_back"]:
+            ver["pulled_back"].append(iss["number"])
+        if vm["pulled_back_failed"]:
+            ver["pulled_back_failed"].append(iss["number"])
         if m["failed"]:
             reruns.append(iss["number"])
             failures += len(m["failed"])
@@ -4418,12 +5132,19 @@ def cmd_metrics(args):
                 bugs_later.append({"bug": iss["number"], "after": sorted(after_done)})
         rows.append(row)
     reverts = revert_commits(root, since_dt.date().isoformat())
+    verified_set = set(ver["verified"])
+    verification = {k: v for k, v in ver.items() if k != "hours"}
+    verification.update(
+        hours_to_verdict=percentiles(ver["hours"]),
+        bugs_later=[b for b in bugs_later if verified_set & set(b["after"])],
+        reverts=[r for r in reverts if verified_set & {int(n) for n in re.findall(r"#(\d+)", r)}])
     res = {"repo": repo, "days": args.days, "since": since, "issues": len(rows),
            "time_to_done_days": {k: percentiles(v) for k, v in to_done.items()},
            "queues_hours": {k: dict(percentiles(v), what=w) for k, w, _, _ in QUEUES for v in [queues[k]]},
            "reruns": {"issues": len(reruns), "failed_tests": failures, "issue_numbers": sorted(reruns)},
            "defects": {"found_in_uat": found_in_uat, "found_later": len(bugs_later), "later": bugs_later},
-           "reverts": {"count": len(reverts), "commits": reverts}, "judge": judge, "rows": rows}
+           "reverts": {"count": len(reverts), "commits": reverts}, "judge": judge, "verification": verification,
+           "rows": rows}
     text = metrics_text(res)
     if args.save:
         folder = root / "docs" / "metrics"
@@ -4464,6 +5185,17 @@ def metrics_text(res):
               c("1", "\nDefects"), f"  Found in your test (UAT): {d['found_in_uat']}   ·   Found after Done: {d['found_later']}"
               + (" (" + ", ".join(f"#{b['bug']} after #{b['after'][0]}" for b in d["later"][:8]) + ")" if d["later"] else ""),
               c("1", "\nReverts on main"), f"  {v['count']}" + (": " + "; ".join(v["commits"][:5]) if v["commits"] else "")]
+    vf = res.get("verification") or {}
+    if vf.get("handed_over") or vf.get("verified"):
+        nums = lambda xs: f" (#{', #'.join(str(n) for n in xs[:8])})" if xs else ""
+        lines += [c("1", "\nVerified by agents (uat: agents-verify)"),
+                  f"  Handed to a verifier: {vf['handed_over']}   ·   verified: {len(vf['verified'])}{nums(vf['verified'])}",
+                  f"  Not verified: {vf['not_verified']} verdict(s) on {len(vf['sent_back'])} ticket(s)   ·   "
+                  f"needs your test: {len(vf['needs_owner'])}{nums(vf['needs_owner'])}",
+                  f"  Pulled back after a verification: {len(vf['pulled_back'])}{nums(vf['pulled_back'])}, "
+                  f"of which failed your test: {len(vf['pulled_back_failed'])}{nums(vf['pulled_back_failed'])}",
+                  f"  Later: bugs naming a verified ticket {len(vf['bugs_later'])}, reverts {len(vf['reverts'])}"
+                  f"   ·   hand-over to verdict: {hrs(vf['hours_to_verdict'])}"]
     if any(j.values()):
         lines += [c("1", "\nJudge verdicts"), f"  decided {j['decided']}  ·  malformed {j['malformed']}  ·  escalated {j['escalated']}"]
     lines.append(c("2", "\nFrom the issues' labels, the skills' comments and closes (issues updated in the window). 'Found after Done' "
@@ -4484,9 +5216,19 @@ def cmd_ci_settings(args):
     return cmd_settings(args)
 
 
-def setting_value(cfg, key):
+def configured_value(cfg, key):
+    """The value in haam.config.json (or the default), without a window open on this computer."""
     v = cfg.get(key)
     return DEFAULT_CONFIG.get(key) if v in (None, "") else v
+
+
+def setting_value(cfg, key):
+    """What a setting is now: a limit's window on this computer while it lasts, else haam.config.json's value."""
+    if key in WINDOW_SETTINGS:
+        w = active_windows().get(key)
+        if w:
+            return w["value"]
+    return configured_value(cfg, key)
 
 
 def github_variables(cfg):
@@ -4603,23 +5345,24 @@ def cmd_settings(args):
     root = find_repo_root(Path.cwd())
     cfg = load_config(root)
     rep = Report()
-    if (args.set or args.apply) and not args.human:
+    until = getattr(args, "until", None)
+    clear = [k.strip().replace("-", "_") for k in getattr(args, "clear_window", None) or []]
+    changing = bool(args.set or args.apply or until or clear)
+    if changing and not args.human:
         sys.exit("Settings are the owner's decision. Change them only inside /haam-settings, after the human chose, "
                  "with --human.")
-    if (args.set or args.apply) and git_paths(root)[2]:
+    if changing and git_paths(root)[2]:
         sys.exit("settings changes run only from the owner's own chat in the main project folder, never from an "
-                 "agent's worktree.")
-    raw = {}
-    try:
-        raw = json.loads((root / CONFIG_NAME).read_text())
-    except (OSError, json.JSONDecodeError):
-        pass
+                 "agent's worktree (a temporary window included).")
     changed = {}
     for item in args.set or []:
         k, _, v = item.partition("=")
         k, v = k.strip().replace("-", "_"), v.strip()
         if k == "runner_label" and re.fullmatch(r"[\w.-]+", v):
             changed[k] = v
+            continue
+        if k == "owner_test_paths":        # one area per --set: <area>=<pattern>,<pattern> (empty: remove it)
+            changed[k] = set_owner_test_area(changed.get(k, owner_test_areas(cfg)), v)
             continue
         if k not in SETTING_KEYS:
             sys.exit(f"Unknown setting '{k}'. Settings: {', '.join(SETTING_KEYS)} (protected areas: config --protected)")
@@ -4642,26 +5385,170 @@ def cmd_settings(args):
             changed.pop("runner")
             refused.append("runner=self-hosted: own runners only on private repositories (couldn't confirm this one "
                            "is private); on a public repository anyone's pull request could run code on your machine")
-    if getattr(args, "until", None):
-        lim = {k: changed.pop(k) for k in ("max_open_prs", "max_in_uat") if k in changed}
-        set_batch_window(cfg, args.until, lim)
-        changed["batch_window"] = cfg["batch_window"]
+    note = {"opened": {}, "ended": []}
+    if until:
+        # A temporary value: a window on this computer, in the common git dir. haam.config.json isn't touched.
+        if args.apply:
+            sys.exit("--until opens a window on this computer only and changes nothing on GitHub: run --apply on its own.")
+        note["opened"] = {k: w for k, w in open_limit_windows(root, changed, until).items() if k in changed}
+        changed = {}
+    if clear:
+        bad = [k for k in clear if k not in WINDOW_SETTINGS]
+        if bad:
+            sys.exit(f"Only the limits have windows ({', '.join(WINDOW_SETTINGS)}): {', '.join(bad)} has none.")
+        note["ended"] = [k for k in clear if k in active_windows(root)]
+        change_windows(root, cleared=clear)
+    pr = None
+    if changed or args.apply:
+        busy = main_folder_busy(root, cfg)
+        if busy:
+            # The main folder has a test (or other work) checked out: write the change in a temporary worktree of
+            # origin/main and open its PR, so the folder's own files stay exactly as they are.
+            pr = open_settings_worktree(root, cfg, busy)
+    try:
+        return settings_change(args, pr["path"] if pr else root, load_config(pr["path"]) if pr else cfg, rep,
+                               changed, refused, note, pr)
+    finally:
+        if pr:
+            close_settings_worktree(root, pr)
+
+
+def main_folder_busy(root, cfg):
+    """Why the main folder can't take a settings change in its own files ('' when it can): another branch or a
+    commit is checked out there (a test: writing there would leave an unsaved change under it). On the default
+    branch, unsaved changes are the owner's own work in progress (setup writes many files before its first commit),
+    and the change is written there as before."""
+    if not git_out(root, "rev-parse", "--verify", "--quiet", "HEAD"):
+        return ""                                       # no commit yet (first setup): nothing to keep apart
+    base = cfg.get("default_branch") or "main"
+    branch = git_out(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch != base:
+        return f"it has {'a commit' if branch in ('HEAD', '') else branch} checked out, not {base}"
+    return ""
+
+
+def open_settings_worktree(root, cfg, why):
+    """A temporary worktree of a fresh origin/main on a new chore/haam-settings-<time> branch, outside the project."""
+    base = cfg.get("default_branch") or "main"
+    code, _, err = run(["git", "fetch", "--quiet", "origin", base], cwd=root)
+    if code != 0:
+        sys.exit(f"The main folder is busy ({why}), so the change goes in a temporary copy of origin/{base}, but "
+                 f"fetching it failed: {(err or '')[:200]}. Try again, or once the main folder is back on {base}.")
+    stamp = time.strftime("%Y%m%d-%H%M")
+    branch, n = f"chore/haam-settings-{stamp}", 2
+    while git_out(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") or \
+            git_out(root, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"):
+        branch, n = f"chore/haam-settings-{stamp}-{n}", n + 1
+    path = Path(tempfile.mkdtemp(prefix="haam-settings-"))
+    code, _, err = run(["git", "worktree", "add", "-b", branch, str(path), f"origin/{base}"], cwd=root)
+    if code != 0:
+        shutil.rmtree(path, ignore_errors=True)
+        sys.exit(f"Couldn't make a temporary copy of origin/{base} for the change: {(err or '')[:200]}")
+    return {"path": path, "branch": branch, "base": base, "why": why, "url": "", "pushed": False, "error": "",
+            "changes": {}}
+
+
+def settings_pr(work, cfg, pr, changes, before):
+    """Commit a settings change made in the temporary worktree, push its branch and open its PR (or update it)."""
+    summary = ", ".join(f"{k}={v}" for k, v in changes.items())
+    run(["git", "add", CONFIG_NAME], cwd=work)
+    if not git_out(work, "diff", "--cached", "--name-only"):
+        return
+    code, _, err = run(["git", "commit", "-q", "-m", f"chore: haam settings {summary}"], cwd=work)
+    if code != 0:
+        pr["error"] = f"Couldn't commit the change: {(err or '')[:200]}"
+        return
+    code, _, err = run(["git", "push", "-q", "-u", "origin", pr["branch"]], cwd=work)
+    if code != 0:
+        pr["error"] = (f"Couldn't push {pr['branch']}: {(err or '')[:200]}. The change is committed there: push it "
+                       f"(git push -u origin {pr['branch']}) and open its PR.")
+        return
+    pr["pushed"] = True
+    pr["changes"].update(changes)
+    if pr["url"]:
+        return                                          # the push updated the PR
+    rows = "".join(f"| `{k}` | {before.get(k, '')} | {v} |\n" for k, v in changes.items())
+    body = (f"The owner changed these HAAM settings (`/haam-settings`):\n\n| Setting | Was | Now |\n|---|---|---|\n{rows}\n"
+            f"Made in a temporary copy of `{pr['base']}`, because the main folder was busy ({pr['why']}): its files "
+            "were left as they were.\n\n"
+            f"`{CONFIG_NAME}` is a protected file: review and merge this PR (on GitHub, or with `/test` and `ship`). "
+            f"Agents and the release gate read the settings from `{pr['base']}`, so the change counts once it's merged.\n")
+    fd, f = tempfile.mkstemp(prefix="haam-settings-pr-", suffix=".md")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    repo = cfg.get("github_repo") or detect_github_repo(work)
+    code, out, err = run(["gh", "pr", "create"] + (["-R", repo] if repo else []) + [
+        "--head", pr["branch"], "--base", pr["base"], "--title", f"chore: haam settings {summary}", "--body-file", f],
+        cwd=work)
+    os.unlink(f)
+    if code != 0:
+        pr["error"] = (f"Pushed {pr['branch']}, but couldn't open its PR: {(err or out or '')[:200]}. Open it on "
+                       "GitHub.")
+        return
+    pr["url"] = out.strip().splitlines()[-1] if out else ""
+
+
+def close_settings_worktree(root, pr):
+    """Remove the temporary worktree; keep its branch only when it holds a commit that didn't reach GitHub."""
+    run(["git", "worktree", "remove", "--force", str(pr["path"])], cwd=root)
+    shutil.rmtree(pr["path"], ignore_errors=True)
+    run(["git", "worktree", "prune"], cwd=root)
+    if pr["pushed"] or not git_out(root, "rev-list", f"origin/{pr['base']}..{pr['branch']}"):
+        run(["git", "branch", "-D", pr["branch"]], cwd=root)
+
+
+def settings_change(args, root, cfg, rep, changed, refused, note, pr):
+    """The rest of `settings`: save the changes in `root` (with `pr`, a temporary worktree of main: then commit them
+    and open their PR), show the settings, and --apply them on GitHub."""
+    raw = {}
+    try:
+        raw = json.loads((root / CONFIG_NAME).read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
     if (changed.get("grouping") or setting_value(cfg, "grouping")) == "release" and \
             (changed.get("flow") or setting_value(cfg, "flow")) == "checks-first":
         sys.exit("grouping release needs flow test-first: in checks-first every change already has its own PR.")
+    if (changed.get("uat") or setting_value(cfg, "uat")) == "agents-verify" and ("uat" in changed or
+                                                                                "owner_test_paths" in changed):
+        if not owner_test_areas({"owner_test_paths": changed.get("owner_test_paths", cfg.get("owner_test_paths"))}):
+            sys.exit("uat agents-verify needs owner_test_paths first: the areas that always keep your own test (e.g. "
+                     "--set owner_test_paths=sign-in=src/auth/** --set owner_test_paths=gates=AGENTS.md,.agents/**,"
+                     "tools/haam/**,.github/**,haam.config.json). Without them every change could skip you.")
+        if cfg.get("tracker") != "github":
+            sys.exit("uat agents-verify needs the GitHub tracker: the verifier records its verdict on GitHub issues.")
+    if (changed.get("uat") or setting_value(cfg, "uat")) == "agents-verify" and \
+            (changed.get("grouping") or setting_value(cfg, "grouping")) != "release" and \
+            ("uat" in changed or "grouping" in changed):
+        sys.exit("uat agents-verify needs grouping release for now: a verified change joins the next release on your "
+                 "`ship`. One PR per change for verified tickets isn't in the kit yet.")
+    if "owner_test_paths" in changed:
+        tracked = git_out(root, "ls-files").splitlines()
+        for area, pats in changed["owner_test_paths"].items():
+            for x in pats:
+                if tracked and not protected_matches([x], tracked) and not args.json:
+                    print(f"{WARN} owner_test_paths {area}: '{x}' matches no file in the repository (check the "
+                          "spelling, e.g. src/auth/** for everything in src/auth)")
     if changed:
+        before = {k: configured_value(cfg, k) for k in changed}
         cfg.update(changed)
         save_config(root, cfg)
+        if pr:
+            settings_pr(root, cfg, pr, changed, before)
     rows = []
     _, _, window = effective_limits(cfg)
+    windows = active_windows(root)
     for group, key, opts, what, helps in SETTINGS:
         val = setting_value(cfg, key)
-        rows.append({"group": group, "key": key, "value": val, "default": DEFAULT_CONFIG.get(key),
+        rows.append({"group": group, "key": key, "value": val, "configured": configured_value(cfg, key),
+                     "window": windows.get(key), "default": DEFAULT_CONFIG.get(key),
                      "options": list(opts) if isinstance(opts, list) else [], "what": what, "options_help": helps,
-                     "changed_now": key in changed})
+                     "changed_now": key in changed or key in note["opened"]})
     res = {"settings": rows, "protected_paths": cfg.get("protected_paths"), "heavy_runs": cfg.get("heavy_runs") or [],
-           "batch_window": window, "github_variables": github_variables(cfg),
-           "required_checks": required_checks(cfg), "applied": [], "changed": changed, "refused": refused}
+           "owner_test_paths": owner_test_areas(cfg),
+           "batch_window": window, "windows": windows, "windows_opened": note["opened"], "windows_ended": note["ended"],
+           "github_variables": github_variables(cfg),
+           "required_checks": required_checks(cfg), "applied": [], "changed": changed, "refused": refused,
+           "settings_pr": None}
     for r_ in refused:
         rep.add("fail", "Not changed: " + r_)
     if args.apply:
@@ -4674,8 +5561,11 @@ def cmd_settings(args):
         current = {v["name"]: v["value"] for v in json.loads(out or "[]")} if code == 0 else {}
         if "runner" not in raw and "runner" not in changed and current.get("HAAM_RUNNER"):
             # Set up before 1.9.0 (a variable only): adopt it rather than move the jobs back to GitHub's runners.
+            before = {k: configured_value(cfg, k) for k in ("runner", "runner_label")}
             cfg["runner"], cfg["runner_label"] = "self-hosted", current["HAAM_RUNNER"]
             save_config(root, cfg)
+            if pr:
+                settings_pr(root, cfg, pr, {"runner": "self-hosted", "runner_label": current["HAAM_RUNNER"]}, before)
             rep.add("info", f"Kept your own runner ({current['HAAM_RUNNER']}) and recorded it in {CONFIG_NAME}")
         for name, value in github_variables(cfg).items():
             if (current.get(name) or "") == value:
@@ -4721,8 +5611,14 @@ def cmd_settings(args):
                 res["applied"].append("production")
         elif code != 0:
             rep.add("warn", "No production environment yet", "run haam.py github --apply first")
-        rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged: the gate and the agents read the settings "
-                   "from main (it's a protected file, so it needs your review)")
+        if pr and pr["url"]:
+            rep.action(WHO_TERMINAL, f"Review and merge the settings PR: the gate and the agents read the settings "
+                       f"from main ({pr['url']})")
+        elif not pr:
+            rep.action(WHO_AGENT, f"Commit {CONFIG_NAME} and get it merged: the gate and the agents read the settings "
+                       "from main (it's a protected file, so it needs your review)")
+    if pr:
+        res["settings_pr"] = {k: pr[k] for k in ("branch", "url", "error", "why")}
     if args.json:
         print(json.dumps(res, indent=2))
         return
@@ -4732,25 +5628,46 @@ def cmd_settings(args):
             group = r["group"]
             print(f"\n{group}")
         tag = "" if r["value"] == r["default"] else f"   (default: {r['default']})"
+        if r["window"]:
+            tag = f"   (window until {r['window']['until']}; normally {r['configured']})"
         mark = f"{OK} " if r["changed_now"] else "  "
         print(f"{mark}{r['key']:<18} {str(r['value']):<14} {r['what']}{tag}")
         if args.explain:
             for o in r["options"]:
                 print(f"      {'→' if o == r['value'] else '·'} {o}: {r['options_help'].get(o, '')}")
     print(f"\n  protected_paths    {', '.join(cfg.get('protected_paths') or [])}")
+    areas = owner_test_areas(cfg)
+    print("  owner_test_paths   " + ("; ".join(f"{a}: {', '.join(p_)}" for a, p_ in areas.items()) if areas else
+                                    "(none: needed before uat agents-verify)"))
     print(f"  heavy_runs         {', '.join(cfg.get('heavy_runs') or []) or '(none: haam.py exclusive only takes turns)'}")
     print(f"  production code    {', '.join(cfg.get('production_paths') or ['**'])}, except "
           f"{', '.join((cfg.get('non_production_paths') or NON_PRODUCTION_DEFAULT)[:6])} …")
-    if window:
+    if window and not windows:
         print(f"  batch window       until {window['until']}: " + ", ".join(f"{k} {v}" for k, v in window.items()
                                                                            if k != "until"))
-    if changed:
+    for k, w in windows.items():
+        print(f"  window             {window_line(k, w)} (on this computer, set {w.get('set_at', '?')}; then back "
+              f"to {configured_value(cfg, k)})")
+    if note["opened"]:
+        print(f"\n{OK} Window open on this computer, counting at once in every chat here: "
+              + ", ".join(window_line(k, w) for k, w in note["opened"].items())
+              + f". {CONFIG_NAME} keeps the normal value; the window ends by itself.")
+    for k in note["ended"]:
+        print(f"{OK} Window for {k} ended: back to {configured_value(cfg, k)}")
+    if pr and pr["url"]:
+        print(f"\n{OK} Opened {pr['url']} ({', '.join(f'{k}={v}' for k, v in pr['changes'].items())}). The main "
+              f"folder was left as it is: {pr['why']}. The change counts once the PR merges into {pr['base']}; for a "
+              "limit that must count at once, open a window (--set max_in_uat=N --until <last day> --human).")
+    elif pr and pr["error"]:
+        print(f"\n{BAD} {pr['error']}")
+    elif changed:
         print(f"\n{OK} Saved in {CONFIG_NAME}: " + ", ".join(f"{k}={v}" for k, v in changed.items()))
     for r_ in refused:
         print(f"{BAD} Not changed: {r_}")
-    if not args.apply:
+    if not args.apply and not note["opened"] and not note["ended"]:
         print(f"{INFO} Settings that change GitHub (runner, review, ci, nightly, deploy_approval) take effect with "
-              "--apply. Then commit haam.config.json.")
+              "--apply." + (" With the main folder busy, --apply reads main's settings: run it once this PR merges "
+                            "(or with these --set in one call)." if pr else " Then commit haam.config.json."))
     rep.print(False) if args.apply else None
 
 
@@ -5046,8 +5963,14 @@ def include_patterns(main):
 
 
 def copy_includes(main, dest, cfg=None):
-    """Copy git-ignored local files listed in .worktreeinclude (e.g. .env) from the main folder into a
-    worktree. Never overwrites, never copies tracked files, never prints contents. Returns (copied, skipped)."""
+    """Copy git-ignored local files and folders listed in .worktreeinclude (e.g. .env, an SDK's frameworks) from the
+    main folder into a worktree. Never overwrites, never copies tracked files, never prints contents. Returns
+    (copied, skipped); a folder is listed with a trailing `/`.
+
+    ⛔ A FOLDER IS COPIED WITH ITS SYMLINKS AS LINKS (#1296). An iOS framework is mostly links (`Headers ->
+    Versions/Current/Headers`); a copy that followed or dropped them left the App target unable to find
+    `opencv2/core.hpp`, and this function skipped every pattern that was not a file, so prep said "none needed". A
+    folder already there gets back any link it is missing; nothing in it is overwritten."""
     copied, skipped = [], []
     if main.resolve() == dest.resolve():
         return copied, skipped
@@ -5055,7 +5978,7 @@ def copy_includes(main, dest, cfg=None):
     for pat in include_patterns(main):
         pat = pat.lstrip("/")
         for src in sorted(main.glob(pat)):
-            if not src.is_file():
+            if not (src.is_file() or src.is_dir()):
                 continue
             try:
                 if area in src.resolve().parents or src.resolve() == area:
@@ -5063,16 +5986,46 @@ def copy_includes(main, dest, cfg=None):
             except ValueError:
                 pass
             rel = src.relative_to(main).as_posix()
+            shown = rel + "/" if src.is_dir() else rel
             if run(["git", "check-ignore", "-q", rel], cwd=main)[0] != 0:
-                skipped.append(rel + " (tracked or not git-ignored)")
+                skipped.append(shown + " (tracked or not git-ignored)")
                 continue
             target = dest / rel
+            if src.is_dir():
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(src, target, symlinks=True)
+                    copied.append(shown)
+                else:
+                    restored = restore_links(src, target)
+                    if restored:
+                        copied.append(f"{shown} ({restored} missing link{'s' if restored != 1 else ''} restored)")
+                continue
             if target.exists():
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, target)
             copied.append(rel)
     return copied, skipped
+
+
+def restore_links(src, target):
+    """Every symlink under [src] that [target] has nothing at, made again as the same link. Returns how many.
+
+    Only adds: a path that exists in [target] in any form, file, folder or link, is left exactly as it is."""
+    restored = 0
+    for folder, dirs, files in os.walk(src):
+        here = Path(folder)
+        for name in dirs + files:
+            link = here / name
+            if not link.is_symlink():
+                continue
+            twin = target / link.relative_to(src)
+            if os.path.lexists(twin) or not twin.parent.is_dir():
+                continue
+            os.symlink(os.readlink(link), twin)
+            restored += 1
+    return restored
 
 
 def list_worktrees(root, cfg=None, also=None):
@@ -5349,10 +6302,28 @@ EXCLUSIVE_HELD_ENV = "HAAM_EXCLUSIVE_HELD"       # "<pid>@<lock>", set for every
 REMOTE_RUNNER_ENV = "HAAM_REMOTE_RUNNER"         # an ssh host this machine may hand heavy `make` runs to
 REMOTE_REPO_ENV = "HAAM_REMOTE_REPO"             # the clone's path there (default: this clone's path under ~)
 REMOTE_CHECK_SECONDS = 60.0
+# A stuck run must not hold a machine for days (#1796: the Mac Studio's lock was held from 4 Nov to 13 Nov by a run
+# with under a second of CPU, and nobody was told). The longest full check seen took 97 minutes.
+LONG_HOLD_MINUTES = 180.0       # a lock held longer than this is said in the waiting line, in doctor, and once on the issue
+REMOTE_MAX_RUN_MINUTES = 180.0  # a run sent to the other machine is stopped there after this long (--max-run changes it)
+RUN_CEILING_EXIT = 125          # what exclusive exits with when it stopped its command at --max-run
+EXCLUSIVE_STOPPED = "haam-exclusive.stopped"    # JSON lines: the runs this clone's exclusive stopped at their ceiling
+EXCLUSIVE_NOTICED = "haam-exclusive.noticed"    # the notices already posted from this clone, so each is posted once
+NOTICE_ENV = "HAAM_EXCLUSIVE_NOTICE"             # "off": don't comment on issues (a run sent here by another machine)
+# One JSON line per run beside the lock, so "is the queue a bottleneck?" has numbers (`exclusive --report`). Past
+# EXCLUSIVE_LOG_MAX_BYTES it is cut to its last EXCLUSIVE_LOG_KEEP lines: weeks of runs even on a busy machine.
+EXCLUSIVE_LOG = "haam-exclusive.log.jsonl"
+EXCLUSIVE_LOG_MAX_BYTES = 1_000_000
+EXCLUSIVE_LOG_KEEP = 3000
 
 
 class RemoteTurn(Exception):
-    """Raised inside `MachineTurn` when the remote runner is free before this machine's turn comes."""
+    """Raised inside `MachineTurn` when the remote runner is free before this machine's turn comes. `place` is the
+    name its ticket had: a run that comes back waits here under it again, so it keeps its place in line (#924)."""
+
+    def __init__(self, place=None):
+        super().__init__()
+        self.place = place
 
 
 def process_table():
@@ -5386,9 +6357,38 @@ def compile_patterns(patterns):
     return out
 
 
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+
+
+def run_line(command):
+    """What a process itself runs, for heavy_runs to match (#1039): its own program and arguments.
+
+    A shell given a command string (`zsh -c '…'`, `bash -lc …`) runs nothing heavy itself, whatever the string
+    mentions: a heavy command it starts is a process of its own, and is matched as one. Matching the shell's text
+    deadlocked the queue twice (23 and 26 Oct 2026): a watcher loop reading a log named `./gradlew check`, and a
+    waiter's own wrapper named its test command. A shell running a script file runs that script. None when the
+    process runs nothing to match."""
+    words = command.split()
+    if not words:
+        return None
+    if Path(words[0].lstrip("-")).name not in SHELLS:
+        return command
+    rest = words[1:]
+    while rest and rest[0][:1] in "-+" and rest[0] not in ("-", "--"):
+        flag = rest.pop(0)
+        if not flag.startswith("--") and "c" in flag[1:]:
+            return None
+        if flag in ("-o", "+o", "-O", "+O") and rest:
+            rest.pop(0)
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    return " ".join(rest) or None
+
+
 def heavy_runs_now(patterns):
     """Other processes matching the project's heavy_runs: never this process, its process group or its ancestors,
-    and never another `haam.py exclusive` (it waits for the lock, or holds it, so it isn't running anything free)."""
+    and never another `haam.py exclusive` (it waits for the lock, or holds it, so it isn't running anything free).
+    Each is matched by what it runs itself (`run_line`), never by a shell's command text."""
     regs = compile_patterns(patterns)
     rows = process_table()
     if not regs or rows is None:
@@ -5402,8 +6402,14 @@ def heavy_runs_now(patterns):
         group = os.getpgid(0)
     except (AttributeError, OSError):
         group = None
-    return [(pid, cmd) for pid, _, pgid, cmd in rows
-            if pid not in skip and pgid != group and not EXCLUSIVE_SELF.search(cmd) and any(r.search(cmd) for r in regs)]
+    found = []
+    for pid, _, pgid, cmd in rows:
+        line = run_line(cmd)
+        if pid in skip or pgid == group or line is None or EXCLUSIVE_SELF.search(line):
+            continue
+        if any(r.search(line) for r in regs):
+            found.append((pid, line))
+    return found
 
 
 def pid_alive(pid):
@@ -5414,6 +6420,257 @@ def pid_alive(pid):
     except (PermissionError, OSError):
         return True
     return True
+
+
+def lock_age_seconds(owner, owner_file=None):
+    """How long a lock's holder has held it, from its `since` (local time where it was written) or the file's age."""
+    try:
+        return max(0.0, time.time() - time.mktime(time.strptime(owner.get("since", ""), "%Y-%m-%d %H:%M:%S")))
+    except (ValueError, OverflowError, AttributeError):
+        pass
+    try:
+        return max(0.0, time.time() - Path(owner_file).stat().st_mtime) if owner_file else None
+    except OSError:
+        return None
+
+
+def held_long(age_s):
+    return age_s is not None and age_s > LONG_HOLD_MINUTES * 60
+
+
+def say_age(age_s):
+    h = int(age_s // 3600)
+    return f"{h // 24} d {h % 24} h" if h >= 24 else f"{h} h {int(age_s % 3600 // 60)} min"
+
+
+def descendants(pid):
+    """Every process below `pid` on this machine, children first."""
+    kids = {}
+    for p, pp, _, _ in process_table() or []:
+        kids.setdefault(pp, []).append(p)
+    out, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(0), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def stop_tree(child):
+    """End a command and everything it started: TERM, ten seconds, then KILL for whatever is left."""
+    pids = [child.pid] + descendants(child.pid)
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    try:
+        child.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    for p in pids:
+        if pid_alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+    child.wait()
+
+
+def record_stopped(lock, record):
+    """Keep what a ceiling stopped beside the lock (the last 20), so a machine that couldn't comment is still heard:
+    the other machine reads it in its next check and posts it once."""
+    f = lock.with_name(EXCLUSIVE_STOPPED)
+    try:
+        lines = f.read_text().splitlines()[-19:] if f.exists() else []
+        f.write_text("\n".join(lines + [json.dumps(record)]) + "\n")
+    except OSError:
+        pass
+
+
+def now_stamp():
+    """Local time with its offset, to the second (parsed back by datetime.fromisoformat)."""
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def short_host():
+    return socket.gethostname().split(".")[0]
+
+
+def log_run(lock, rec):
+    """Add one run's line to the log beside the lock (EXCLUSIVE_LOG). Never fails the run it records: a log that
+    can't be written is skipped. Past EXCLUSIVE_LOG_MAX_BYTES the file keeps its last EXCLUSIVE_LOG_KEEP lines."""
+    f = lock.with_name(EXCLUSIVE_LOG)
+    tmp = None
+    try:
+        with open(f, "a", encoding="utf-8") as out:     # one short append: lines from parallel runs don't mix
+            out.write(json.dumps(rec) + "\n")
+        if f.stat().st_size > EXCLUSIVE_LOG_MAX_BYTES:
+            keep = f.read_text(encoding="utf-8", errors="replace").splitlines()[-EXCLUSIVE_LOG_KEEP:]
+            tmp = f.with_name(f"{f.name}.trim-{os.getpid()}")
+            tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
+            os.replace(tmp, f)
+            tmp = None
+    except Exception:   # noqa: BLE001 - the log is a by-product; the run's own exit code is what matters
+        pass
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def read_run_log(lock):
+    """The log's runs, oldest first; lines that aren't JSON objects are skipped."""
+    try:
+        text = lock.with_name(EXCLUSIVE_LOG).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    runs = []
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get("asked"), str):
+            runs.append(rec)
+    return runs
+
+
+def _stamp(s):
+    try:
+        return datetime.datetime.fromisoformat(s) if isinstance(s, str) else None
+    except ValueError:
+        return None
+
+
+def _seconds(a, b):
+    a, b = _stamp(a), _stamp(b)
+    if a is None or b is None or (a.tzinfo is None) != (b.tzinfo is None):
+        return None
+    return max(0.0, (b - a).total_seconds())
+
+
+def run_log_summary(runs, days=7, today=None):
+    """Per local day (of `asked`) over the last `days` days, and in total: runs, wait (started − asked) and run time
+    (ended − started) medians and maxima in seconds, and how many ran on the remote runner, gave up waiting (124,
+    nothing started), were stopped at their ceiling, and failed on the remote runner and then passed here on the
+    same head commit and command (the runner, not the change, was likely broken). Nested runs (straight through
+    inside their parent's turn) are left out of everything but their own count, so no wait is counted twice."""
+    today = today or datetime.date.today()
+    first = (today - datetime.timedelta(days=max(1, days) - 1)).isoformat()
+    last_pass = {}      # (head, command) -> the log index of its last pass here
+    for i, r in enumerate(runs):
+        if not r.get("remote") and not r.get("nested") and r.get("exit") == 0 and r.get("started") and r.get("head"):
+            last_pass[(r["head"], r.get("command"))] = i
+    broke = {i for i, r in enumerate(runs)      # a failure there, then a pass here, later in the log
+             if r.get("remote") and r.get("exit") not in (0, None) and not r.get("nested")
+             and last_pass.get((r.get("head"), r.get("command")), -1) > i}
+
+    def stats(group):
+        main = [(i, r) for i, r in group if not r.get("nested")]
+        waits = [w for w in (_seconds(r.get("asked"), r.get("started")) for _, r in main) if w is not None]
+        times = [t for t in (_seconds(r.get("started"), r.get("ended")) for _, r in main) if t is not None]
+
+        def med(xs):
+            xs = sorted(xs)
+            n = len(xs)
+            return round((xs[n // 2] + xs[(n - 1) // 2]) / 2, 1) if xs else None
+        return {"runs": len(main), "nested": len(group) - len(main),
+                "wait_median_s": med(waits), "wait_max_s": round(max(waits), 1) if waits else None,
+                "run_median_s": med(times), "run_max_s": round(max(times), 1) if times else None,
+                "remote": sum(1 for _, r in main if r.get("remote")),
+                "gave_up": sum(1 for _, r in main if not r.get("started") and r.get("exit") == 124),
+                "stopped": sum(1 for _, r in main if r.get("stopped")),
+                "failed_there_passed_here": sum(1 for i, _ in main if i in broke)}
+
+    window = [(i, r) for i, r in enumerate(runs) if r["asked"][:10] >= first]
+    by_day = {}
+    for i, r in window:
+        by_day.setdefault(r["asked"][:10], []).append((i, r))
+    return {"days": days, "since": first, "per_day": [dict(day=d, **stats(by_day[d])) for d in sorted(by_day)],
+            "total": stats(window)}
+
+
+def say_seconds(s):
+    if s is None:
+        return "-"
+    s = int(round(s))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{s % 3600 // 60:02d}m"
+
+
+def print_run_report(summary, where):
+    if not summary["per_day"]:
+        print(f"No heavy runs logged here in the last {summary['days']} days ({where}).")
+        return
+    print(f"Heavy runs through exclusive on this machine, the last {summary['days']} days ({where}).")
+    print("Wait: from asking to starting. Run: from starting to the end. Nested runs are left out.")
+    cols = [("Day", "day", 10), ("Runs", "runs", 4), ("Wait med", "wait_median_s", 8), ("Wait max", "wait_max_s", 8),
+            ("Run med", "run_median_s", 7), ("Run max", "run_max_s", 7), ("Remote", "remote", 6),
+            ("Gave up", "gave_up", 7), ("Stopped", "stopped", 7), ("Failed there, passed here", "failed_there_passed_here", 25)]
+
+    def row(d):
+        cells = []
+        for _title, key, width in cols:
+            v = d.get(key)
+            v = say_seconds(v) if key.endswith("_s") else v
+            cells.append(str(v).ljust(width) if key == "day" else str(v).rjust(width))
+        return "  ".join(cells)
+    print("  ".join(t.ljust(w) if k == "day" else t.rjust(w) for t, k, w in cols))
+    for d in summary["per_day"]:
+        print(row(d))
+    print(row(dict(summary["total"], day="All")))
+
+
+def post_notice(cfg, lock, key, who, body, say):
+    """Comment `body` once on the issue `who` names (#123), from this clone. Never fails the run it reports."""
+    m = re.search(r"#(\d+)", who or "")
+    if not m or os.environ.get(NOTICE_ENV) == "off":
+        return
+    marker = lock.with_name(EXCLUSIVE_NOTICED)
+    try:
+        seen = json.loads(marker.read_text()) if marker.exists() else []
+    except (OSError, ValueError):
+        seen = []
+    if key in seen:
+        return
+    repo = (cfg or {}).get("github_repo")
+    if (cfg or {}).get("tracker", "github") != "github" or not repo or not have("gh"):
+        say(f"{WARN} Couldn't tell #{m.group(1)} (no GitHub tracker or gh here): {body.splitlines()[0]}")
+        return
+    try:
+        p = subprocess.run(["gh", "issue", "comment", m.group(1), "-R", repo, "--body", body],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        p = None
+    if p is None or p.returncode != 0:
+        say(f"{WARN} Couldn't comment on #{m.group(1)}: {((p.stderr if p else '') or 'gh failed').strip()[:160]}")
+        return
+    try:
+        marker.write_text(json.dumps((seen + [key])[-200:]) + "\n")
+    except OSError:
+        pass
+    say(f"{INFO} Told the owner on #{m.group(1)}.")
+
+
+def long_hold_body(owner, where, age_s):
+    return (f"⏳ `haam.py exclusive`: the heavy-run lock on {where} has been held since {owner.get('since', '?')} "
+            f"({say_age(age_s)}) by \"{owner.get('who', '?')}\" (pid {owner.get('pid', '?')}), far longer than any "
+            "check takes, and every other run waits for it. Nothing stops it automatically: check whether that run "
+            "still makes progress (its CPU time against its elapsed time: `ps -o pid,etime,time,command -p <pid>`), "
+            "and stop it on the owner's word.")
+
+
+def stopped_body(rec):
+    return (f"⏱️ `haam.py exclusive` stopped a heavy run for this issue at its ceiling on {rec.get('host', '?')}: "
+            f"`{rec.get('command', '?')}`, started {rec.get('since', '?')} by \"{rec.get('who', '?')}\", ran "
+            f"{rec.get('minutes', '?')} min without finishing. The machine's lock is free again. Its result is unknown: "
+            "run it again, and if it stops again, find what hangs.")
 
 
 def exclusive_lock_path(cwd=None):
@@ -5434,9 +6691,11 @@ class MachineTurn:
     (no ticket) still takes the lock whenever it is free; the ticket order holds among the others.
 
     `remote_free`, when given, is asked every REMOTE_CHECK_SECONDS while this machine's lock is busy; when it says
-    yes, the wait ends with `RemoteTurn` (the ticket is withdrawn first)."""
+    yes, the wait ends with `RemoteTurn` (the ticket is withdrawn first, so the line here moves on while the run is
+    away). `place`, a ticket name from that `RemoteTurn`, queues under that name again instead of a new one."""
 
-    def __init__(self, who, patterns, timeout_min=60.0, quiet_s=10.0, say=print, cwd=None, remote_free=None):
+    def __init__(self, who, patterns, timeout_min=60.0, quiet_s=10.0, say=print, cwd=None, remote_free=None,
+                 place=None, on_long_hold=None):
         self.who, self.patterns, self.say = who, patterns, say
         self.deadline = time.time() + timeout_min * 60
         self.quiet = quiet_s
@@ -5444,10 +6703,14 @@ class MachineTurn:
         self.lock = exclusive_lock_path(cwd)
         self.queue = self.lock.with_name(EXCLUSIVE_QUEUE)
         self.ticket = None
+        self.place = place
         self.remote_free = remote_free
+        self.on_long_hold = on_long_hold     # called once with (owner, age in seconds) for a lock held past LONG_HOLD
         self.held = False
         self.nested = False
         self._old = {}
+        # What this turn last waited for, said when it gives up (#1039): the lock's owner, runs ahead, or heavy runs.
+        self.blocking = []
         self._old_env = None
 
     def _owner(self):
@@ -5459,7 +6722,7 @@ class MachineTurn:
     def _enqueue(self):
         try:
             self.queue.mkdir(exist_ok=True)
-            t = self.queue / f"{time.time_ns():020d}-{os.getpid()}"
+            t = self.queue / (self.place or f"{time.time_ns():020d}-{os.getpid()}")
             t.write_text(json.dumps({"who": self.who, "pid": os.getpid(),
                                      "since": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
             self.ticket = t
@@ -5473,6 +6736,11 @@ class MachineTurn:
             except OSError:
                 pass
             self.ticket = None
+
+    def _away(self):
+        place = self.ticket.name if self.ticket is not None else None
+        self._dequeue()
+        raise RemoteTurn(place)
 
     def _ahead(self):
         """Live tickets older than this one, oldest first; a dead process's ticket is removed on the way."""
@@ -5522,7 +6790,7 @@ class MachineTurn:
         return None
 
     def _acquire(self):
-        told, told_ahead, next_remote = False, None, 0.0
+        told, told_ahead, next_remote, told_long = False, None, 0.0, None
         holder = self._inside_holder()
         if holder:
             self.nested = True
@@ -5533,14 +6801,14 @@ class MachineTurn:
         while True:
             ahead = self._ahead()
             if ahead:
+                self.blocking = [f"{len(ahead)} run(s) ahead in line"]
                 if len(ahead) != told_ahead:
                     self.say(f"{INFO} In line for the machine: {len(ahead)} run(s) ahead of {self.who}.")
                     told_ahead = len(ahead)
                 if self.remote_free is not None and time.time() >= next_remote:
                     next_remote = time.time() + REMOTE_CHECK_SECONDS
                     if self.remote_free():
-                        self._dequeue()
-                        raise RemoteTurn()
+                        self._away()
                 if time.time() > self.deadline:
                     self._dequeue()
                     return False
@@ -5566,15 +6834,24 @@ class MachineTurn:
                     except OSError:
                         pass
                     continue
+                self.blocking = [f"the lock, held by {owner.get('who', '?')} (pid {owner.get('pid', '?')}, "
+                                 f"since {owner.get('since', '?')})"]
                 if not told:
                     self.say(f"{INFO} Waiting for {owner.get('who', '?')} (running since {owner.get('since', '?')}, "
                              f"pid {owner.get('pid', '?')}) to finish…")
                     told = True
+                age = lock_age_seconds(owner, self.lock / "owner")
+                key = (owner.get("pid"), owner.get("since"))
+                if held_long(age) and told_long != key:
+                    told_long = key
+                    self.say(f"{WARN} This machine's lock has been held since {owner.get('since', '?')} "
+                             f"({say_age(age)}) by {owner.get('who', '?')}, far longer than any check takes.")
+                    if self.on_long_hold is not None:
+                        self.on_long_hold(owner, age)
                 if self.remote_free is not None and time.time() >= next_remote:
                     next_remote = time.time() + REMOTE_CHECK_SECONDS
                     if self.remote_free():
-                        self._dequeue()
-                        raise RemoteTurn()
+                        self._away()
                 if time.time() > self.deadline:
                     self._dequeue()
                     return False
@@ -5598,6 +6875,7 @@ class MachineTurn:
             now = time.time()
             if busy:
                 quiet_since = None
+                self.blocking = [f"pid {pid}: {cmd[:120]}" for pid, cmd in busy[:3]]
                 if not told:
                     self.say(f"{INFO} Waiting for {len(busy)} other heavy run(s) that don't use the lock: "
                              + "; ".join(f"pid {pid}: {cmd[:80]}" for pid, cmd in busy[:3]))
@@ -5668,44 +6946,189 @@ def ssh_args(host):
     return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=60", host]
 
 
-REMOTE_NOT_READY = 4   # remote_lock_free's script: the other machine cannot run the command's tool
+# Sent to the other machine as a script of its own (that machine may run an older haam.py, or none outside a run).
+# It answers in JSON: the lock's live holder with its age, the live waiters, and the runs a ceiling stopped there.
+# A holder or a ticket whose process is gone counts as nothing (#1807): that machine's own exclusive takes a lock
+# left behind over, and drops a dead ticket, the moment it runs.
+# Given a tool (its second argument) and a free lock, it also runs `<tool> --version` in the login zsh a run there
+# uses, and answers `not_ready` with the first error line when that fails (kit #20): a new Xcode whose licence nobody
+# accepted makes every `make` exit 69, and a run handed over would fail at once and, by #924, never run here again.
+REMOTE_PROBE = r"""
+import json, os, subprocess, sys, time
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+repo = sys.argv[1] if os.path.isabs(sys.argv[1]) else os.path.join(os.path.expanduser("~"), sys.argv[1])
+try:
+    os.chdir(repo)
+    d = os.path.abspath(subprocess.run(["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True,
+                                       check=True).stdout.strip())
+except Exception:
+    sys.exit(3)
+lock, out = os.path.join(d, "%(lock)s"), {"holder": None, "waiting": 0, "stopped": []}
+if os.path.isdir(lock):
+    f = os.path.join(lock, "owner")
+    try:
+        owner = json.load(open(f))
+        pid = int(owner.get("pid") or 0)
+    except Exception:
+        owner, pid = None, 0
+    try:
+        age = time.time() - time.mktime(time.strptime(owner.get("since", ""), "%%Y-%%m-%%d %%H:%%M:%%S"))
+    except Exception:
+        try:
+            age = time.time() - os.stat(f if owner else lock).st_mtime
+        except OSError:
+            age = None
+    if owner is None:
+        if age is not None and age <= 30:
+            out["holder"] = {"who": "a run starting", "age_s": age}
+    elif owner.get("host") != os.uname().nodename or (pid > 0 and alive(pid)):
+        owner["age_s"] = age
+        out["holder"] = owner
+try:
+    names = os.listdir(os.path.join(d, "%(queue)s"))
+except OSError:
+    names = []
+for name in names:
+    pid = name.rsplit("-", 1)[-1]
+    if not (pid.isdigit() and not alive(int(pid))):
+        out["waiting"] += 1
+try:
+    out["stopped"] = [json.loads(x) for x in open(os.path.join(d, "%(stopped)s")).read().splitlines() if x.strip()]
+except (OSError, ValueError):
+    pass
+tool = sys.argv[2] if len(sys.argv) > 2 else ""
+if tool and not out["holder"] and not out["waiting"]:
+    try:
+        p = subprocess.run(["zsh", "-l", "-c", tool + " --version"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, text=True, timeout=20)
+        bad, err = p.returncode != 0, p.stderr
+    except Exception as e:
+        bad, err = True, str(e)
+    if bad:
+        lines = [x.strip() for x in (err or "").splitlines() if x.strip()]
+        out["not_ready"] = lines[0] if lines else tool + " --version failed"
+print(json.dumps(out))
+""" % {"lock": EXCLUSIVE_LOCK, "queue": EXCLUSIVE_QUEUE, "stopped": EXCLUSIVE_STOPPED}
+
+
+def remote_lock_state(host, repo, tool=None, errors=None):
+    """The other machine's lock as REMOTE_PROBE reads it there, with `free` added; None when it can't be read (then
+    `errors`, when given, gets the first error line). With `tool`, a machine that can't run it isn't free."""
+    first = ""
+    try:
+        cmd = f"python3 - {shlex.quote(repo)}" + (f" {shlex.quote(tool)}" if tool else "")
+        p = subprocess.run(ssh_args(host) + [cmd], input=REMOTE_PROBE, capture_output=True, text=True, timeout=60)
+        first = next((x.strip() for x in (p.stderr or "").splitlines() if x.strip()), "")
+        state = json.loads(p.stdout.strip().splitlines()[-1]) if p.returncode == 0 and p.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        state, first = None, first or str(e)
+    if not isinstance(state, dict):
+        if errors is not None:
+            errors.append(first or f"ssh {host} answered nothing")
+        return None
+    state["free"] = not state.get("holder") and not state.get("waiting") and not state.get("not_ready")
+    return state
 
 
 def remote_lock_free(host, repo, tool=None, warn=None):
-    """True when the other machine's clone has no heavy run holding or waiting for its lock, and, with `tool`, when
-    that machine can run it: `<tool> --version` in the login zsh the run itself uses. A runner whose tool fails (a new
-    Xcode whose licence nobody accepted makes every `make` exit 69) is not free, because a run handed to it would fail
-    at once and, by #924, never run here again. `warn` gets the probe's first error line."""
-    probe = ''
-    if tool:
-        cmd = shlex.quote(f'{shlex.quote(tool)} --version')
-        probe = (f'out=$(zsh -l -c {cmd} 2>&1 >/dev/null) || '
-                 f'{{ printf "%s\\n" "${{out:-{tool} --version failed}}" | head -n 1 >&2; exit {REMOTE_NOT_READY}; }}\n')
-    script = (f'cd {shlex.quote(repo)} 2>/dev/null || exit 3\n'
-              'd=$(git rev-parse --git-common-dir) || exit 3\n'
-              f'[ -d "$d/{EXCLUSIVE_LOCK}" ] && exit 1\n'
-              f'[ -n "$(ls -A "$d/{EXCLUSIVE_QUEUE}" 2>/dev/null)" ] && exit 1\n'
-              + probe +
-              'exit 0\n')
-    try:
-        p = subprocess.run(ssh_args(host) + ["sh -s"], input=script, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if p.returncode == REMOTE_NOT_READY and warn is not None:
-        warn((p.stderr or "").strip().splitlines()[0] if (p.stderr or "").strip() else f"{tool} --version failed")
-    return p.returncode == 0
+    """True when the other machine's clone has no live heavy run holding or waiting for its lock, and, with `tool`,
+    when that machine can run it. `warn` gets the probe's first error line when it can't."""
+    state = remote_lock_state(host, repo, tool)
+    if state and state.get("not_ready") and warn is not None:
+        warn(state["not_ready"])
+    return bool(state and state["free"])
 
 
-def remote_free_check(host, repo, tool, say):
-    """remote_lock_free for one wait, saying once (not on every poll) that the runner cannot run the tool."""
-    warned = []
+def remote_watch(host, repo, cfg, lock, say, tool=None):
+    """The `remote_free` check a waiting run makes: free or not, and on the way it says (once) when the other
+    machine's lock has been held far longer than any check takes, and posts once each notice that machine left:
+    a long hold, or a run its ceiling stopped (#1796). It also says once when that machine can't run `tool`
+    (kit #20) or its lock can't be read at all, since the run then stays here."""
+    told = set()
 
-    def warn(line):
-        if not warned:
-            warned.append(line)
-            say(f"{WARN} {host} can't run {tool} ({line[:200]}); staying here.")
+    def once(key, text):
+        if key not in told:
+            told.add(key)
+            say(text)
 
-    return lambda: remote_lock_free(host, repo, tool=tool, warn=warn)
+    def check():
+        errors = []
+        state = remote_lock_state(host, repo, tool, errors)
+        if not state:
+            once("unreadable", f"{WARN} Couldn't read {host}'s lock ({errors[0][:200]}); staying here.")
+            return False
+        if state.get("not_ready"):
+            once("not_ready", f"{WARN} {host} can't run {tool} ({state['not_ready'][:200]}); staying here.")
+        holder = state.get("holder") or {}
+        if holder.get("pid") and held_long(holder.get("age_s")):
+            key = f"held|{host}|{holder.get('pid')}|{holder.get('since')}"
+            if key not in told:
+                told.add(key)
+                say(f"{WARN} {host}'s lock has been held since {holder.get('since', '?')} "
+                    f"({say_age(holder['age_s'])}) by {holder.get('who', '?')}, far longer than any check takes: "
+                    "no run here goes there until it ends.")
+                post_notice(cfg, lock, key, holder.get("who"), long_hold_body(holder, host, holder["age_s"]), say)
+        notice_stopped(cfg, lock, state.get("stopped") or [], say)
+        return state["free"]
+    return check
+
+
+def notice_stopped(cfg, lock, records, say):
+    for rec in records:
+        post_notice(cfg, lock, f"stopped|{rec.get('host')}|{rec.get('pid')}|{rec.get('since')}", rec.get("who"),
+                    stopped_body(rec), say)
+
+
+def heavy_lock_report(root):
+    """[(level, text, detail)] for doctor: this machine's heavy-run lock, and the other machine's when one is set."""
+    out, lock = [], exclusive_lock_path(root)
+    owner = None
+    if lock.is_dir():
+        try:
+            owner = json.loads((lock / "owner").read_text())
+        except (OSError, ValueError):
+            owner = {}
+    if owner is None:
+        out.append(("ok", "Heavy-run lock here: free", ""))
+    elif owner.get("host") == os.uname().nodename and not pid_alive(int(owner.get("pid") or 0)):
+        out.append(("info", "Heavy-run lock here: left by a run that ended", "the next exclusive takes it over"))
+    else:
+        age = lock_age_seconds(owner, lock / "owner")
+        long_ = held_long(age)
+        out.append(("warn" if long_ else "info",
+                    f"Heavy-run lock here: held by {owner.get('who', '?')} since {owner.get('since', '?')}"
+                    + (f" ({say_age(age)}), far longer than any check takes" if long_ else ""),
+                    f"pid {owner.get('pid', '?')}" + ("; compare its CPU time with its elapsed time "
+                                                      "(ps -o pid,etime,time,command -p <pid>)" if long_ else "")))
+    if lock.with_name(EXCLUSIVE_LOG).exists():
+        week = run_log_summary(read_run_log(lock), 7)["total"]
+        out.append(("info", f"Heavy runs here, last 7 days: {week['runs']}, median wait "
+                    f"{say_seconds(week['wait_median_s'])}, longest {say_seconds(week['wait_max_s'])}",
+                    "per day: python3 tools/haam/haam.py exclusive --report"))
+    host = os.environ.get(REMOTE_RUNNER_ENV, "").strip()
+    if host:
+        repo = os.environ.get(REMOTE_REPO_ENV, "").strip() or remote_repo_default(root)
+        state = remote_lock_state(host, repo)
+        holder = (state or {}).get("holder") or {}
+        if state is None:
+            out.append(("warn", f"{host}'s heavy-run lock: couldn't be read", f"ssh {host}, repo {repo}"))
+        elif holder and held_long(holder.get("age_s")):
+            out.append(("warn", f"{host}'s heavy-run lock: held by {holder.get('who', '?')} since "
+                        f"{holder.get('since', '?')} ({say_age(holder['age_s'])}), far longer than any check takes",
+                        f"pid {holder.get('pid', '?')} there; no run goes there until it ends"))
+        elif holder or state.get("waiting"):
+            out.append(("info", f"{host}'s heavy-run lock: busy", f"held by {holder.get('who', 'nobody')}, "
+                        f"{state.get('waiting', 0)} waiting"))
+        else:
+            out.append(("ok", f"{host}'s heavy-run lock: free", "make runs go there when this machine is busy"))
+    return out
 
 
 def snapshot_commit(root):
@@ -5739,9 +7162,23 @@ def snapshot_commit(root):
 REMOTE_SETUP_FAILED = 97
 
 
-def run_remote(host, repo, command, who, root, say):
-    """Run `command` on `host` in a temporary worktree of the same commit, through that host's own `exclusive`.
-    Returns the command's exit code, or None when the run could not start there (the caller waits here instead)."""
+def running_note(who, command):
+    """What `exclusive` says as its command starts. A remote run's is how this machine knows the command started
+    there (#924)."""
+    return f"{who}: running {' '.join(command)}"
+
+
+def run_remote(host, repo, command, who, root, say, timeout_min=60.0, quiet_s=10.0, max_run=None, log=None):
+    """Run `command` on `host` in a temporary worktree of the same commit, through that host's own `exclusive`,
+    which waits as long as this run was told to (`timeout_min`, `quiet_s`) and stops the command after `max_run`
+    minutes (REMOTE_MAX_RUN_MINUTES when not given: a run there must never hold that machine for days, #1796).
+    Returns the command's exit code, or None when the command never started there (the caller waits here instead).
+    `log`, a run's log record, gets `started` when the command starts there.
+
+    ⛔ A COMMAND THAT STARTED THERE IS NEVER RUN AGAIN HERE (#924). ssh's 255 means "the connection failed", before the
+    run or in the middle of it: on 2 Nov 2026 the connection timed out 40 minutes into `make check`, and the whole
+    run started again on the laptop. So the output is read as it streams back, and once the other machine's
+    `exclusive` says its command is running, its exit code is the answer, a dropped connection included."""
     sha = snapshot_commit(root)
     if not sha:
         say(f"{WARN} Couldn't make a commit of this tree to send to {host}; staying here.")
@@ -5750,56 +7187,128 @@ def run_remote(host, repo, command, who, root, say):
     ref = f"refs/haam-remote/{run_id}"
     # The clone's own core.sshCommand may pin a GitHub key the other machine doesn't accept: use plain ssh there.
     ssh_cmd = " ".join(shlex.quote(a) for a in ssh_args(host)[:-1])
-    push = subprocess.run(["git", "-c", f"core.sshCommand={ssh_cmd}", "push", "--quiet", f"{host}:{repo}", f"{sha}:{ref}"],
+    # This machine's main goes too (#1869): the other clone's origin/main is its own and may be days older, so a
+    # check that diffs the branch against main (check-changed) saw every file merged since and ran everything.
+    # The run gets it as HAAM_BASE_COMMIT, and the commit itself rides along under <ref>-base.
+    default = load_config(root).get("default_branch") or "main"
+    base = git_out(root, "rev-parse", "--verify", "-q", f"refs/remotes/origin/{default}^{{commit}}")
+    refspecs = [f"{sha}:{ref}"] + ([f"{base}:{ref}-base"] if base else [])
+    push = subprocess.run(["git", "-c", f"core.sshCommand={ssh_cmd}", "push", "--quiet", f"{host}:{repo}", *refspecs],
                           cwd=root, capture_output=True, text=True)
     if push.returncode != 0:
         say(f"{WARN} Couldn't send commit {sha[:9]} to {host} ({(push.stderr or push.stdout).strip()[:200]}); staying here.")
         return None
     remote_cmd = " ".join(shlex.quote(c) for c in command)
-    remote_who = shlex.quote(f"{who} (from {socket.gethostname().split('.')[0]})")
+    there_who = f"{who} (from {socket.gethostname().split('.')[0]})"
+    remote_who = shlex.quote(there_who)
     script = f"""set -u
 repo={shlex.quote(repo)}
 case "$repo" in /*) ;; *) repo="$HOME/$repo" ;; esac
 ref={shlex.quote(ref)}
 wt="$(dirname "$repo")/connect-wt/haam-remote-{run_id}"
 mkdir -p "$(dirname "$wt")"
-cleanup() {{ cd "$HOME"; git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1; git -C "$repo" update-ref -d "$ref" >/dev/null 2>&1; }}
+cleanup() {{ cd "$HOME"; git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1; git -C "$repo" update-ref -d "$ref" >/dev/null 2>&1; git -C "$repo" update-ref -d "$ref-base" >/dev/null 2>&1; }}
 trap cleanup EXIT
 git -C "$repo" worktree add --quiet --detach "$wt" "$ref" < /dev/null || exit {REMOTE_SETUP_FAILED}
 cd "$wt" || exit {REMOTE_SETUP_FAILED}
+{f"export HAAM_BASE_COMMIT={base}" if base else "unset HAAM_BASE_COMMIT"}
 echo "▶ $(hostname -s): {sha[:9]} in a temporary worktree"
 python3 tools/haam/haam.py worktree prep < /dev/null > /dev/null 2>&1
 if [ -f Makefile ] && grep -qE '^setup:' Makefile; then
-  make setup < /dev/null > .haam-remote-setup.log 2>&1 || {{ tail -20 .haam-remote-setup.log; exit {REMOTE_SETUP_FAILED}; }}
+  # The log goes in the worktree's own git folder, never its tree: an untracked file there is a change to every
+  # check that reads the tree (#1869: check-changed planned everything for it).
+  setup_log="$(git rev-parse --git-dir)/haam-remote-setup.log"
+  make setup < /dev/null > "$setup_log" 2>&1 || {{ tail -20 "$setup_log"; exit {REMOTE_SETUP_FAILED}; }}
 fi
-python3 tools/haam/haam.py exclusive {remote_who} -- {remote_cmd} < /dev/null
+{NOTICE_ENV}=off python3 tools/haam/haam.py exclusive --timeout {timeout_min:g} --quiet {quiet_s:g} --max-run {max_run or REMOTE_MAX_RUN_MINUTES:g} {remote_who} -- {remote_cmd} < /dev/null 2>&1
 """
     say(f"{INFO} {host} is free: running {remote_cmd} there on {sha[:9]}.")
+    started, seen, note = False, b"", running_note(there_who, command).encode()
     try:
-        p = subprocess.run(ssh_args(host) + ["zsh -l -s"], input=script, text=True)
-    except (OSError, subprocess.SubprocessError) as e:
+        p = subprocess.Popen(ssh_args(host) + ["zsh -l -s"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    except OSError as e:
         say(f"{WARN} ssh to {host} failed ({e}); staying here.")
         return None
-    if p.returncode in (REMOTE_SETUP_FAILED, 124, 255):
-        say(f"{WARN} The run didn't start on {host} (exit {p.returncode}); staying here.")
+    try:
+        try:
+            p.stdin.write(script.encode())
+            p.stdin.close()
+        except OSError:
+            pass                # ssh ended before reading the script: its exit code says why
+        out = sys.stdout.buffer
+        while True:
+            chunk = os.read(p.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            out.write(chunk)
+            out.flush()
+            if not started:
+                seen = seen[-len(note):] + chunk
+                started = note in seen
+                if started and log is not None:
+                    log["started"] = now_stamp()
+        code = p.wait()
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+    if started and code == 255:
+        say(f"{BAD} The connection to {host} dropped during the run (exit 255). It is not run again here: "
+            "its result is unknown, so run it again.")
+        return code
+    if not started and code in (REMOTE_SETUP_FAILED, 124, 255):
+        say(f"{WARN} The run didn't start on {host} (exit {code}); staying here.")
         return None
-    say(f"{INFO} {who}: finished on {host} with exit {p.returncode}.")
-    return p.returncode
+    say(f"{INFO} {who}: finished on {host} with exit {code}.")
+    return code
+
+
+def run_with_ceiling(command, max_run, say, who):
+    """Run `command` and wait for it; past `max_run` minutes (None: no limit), end it and everything it started.
+    Returns (exit code, None) or (RUN_CEILING_EXIT, a record of the stop). Interrupted (Ctrl-C, a signal), it ends
+    the command before passing the interruption on, so the lock is never released under a run still going."""
+    since, started = time.strftime("%Y-%m-%d %H:%M:%S"), time.time()
+    say(f"{INFO} {running_note(who, command)}")
+    child = subprocess.Popen(command)
+    try:
+        return child.wait(timeout=max_run * 60 if max_run else None), None
+    except subprocess.TimeoutExpired:
+        stop_tree(child)
+        return RUN_CEILING_EXIT, {"who": who, "pid": os.getpid(), "since": since, "command": " ".join(command),
+                                  "host": os.uname().nodename if hasattr(os, "uname") else "",
+                                  "minutes": round((time.time() - started) / 60)}
+    except BaseException:
+        if child.poll() is None:
+            stop_tree(child)
+        raise
 
 
 def cmd_exclusive(args):
     """Run a heavy command (one that uses a machine-wide resource) when no other one is running on this machine."""
+    if getattr(args, "report", False):
+        lock = exclusive_lock_path(find_repo_root(Path.cwd()))
+        summary = run_log_summary(read_run_log(lock), args.days)
+        if args.json:
+            print(json.dumps(summary, indent=2))
+        else:
+            print_run_report(summary, str(lock.with_name(EXCLUSIVE_LOG)))
+        return
+    if not args.who:
+        sys.exit('Say who is asking, then the command after --, e.g. haam.py exclusive "chat A, #12" -- make check '
+                 '(or --report for how long runs waited)')
     command = list(args.command or [])
     if "--" in command:     # options given after <who> land here too: read them, then the command after --
         k = command.index("--")
         pre = argparse.ArgumentParser(prog="haam.py exclusive", add_help=False)
         pre.add_argument("--timeout", type=float)
         pre.add_argument("--quiet", type=float)
+        pre.add_argument("--max-run", type=float)
         opts, extra = pre.parse_known_args(command[:k])
         if extra:
             sys.exit(f"Unknown option(s) before --: {' '.join(extra)}")
         args.timeout = opts.timeout if opts.timeout is not None else args.timeout
         args.quiet = opts.quiet if opts.quiet is not None else args.quiet
+        args.max_run = opts.max_run if opts.max_run is not None else args.max_run
         command = command[k + 1:]
     if not command:
         sys.exit('Give the command after --, e.g. haam.py exclusive "chat A, #12" -- make check')
@@ -5807,43 +7316,76 @@ def cmd_exclusive(args):
     cfg = load_config(root)
     patterns = cfg.get("heavy_runs") or []
     say = lambda m: print(m, file=sys.stderr, flush=True)  # noqa: E731
+    lock = exclusive_lock_path(root)
     host = os.environ.get(REMOTE_RUNNER_ENV, "").strip()
     remote_free = None
     if host and remote_eligible(command):
         repo = os.environ.get(REMOTE_REPO_ENV, "").strip() or remote_repo_default(root)
-        remote_free = remote_free_check(host, repo, Path(command[0]).name, say)
-    child = None
+        remote_free = remote_watch(host, repo, cfg, lock, say, tool=Path(command[0]).name)
+
+    # This run's line in the log (log_run), written whatever the outcome. `machine` is where the command ran.
+    branch = git_out(root, "rev-parse", "--abbrev-ref", "HEAD")
+    rec = {"who": args.who, "command": " ".join(command)[:500], "branch": None if branch in ("", "HEAD") else branch,
+           "head": git_out(root, "rev-parse", "--short", "HEAD") or None, "asked": now_stamp(), "started": None,
+           "ended": None, "exit": None, "machine": short_host(), "remote": False, "fell_back": False,
+           "stopped": False, "nested": False}
+
+    def long_hold(owner, age):
+        post_notice(cfg, lock, f"held|{owner.get('host')}|{owner.get('pid')}|{owner.get('since')}", owner.get("who"),
+                    long_hold_body(owner, "this machine", age), say)
+
+    def here(place=None):
+        """Wait for this machine and run the command here. The lock is free again before a stop is reported, so a
+        report that can't be written (the connection that started this run is gone) never holds the machine."""
+        nonlocal turn
+        turn = MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say, remote_free=remote_free,
+                           place=place, on_long_hold=long_hold)
+        with turn:
+            rec["nested"], rec["started"] = turn.nested, now_stamp()
+            code, stopped = run_with_ceiling(command, args.max_run, say, args.who)
+        rec["stopped"] = bool(stopped)
+        if stopped:
+            record_stopped(lock, stopped)
+            say(f"{BAD} {args.who}: stopped after {stopped['minutes']} min, its ceiling (--max-run {args.max_run:g}): "
+                f"the run made no end, and the lock is free again. Its result is unknown (exit {RUN_CEILING_EXIT}).")
+            notice_stopped(cfg, lock, [stopped], say)
+        return code
+
+    turn = None
+    final = 1       # the exit code this process ends with, for the log
     try:
         try:
-            turn = MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say, remote_free=remote_free)
-            with turn:
-                say(f"{INFO} {args.who}: running {' '.join(command)}")
-                child = subprocess.Popen(command)
-                code = child.wait()
-                child = None
-                sys.exit(code)
-        except RemoteTurn:
-            code = run_remote(host, repo, command, args.who, root, say)
-            if code is not None:
-                sys.exit(code)
-            with MachineTurn(args.who, patterns, args.timeout, args.quiet, say=say):
-                say(f"{INFO} {args.who}: running {' '.join(command)}")
-                child = subprocess.Popen(command)
-                code = child.wait()
-                child = None
-                sys.exit(code)
-    except TimeoutError:
-        print(f"✘ Gave up after {args.timeout:g} minutes: the machine was still busy. Nothing was run.", file=sys.stderr)
-        sys.exit(124)
-    except FileNotFoundError:
-        sys.exit(f"Command not found: {command[0]}")
-    finally:
-        if child is not None and child.poll() is None:
-            child.terminate()
             try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                child.kill()
+                sys.exit(here())
+            except RemoteTurn as away:
+                remote_free = None
+                rec["remote"], rec["machine"] = True, host
+                code = run_remote(host, repo, command, args.who, root, say, args.timeout, args.quiet, args.max_run,
+                                  log=rec)
+                if code == RUN_CEILING_EXIT:
+                    rec["stopped"] = True
+                    state = remote_lock_state(host, repo)
+                    notice_stopped(cfg, lock, (state or {}).get("stopped") or [], say)
+                if code is not None:
+                    sys.exit(code)
+                rec.update(remote=False, fell_back=True, machine=short_host(), started=None)
+                sys.exit(here(away.place))
+        except TimeoutError:
+            waiting = f", waiting for {'; '.join(turn.blocking)}" if turn is not None and turn.blocking else ""
+            print(f"✘ Gave up after {args.timeout:g} minutes: the machine was still busy{waiting}. Nothing was run.",
+                  file=sys.stderr)
+            sys.exit(124)
+        except FileNotFoundError:
+            sys.exit(f"Command not found: {command[0]}")
+    except SystemExit as e:
+        final = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        raise
+    except KeyboardInterrupt:
+        final = 130
+        raise
+    finally:
+        rec["exit"], rec["ended"] = final, now_stamp()
+        log_run(lock, rec)
 
 
 def paths_in_use():
@@ -6187,6 +7729,582 @@ def cmd_production(args):
     sys.exit(1 if hits and args.check else 0)
 
 
+# ----------------------------------------------------------------------------- uat: agents-verify (the verify lane)
+# A change that needs no person to judge it, and touches none of the owner's own areas (owner_test_paths), is verified
+# by an independent agent at the handed-over commit instead of waiting in UAT. Its marks are its own (the commit status
+# `agent-verified`, the label `verified-by-agents`, a 🔎 comment), never the owner's (`uat`, `uat-passed`, `uat:skip`),
+# and it ships only on the owner's `ship`. `issue_lane`, `verification_state` and `verified_head_counts` are what
+# `ship` and the gate's helpers call.
+
+OWNER_TEST_LABEL = "owner-test"
+LANE_LABEL_NAMES = {"verifying", "verified-by-agents", "verify-failed", OWNER_TEST_LABEL, "spot-check"}
+LANE_KEYS = ("uat", "owner_test_paths", "agents_verify_shadow", "max_review_rounds")
+VERIFY_CLAIM_WHAT = " to verify it"
+READY_VERIFY_MARK, READY_UAT_MARK = "🧪 Ready for verification", "🧪 Ready for UAT"
+VERIFIED_MARK, NOT_VERIFIED_MARK, NEEDS_OWNER_MARK = "🔎 Verified by agents", "🔎 Not verified", "🔎 Needs your test"
+PULLED_BACK_MARK = "↩️ Pulled back"
+VERIFIED_CONTEXT = "agent-verified"
+VERIFY_DOCS_ONLY = ("docs/uat/", "docs/changes/")   # a tip that differs from the verified commit only here still counts
+SPOT_CHECK_EVERY = 10
+SPIKE_COMMIT = re.compile(r"^(?:\S+:\s*)?spike:", re.I)     # as the gate reads a kept prototype's commits
+PLAN_KEYS = (("needs_person", "Needs a person"), ("verified_at", "Verified at"), ("risk", "Risk"), ("undo", "Undo"))
+OTHER_PHASES = (" to assess it", " to write its spec", " to build a prototype", VERIFY_CLAIM_WHAT)
+
+
+def owner_test_areas(cfg):
+    """owner_test_paths as {area: [patterns]} (a list of "area=pattern" strings is read too)."""
+    raw = (cfg or {}).get("owner_test_paths") or {}
+    areas = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            pats = [v] if isinstance(v, str) else list(v or [])
+            pats = [str(x).strip() for x in pats if str(x).strip()]
+            if str(k).strip() and pats:
+                areas[str(k).strip()] = pats
+    elif isinstance(raw, list):
+        for item in raw:
+            name, _, pat = str(item).partition("=")
+            if name.strip() and pat.strip():
+                areas.setdefault(name.strip(), []).append(pat.strip())
+    return areas
+
+
+def set_owner_test_area(areas, value):
+    """One `--set owner_test_paths=…`: `<area>=<pattern>,<pattern>` sets that area, `<area>=` removes it, and an empty
+    value empties the list."""
+    value = value.strip()
+    if not value:
+        return {}
+    name, eq, pats = value.partition("=")
+    name = name.strip()
+    if not eq or not re.fullmatch(r"[\w][\w .:/+-]*", name):
+        sys.exit("owner_test_paths takes <area>=<pattern>,<pattern> (e.g. owner_test_paths=sign-in=src/auth/**), "
+                 "<area>= to remove an area, or nothing to empty the list")
+    out = dict(areas)
+    pats = [x.strip() for x in pats.split(",") if x.strip()]
+    if pats:
+        out[name] = pats
+    else:
+        out.pop(name, None)
+    return out
+
+
+def lane_config(root):
+    """The lane's settings as the default branch has them (origin first: what the gate reads), so a branch can't
+    change its own lane; the rest of the config as this folder has it."""
+    _, main, _ = git_paths(root)
+    try:
+        cfg = dict(load_config(root))
+    except SystemExit:
+        cfg = {}
+    base = cfg.get("default_branch") or "main"
+    for spec in (f"origin/{base}:{CONFIG_NAME}", f"{base}:{CONFIG_NAME}"):
+        raw = git_out(main, "show", spec)
+        if not raw:
+            continue
+        try:
+            on_main = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for k in LANE_KEYS:
+            cfg[k] = on_main.get(k)
+        return cfg
+    return cfg
+
+
+def branch_files(root, base, head):
+    """The files a branch changes against the base, a renamed or copied file by both names (as the gate reads them)."""
+    code, out, err = run(["git", "diff", "--name-status", "-M", f"{base}...{head}"], cwd=root)
+    if code != 0:
+        raise RuntimeError(f"Couldn't compare {head[:12]} with {base}: {(err or '').strip()[:160]}")
+    files = []
+    for line in out.splitlines():
+        for f in line.split("\t")[1:]:
+            if f and f not in files:
+                files.append(f)
+    return files
+
+
+def find_plan(root, ref, branch, head):
+    """(path, text) of the issue's UAT plan at the branch's head (a batch's plan is named after the branch's issue)."""
+    listed = git_out(root, "ls-tree", "--name-only", head, "docs/uat/").splitlines()
+    for r in dict.fromkeys(x for x in (ref, branch_issue(branch, ref)) if x is not None):
+        for path in sorted(listed):
+            if path.rsplit("/", 1)[-1].startswith(f"{file_id(r)}-") and path.endswith(".md"):
+                return path, git_out(root, "show", f"{head}:{path}")
+    return None, ""
+
+
+def plan_lines(text):
+    """The Agent pre-check lines of a UAT plan: {needs_person, verified_at, risk, undo} (those it has)."""
+    text = text or ""
+    m = re.search(r"(?m)^#+ .*Agent pre-check.*$", text)
+    if m:
+        rest = text[m.end():]
+        nxt = re.search(r"(?m)^## ", rest)
+        text = rest[:nxt.start()] if nxt else rest
+    out = {}
+    for key, label in PLAN_KEYS:
+        found = re.search(rf"(?mi)^\s*(?:[-*]\s+)?\**\s*{re.escape(label)}\s*:\s*\**\s*(.*?)\s*(?:<!--.*)?$", text)
+        if found:
+            out[key] = found.group(1).strip()
+    return out
+
+
+def issue_labels(repo, number):
+    code, out, err = run(["gh", "issue", "view", str(number), "-R", repo, "--json", "labels"])
+    if code != 0:
+        raise RuntimeError(f"Couldn't read #{number}: {(err or out)[:160]}")
+    return [x.get("name") for x in (json.loads(out or "{}").get("labels") or [])]
+
+
+def lane_details(root, cfg, number, labels=None, branch=None, head=None, base=None):
+    """issue_lane with what it read: {lane, reason, branch, head, files, plan, plan_fields}."""
+    d = {"issue": number, "lane": "owner", "reason": "", "branch": branch, "head": head, "files": [], "plan": None,
+         "plan_fields": {}}
+
+    def owner(why):
+        d["reason"] = why
+        return d
+    uat = setting_value(cfg, "uat")
+    if uat != "agents-verify":
+        return owner(f"the setting uat is {uat}, not agents-verify: the owner tests it, as before")
+    if labels is None:
+        labels = issue_labels(cfg["github_repo"], number)
+    if OWNER_TEST_LABEL in labels:
+        return owner("label owner-test: the owner tests it themselves")
+    if "uat-failed" in labels:
+        return owner("label uat-failed: rework after the owner's failed test stays the owner's")
+    if not branch or not head:
+        found, target, _ = find_branch(root, cfg, number, branch)
+        if not found:
+            return owner(f"no branch found for #{number}")
+        d["branch"], branch = found, found
+        head = head or git_out(root, "rev-parse", "--verify", "--quiet", target)
+        d["head"] = head
+        if not head:
+            return owner(f"can't read the tip of {found}")
+    base = base or default_base(root)
+    d["files"] = files = branch_files(root, base, head)
+    for area, pats in owner_test_areas(cfg).items():
+        hits = protected_matches(pats, files)
+        if hits:
+            more = f" and {len(hits) - 1} more" if len(hits) > 1 else ""
+            return owner(f"changes {area} ({hits[0]}{more}), one of the owner's own areas (owner_test_paths)")
+    subjects = git_out(root, "log", "--format=%s", f"{base}..{head}").splitlines()
+    if any(SPIKE_COMMIT.match(s) for s in subjects):
+        return owner("built from a prototype (spike: commits)")
+    d["plan"], text = find_plan(root, number, branch, head)
+    d["plan_fields"] = fields = plan_lines(text)
+    need = fields.get("needs_person") or ""
+    if re.match(r"(?i)yes\b", need):
+        why = re.sub(r"(?i)^yes\b[\s:,-]*", "", need).strip()
+        return owner(f"needs a person: {why.strip('()') or 'the plan says so'}")
+    if not re.match(r"(?i)no\b", need):
+        return owner("the plan has no line `Needs a person: yes (<why>)` or `no`" if d["plan"] else
+                     "no UAT plan on the branch (docs/uat/), so no `Needs a person:` line")
+    d["lane"] = "agents"
+    d["reason"] = "needs no person, and changes none of the owner's own areas"
+    return d
+
+
+def issue_lane(root, cfg, number, labels=None, branch=None, head=None, base=None):
+    """Who checks this ticket: ("agents", why) or ("owner", the first reason that applies). cfg: lane_config(root).
+    Reads the branch's changed files against the base (default origin/main), so fetch first."""
+    d = lane_details(root, cfg, number, labels=labels, branch=branch, head=head, base=base)
+    return d["lane"], d["reason"]
+
+
+def verdict_records(comments):
+    """The verifier's 🔎 records, oldest first: {verdict, branch, head, claim, tool, at, reason}."""
+    out = []
+    for c in comments:
+        body = c.get("body") or ""
+        verdict = ("verified" if body.startswith(VERIFIED_MARK) else "not-verified" if body.startswith(NOT_VERIFIED_MARK)
+                   else "needs-owner" if body.startswith(NEEDS_OWNER_MARK) else None)
+        if not verdict:
+            continue
+        first = body.splitlines()[0]
+        get = lambda pat: (re.search(pat, first) or [None, ""])[1]
+        out.append({"verdict": verdict, "branch": get(r"branch `([^`]+)`"), "head": get(r"· head ([0-9a-f]{7,40})"),
+                    "claim": get(r"· claim ([0-9a-f]{6,})"), "tool": get(r"· claim [0-9a-f]{6,} · (.+)$").strip(),
+                    "at": c.get("createdAt"), "shadow": "\n\nShadow start: " in body,
+                    "reason": get(r"^🔎 Needs your test: (.*?) · branch") if verdict == "needs-owner" else ""})
+    return out
+
+
+def build_claim_tokens(comments):
+    """The ids of every build claim the issue ever had (claims to assess, spec, prototype or verify aren't builds)."""
+    return {claim_token(c.get("body")) for c in comments if (c.get("body") or "").startswith(CLAIM_MARK)
+            and not any(w in (c.get("body") or "") for w in OTHER_PHASES)} - {""}
+
+
+def verified_head_counts(root, verified_sha, tip_sha):
+    """Whether a verification of `verified_sha` still covers the branch at `tip_sha`: the same commit, or one that
+    differs from it only in files under docs/uat/ or docs/changes/ (the plan and the release note). Needs both commits
+    here (fetch first); False when it can't tell."""
+    if not verified_sha or not tip_sha:
+        return False
+    a, b = verified_sha.lower(), tip_sha.lower()
+    if len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a)):
+        return True
+    code, out, _ = run(["git", "diff", "--name-only", "--no-renames", a, b], cwd=root)
+    if code != 0:
+        return False
+    return all(f.startswith(VERIFY_DOCS_ONLY) for f in out.splitlines())
+
+
+def verification_state(root, cfg, number, labels, comments, head):
+    """Whether the ticket counts as verified by agents at the branch's `head` now: {verified, why, verified_at, claim,
+    tool, at}. Needs the verdict comment, the label, no owner-test, a head the verification still covers
+    (verified_head_counts) and the agent-verified status on the verified commit. shadow: verified during the shadow
+    start (agents_verify_shadow), so the owner still tests it and only their pass ships it."""
+    recs = verdict_records(comments)
+    rec = recs[-1] if recs else None
+    st = {"verified": False, "why": "", "verified_at": None, "claim": None, "tool": None, "at": None,
+          "shadow": False}
+    if rec and rec["verdict"] == "verified":
+        st.update(verified_at=rec["head"], claim=rec["claim"], tool=rec["tool"], at=rec["at"], shadow=rec["shadow"])
+    if OWNER_TEST_LABEL in labels:
+        st["why"] = "pulled back: the owner tests it (owner-test)"
+    elif not rec or rec["verdict"] != "verified":
+        st["why"] = ("sent back by the verifier (verify-failed)" if rec and rec["verdict"] == "not-verified"
+                     else "the verifier asked for the owner's test" if rec and rec["verdict"] == "needs-owner"
+                     else "waiting for a verifier" if "verifying" in labels else "not verified")
+    elif "verified-by-agents" not in labels:
+        st["why"] = "no label verified-by-agents"
+    elif not verified_head_counts(root, rec["head"], head):
+        st["why"] = (f"the branch moved on since the verified commit {rec['head'][:8]} (now {(head or '?')[:8]}): "
+                     "it needs verifying again")
+    elif not status_ok(cfg["github_repo"], rec["head"], VERIFIED_CONTEXT):
+        st["why"] = f"no {VERIFIED_CONTEXT} status on {rec['head'][:8]}"
+    else:
+        st["verified"] = True
+        st["why"] = f"verified by agents at {rec['head'][:8]} (claim {rec['claim']})"
+    return st
+
+
+def ensure_labels(repo, names):
+    for name, color, desc in GITHUB_LABELS:
+        if name in names:
+            run(["gh", "label", "create", name, "-R", repo, "--color", color, "--description", desc, "--force"])
+
+
+def edit_issue_labels(repo, number, add=(), remove=(), extra=()):
+    """Add and remove labels in one edit, creating the lane's labels if this repository doesn't have them yet."""
+    cmd = ["gh", "issue", "edit", str(number), "-R", repo] + list(extra)
+    for x in add:
+        cmd += ["--add-label", x]
+    for x in remove:
+        cmd += ["--remove-label", x]
+    if len(cmd) == 6:
+        return
+    code, out, err = run(cmd)
+    if code != 0 and "not found" in (err or out or "").lower():
+        ensure_labels(repo, set(add))
+        code, out, err = run(cmd)
+    if code != 0:
+        raise RuntimeError(err or out)
+
+
+def verify_claim_refusal(cfg, iss):
+    """Why `issue claim --for verify` can't take this issue (None: it can)."""
+    lcfg = lane_config(find_repo_root(Path.cwd()))
+    n, labels = iss["number"], iss["labels"] or []
+    if setting_value(lcfg, "uat") != "agents-verify":
+        return "Nothing is verified by agents here: the setting uat isn't agents-verify on main."
+    if OWNER_TEST_LABEL in labels:
+        return f"#{n} has owner-test: the owner tests it themselves."
+    if "spot-check" in labels and iss["status"] in ("In Review", "UAT"):
+        return None
+    if "verified-by-agents" in labels and "verifying" not in labels and iss["status"] == "In Review":
+        # A later push ended the verification: the new head is verified again
+        root = find_repo_root(Path.cwd())
+        run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+        branch, target, _ = find_branch(root, lcfg, n)
+        head = git_out(root, "rev-parse", "--verify", "--quiet", target) if branch else ""
+        if head and not verification_state(root, lcfg, n, labels, issue_comments(lcfg["github_repo"], n),
+                                           head)["verified"]:
+            return None
+        return f"#{n} is verified by agents at its head already."
+    if "verifying" not in labels or iss["status"] != "In Review":
+        return (f"#{n} isn't waiting for a verifier (status {iss['status'] or '-'}, no label verifying). "
+                "/uat hands a ticket over with `haam.py handover`.")
+    return None
+
+
+def pull_back_to_owner(cfg, board, iss):
+    """owner-test was just added: the owner tests it themselves. A ticket waiting in the agents' lane goes to UAT."""
+    repo, n = cfg["github_repo"], iss["number"]
+    moved = ""
+    if iss["status"] == "In Review" and ({"verifying", "verified-by-agents"} & set(iss["labels"] or [])):
+        board.set_option(iss, "Status", "UAT")
+        moved = "; status UAT (the owner's test)"
+    run(["gh", "issue", "comment", str(n), "-R", repo, "--body",
+         f"{PULLED_BACK_MARK}: the owner tests #{n} themselves (label `{OWNER_TEST_LABEL}`). It leaves the agents' "
+         "lane, and no release takes it until they pass it."])
+    return moved
+
+
+def remote_tip(repo, branch):
+    code, ref_, _ = gh_api("GET", f"repos/{repo}/git/ref/heads/{branch}")
+    return ((ref_ or {}).get("object") or {}).get("sha") if code == 0 and isinstance(ref_, dict) else None
+
+
+def lane_start(args, what):
+    """(root, the folder's config, the lane's config, issue number, repo) for lane / handover / verify-result."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    if cfg.get("tracker") != "github":
+        sys.exit(f"{what} reads the issue's labels and comments on GitHub: the agents-verify lane needs the GitHub "
+                 "tracker (Linear: every change stays the owner's test).")
+    run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+    return root, cfg, lane_config(root), parse_issue_number(args.issue), cfg["github_repo"]
+
+
+def cmd_lane(args):
+    """Who checks this ticket under uat: agents-verify: `agents` (an independent verifier) or `owner` (the owner's own
+    test), with the first reason that applies; and whether a verification still counts."""
+    root, cfg, lcfg, number, repo = lane_start(args, "lane")
+    try:
+        d = lane_details(root, lcfg, number, branch=args.branch)
+        if d["lane"] == "agents":
+            d["verification"] = verification_state(root, lcfg, number, issue_labels(repo, number),
+                                                    issue_comments(repo, number), d["head"])
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return
+    print(f"{d['lane']}: {d['reason']}")
+    if d.get("branch") and d.get("head"):
+        print(f"   branch {d['branch']} at {d['head'][:8]}" + (f" · plan {d['plan']}" if d.get("plan") else ""))
+    v = d.get("verification")
+    if v:
+        print(f"   {OK if v['verified'] else INFO} {v['why']}")
+
+
+def cmd_handover(args):
+    """/uat's hand-over (GitHub Projects): the lane decides where a built ticket goes. agents: status In Review, label
+    verifying and `🧪 Ready for verification`; owner: status UAT and `🧪 Ready for UAT` with the reason."""
+    root, cfg, lcfg, number, repo = lane_start(args, "handover")
+    board = GHProject(cfg)
+    try:
+        board.load()
+        iss = board.issue(number)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if is_claimed(iss) and not claim_is_mine(repo, number, args):
+        sys.exit(f"#{number} is claimed by another chat: only the chat that built it hands it over (from its branch, "
+                 "or with --claim <its id>).")
+    try:
+        branch, target, _ = find_branch(root, cfg, number, args.branch)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if not branch or not (target or "").startswith("origin/"):
+        sys.exit(f"Push the branch first: the hand-over is what's on GitHub ({branch or 'no branch found'}).")
+    head = git_out(root, "rev-parse", target)
+    try:
+        d = lane_details(root, lcfg, number, labels=iss["labels"], branch=branch, head=head)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    summary = Path(args.body_file).read_text().strip() if args.body_file else ""
+    plan = d["plan"] or find_plan(root, number, branch, head)[0]
+    f = d["plan_fields"]
+    owner = cfg.get("product_owner_github")
+    if d["lane"] == "agents":
+        bad = []
+        if not re.fullmatch(r"[0-9a-f]{40}", (f.get("verified_at") or "").lower()):
+            bad.append("`Verified at: <the 40-character commit your evidence is from>`")
+        elif not verified_head_counts(root, f["verified_at"], head):
+            bad.append(f"`Verified at: {f['verified_at'][:12]}…` differs from the head {head[:8]} in more than "
+                       "docs/uat/ and docs/changes/: run the evidence again at the head and name it")
+        if not re.match(r"(?i)(low|medium|high)\s*[:·-]\s*\S", f.get("risk") or "") or "<" in (f.get("risk") or ""):
+            bad.append("`Risk: low|medium|high: <one line>`")
+        if not f.get("undo") or "<" in f["undo"]:
+            bad.append("`Undo: <how to undo it>`")
+        if bad:
+            sys.exit(f"The plan ({plan}) needs these lines under Agent pre-check before a verifier can take it: "
+                     + "; ".join(bad))
+        try:
+            edit_issue_labels(repo, number, add=["verifying"],
+                              remove=[x for x in ("verify-failed", "verified-by-agents") if x in iss["labels"]])
+        except RuntimeError as e:
+            sys.exit(f"Couldn't label #{number}: {e}")
+        board.set_option(iss, "Status", "In Review")
+        status = "In Review"
+        body = (f"{READY_VERIFY_MARK} · branch `{branch}` · head {head}\n\n"
+                f"Lane: agents ({d['reason']}). Risk: {f['risk']}. Undo: {f['undo']}.\nPlan: `{plan}`"
+                + (f"\n\n{summary}" if summary else ""))
+    else:
+        board.set_option(iss, "Status", "UAT")
+        status = "UAT"
+        fully = re.search(r"(?i)Fully verified by the agent:\**\s*yes", find_plan(root, number, branch, head)[1] or "")
+        body = (f"{READY_UAT_MARK} · your test: {d['reason']} · branch `{branch}` · head {head}\n\n"
+                + ("✔ Fully verified by the agent\n" if fully and setting_value(lcfg, "uat") != "agents-verify" else "")
+                + (f"Plan: `{plan}`" if plan else "") + (f"\n\n{summary}" if summary else "")
+                + (f"\n\n@{owner}" if owner else ""))
+    code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
+    if code != 0:
+        sys.exit(f"Couldn't comment on #{number}: {(err or out)[:200]}")
+    res = {"issue": number, "lane": d["lane"], "reason": d["reason"], "status": status, "branch": branch, "head": head,
+           "plan": plan}
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"{OK} #{number} → {status} ({d['lane']}: {d['reason']})")
+    print("   A verifier takes it: /work verify, or /next." if d["lane"] == "agents" else
+          f"   The owner tests it: /test {number}")
+
+
+def checklist(text):
+    """Each finding of a card as a checklist item."""
+    out = []
+    for line in (text or "").splitlines():
+        m = re.match(r"^(\s*)[-*]\s+(?!\[[ xX]\])(.*)$", line)
+        out.append(f"{m.group(1)}- [ ] {m.group(2)}" if m else line)
+    return "\n".join(out)
+
+
+def verified_ticket_count(repo, exclude=None):
+    """How many tickets were ever verified by agents (label verified-by-agents, open or closed), besides `exclude`."""
+    code, out, _ = run(["gh", "issue", "list", "-R", repo, "--label", "verified-by-agents", "--state", "all",
+                        "--json", "number", "--limit", "1000"])
+    try:
+        nums = {i.get("number") for i in json.loads(out or "[]")} if code == 0 else set()
+    except json.JSONDecodeError:
+        nums = set()
+    return len(nums - {exclude})
+
+
+def cmd_verify_result(args):
+    """The verifier's verdict, recorded with its own marks (never the owner's): verified, not-verified or needs-owner."""
+    root, cfg, lcfg, number, repo = lane_start(args, "verify-result")
+    verdict = args.verdict
+    card = Path(args.body_file).read_text().strip() if args.body_file else ""
+    if not card and verdict != "needs-owner":
+        sys.exit("--body-file <card> is required: what changed, the risk, what was checked, what wasn't, how to undo it "
+                 "(not-verified: the findings, one per line)")
+    if verdict == "needs-owner" and not (args.reason or "").strip():
+        sys.exit("--reason is required for needs-owner: why the owner must test it themselves")
+    board = GHProject(cfg)
+    try:
+        board.load()
+        iss = board.issue(number)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    comments = issue_comments(repo, number)
+    if args.claim in build_claim_tokens(comments):
+        sys.exit(f"claim {args.claim} is the build claim of #{number}: a verifier is never the builder. A fresh chat "
+                 f"claims it to verify: issue claim {number} --for verify")
+    mine = [c for c in active_claims(comments) if claim_token(c.get("body")) == args.claim
+            and VERIFY_CLAIM_WHAT in (c.get("body") or "")]
+    if not mine:
+        sys.exit(f"No verify claim {args.claim} on #{number}. Claim it first: issue claim {number} --for verify")
+    try:
+        branch, _, _ = find_branch(root, cfg, number, args.branch)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if not branch:
+        sys.exit(f"No branch found for #{number} (add --branch <name>)")
+    if git_out(Path.cwd(), "branch", "--show-current") == branch:
+        sys.exit(f"This worktree has {branch} checked out. A verifier works detached at the handed-over commit "
+                 f"(git switch --detach origin/{branch}) in its own worktree, and never edits the branch.")
+    tip = remote_tip(repo, branch)
+    want = (args.head or "").strip().lower()
+    if not tip or len(want) < 7 or not tip.lower().startswith(want):
+        sys.exit(f"{want or '--head'} isn't the tip of {branch} on GitHub ({(tip or 'not found')[:12]}). The branch "
+                 "moved after the hand-over: verify the new head (or leave it to the next verifier).")
+    head = tip
+    run(["git", "fetch", "--quiet", "origin", branch], cwd=root)
+    try:
+        lane, why = issue_lane(root, lcfg, number, labels=iss["labels"], branch=branch, head=head)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if lane == "owner":
+        sys.exit(f"#{number}'s lane is owner ({why}): the owner tests it. Release your claim: "
+                 f"issue release {number} --claim {args.claim}")
+    rounds = sum(1 for r in verdict_records(comments) if r["verdict"] == "not-verified")
+    max_rounds = int(setting_value(lcfg, "max_review_rounds") or 2)
+    if verdict != "needs-owner" and rounds >= max_rounds:
+        sys.exit(f"#{number} was sent back {rounds} time(s) (max_review_rounds {max_rounds}): the verdict now is "
+                 "needs-owner, with the reason.")
+    labels = set(iss["labels"] or [])
+    tool = (args.tool or "an agent").strip()
+    if "spot-check" in labels and verdict == "verified":
+        before = [r for r in verdict_records(comments) if r["verdict"] == "verified"]
+        if before and before[-1]["tool"].lower() == tool.lower():
+            sys.exit(f"#{number} is a spot-check: a second verification on another model than the first ({tool}). "
+                     "Pass --tool with this chat's tool and model.")
+    tail = f" · branch `{branch}` · head {head} · claim {args.claim} · {tool}"
+    owner = cfg.get("product_owner_github")
+    when = time.strftime("%Y-%m-%d")
+    res = {"issue": number, "verdict": verdict, "branch": branch, "head": head, "claim": args.claim}
+    if verdict == "verified":
+        nth = verified_ticket_count(repo, exclude=number) + 1
+        shadow_n = int(setting_value(lcfg, "agents_verify_shadow") or 0)
+        shadow = nth <= shadow_n
+        spot_new = "verified-by-agents" not in labels and "spot-check" not in labels and nth % SPOT_CHECK_EVERY == 0
+        code, _, err = gh_api("POST", f"repos/{repo}/statuses/{head}", {
+            "state": "success", "context": VERIFIED_CONTEXT,
+            "description": f"Verified by agents (claim {args.claim}) on {when}"[:140]})
+        if code != 0:
+            sys.exit(f"Couldn't record the verification on the commit: {(err or '')[:200]}")
+        body = f"{VERIFIED_MARK}{tail}\n\n{card}"
+        if shadow:
+            body += (f"\n\nShadow start: verified ticket {nth} of {shadow_n}. The owner still tests it, as before "
+                     f"(`/test {number}`), so the two can be compared." + (f" @{owner}" if owner else ""))
+        if spot_new:
+            body += (f"\n\nSpot-check: every {SPOT_CHECK_EVERY}th verified ticket is verified again by a second "
+                     "verifier on another model (label `spot-check`).")
+        add = ["verified-by-agents"] + (["spot-check"] if spot_new else [])
+        remove = [x for x in ("verifying", "verify-failed", CLAIMED_LABEL) if x in labels]
+        if "spot-check" in labels:
+            remove.append("spot-check")          # the second verification is done
+        status = "UAT" if shadow else "In Review"
+        res.update(shadow=shadow, spot_check=spot_new, nth=nth)
+        extra = []
+    elif verdict == "not-verified":
+        gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "failure", "context": VERIFIED_CONTEXT,
+                                                         "description": f"Not verified (claim {args.claim}) on {when}"})
+        body = f"{NOT_VERIFIED_MARK}{tail}\n\n{checklist(card)}"
+        add = ["verify-failed"]
+        remove = [x for x in ("verifying", "verified-by-agents", "spot-check", CLAIMED_LABEL) if x in labels]
+        extra = sum((["--remove-assignee", a] for a in iss["assignees"]), [])
+        status = "Ready"
+        res["round"] = rounds + 1
+    else:
+        gh_api("POST", f"repos/{repo}/statuses/{head}", {"state": "failure", "context": VERIFIED_CONTEXT,
+                                                         "description": f"Needs the owner's test (claim {args.claim})"})
+        reason = " ".join(args.reason.split())
+        body = (f"{NEEDS_OWNER_MARK}: {reason}{tail}" + (f"\n\n{card}" if card else "")
+                + (f"\n\n@{owner}" if owner else ""))
+        add = [OWNER_TEST_LABEL]
+        remove = [x for x in ("verifying", "spot-check", CLAIMED_LABEL) if x in labels]
+        extra = []
+        status = "UAT"
+    code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
+    if code != 0:
+        sys.exit(f"Couldn't comment on #{number}: {(err or out)[:200]}")
+    try:
+        edit_issue_labels(repo, number, add=add, remove=remove, extra=extra)
+    except RuntimeError as e:
+        sys.exit(f"Recorded the verdict, but couldn't change the labels of #{number}: {e}")
+    if iss["status"] != status:
+        board.set_option(iss, "Status", status)
+    run(["gh", "issue", "comment", str(number), "-R", repo, "--body",
+         f"{RELEASE_MARK} ({args.claim}) · verdict {verdict}" + (f" · status {status}" if status != iss["status"] else "")])
+    res["status"] = status
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"{OK} #{number}: {verdict} at {head[:8]} → {status}; claim {args.claim} released")
+    if res.get("shadow"):
+        print(f"   Shadow start ({res['nth']} of {setting_value(lcfg, 'agents_verify_shadow')}): the owner tests it too.")
+    if res.get("spot_check"):
+        print("   Picked for a spot-check: /next gives it to a second verifier on another model.")
+
+
 def cmd_hooks(args):
     root = find_repo_root(Path.cwd())
     rep = Report()
@@ -6313,6 +8431,12 @@ def cmd_doctor(args):
         return
     skills = list((root / ".agents/skills").glob("*/SKILL.md"))
     rep.add("ok" if len(skills) >= 13 else "warn", f"{len(skills)} skills in .agents/skills")
+    gates = root / GATES_WORKFLOW
+    if gates.is_file() and CHANGEOVER_RE.search(gates.read_text(errors="replace")) and main_gates_listens_target(root):
+        rep.add("warn", "The gate's changeover is half done: main's gates.yml decides on pull_request_target, but this "
+                "copy still listens to pull_request too", "a PR can run its own copy of the gate until that goes")
+        rep.action(WHO_AGENT, "Finish the gate's changeover on a branch, then open a PR for it",
+                   "python3 tools/haam/haam.py changeover --apply")
     if (root / ".haam/incoming").exists() and any((root / ".haam/incoming").rglob("*")):
         rep.add("warn", "Unmerged kit files in .haam/incoming")
         rep.action(WHO_AGENT, "Merge the files in .haam/incoming, then delete that folder")
@@ -6323,6 +8447,9 @@ def cmd_doctor(args):
         rep.add("ok" if cfg.get(k) else "fail", f"{k}: {cfg.get(k) or '(not set)'}")
     rep.add("ok" if cfg["team_key"] != PLACEHOLDER_KEY else "warn", f"team_key: {cfg['team_key']}",
             "still the placeholder" if cfg["team_key"] == PLACEHOLDER_KEY else "")
+    for k, w in active_windows(root).items():
+        rep.add("info", f"Settings window on this computer: {window_line(k, w)} (normally {configured_value(cfg, k)})",
+                f"ends by itself; settings --clear-window {k} --human ends it early")
     if cfg["_applied"].get("team_key") != cfg["team_key"]:
         rep.add("fail", "Team key not applied to the files yet")
         rep.action(WHO_AGENT, "Apply the config", "python3 tools/haam/haam.py config")
@@ -6373,6 +8500,8 @@ def cmd_doctor(args):
     others = [w for w in list_worktrees(root, cfg) if not w["main"]]
     if others:
         rep.add("info", f"{len(others)} other worktree(s)", "python3 tools/haam/haam.py worktree list")
+    for level, text, detail in heavy_lock_report(root):
+        rep.add(level, text, detail)
     tool_own = (main_dir / ".haam").resolve()      # ship's and local-ci's short-lived checkouts
     stray_w = [w for w in others if not w["haam_area"] and tool_own not in Path(w["path"]).resolve().parents]
     stray = sorted({str(Path(w["path"]).parent) for w in stray_w})
@@ -6482,22 +8611,27 @@ def main():
     p.add_argument("--project-owner", help="GitHub user/org that owns the board (default: repo owner)")
     p.add_argument("--deploy", help="github (deploy.yml on merge, default) or manual (you deploy by hand)")
     p.add_argument("--flow", help="test-first (default: owner tests before the PR) or checks-first")
-    p.add_argument("--heavy-run", action="append", help="add a heavy run (regex on the process list) for haam.py "
-                   "exclusive, e.g. 'make (check|test-integration)' (repeatable)")
+    p.add_argument("--heavy-run", action="append", help="add a heavy run (regex on what each process runs itself, "
+                   "never a shell's -c text) for haam.py exclusive, e.g. 'make (check|test-integration)' (repeatable)")
     p.add_argument("--clear-heavy-runs", action="store_true", help="empty the heavy_runs list")
     p.add_argument("--production", help="what counts as production code: path patterns, comma-separated, replacing "
                    "the list (default: everything, e.g. 'src/**,api/**')")
     p.add_argument("--not-production", help="add path patterns that are never production code (prototypes, tests…)")
     p.add_argument("--remove-not-production", help="remove patterns from the not-production list, e.g. 'docs/**' "
                    "when your docs site is what users see")
+    p.add_argument("--release-target", action="append", metavar="NAME=PATTERNS",
+                   help="a build that ships on its own (a phone app): its paths, for /cadence (e.g. "
+                        "ios='apps/ios/**,packages/core/**'); repeatable, replaces that name's patterns")
+    p.add_argument("--clear-release-targets", action="store_true", help="remove every release target")
     p.add_argument("--protected", help="add protected path patterns, comma-separated (e.g. 'src/auth/**,db/migrations/**')")
     p.add_argument("--unprotected", help="remove protected path patterns, comma-separated")
     p.add_argument("--max-open-prs", type=int, help="agents hold new builds at this many ready PRs (default 10; drafts "
                    "and docs-only PRs don't count)")
     p.add_argument("--max-in-uat", type=int, help="...or at this many changes waiting for you to test (default 10)")
-    p.add_argument("--until", help="with --max-in-uat / --max-open-prs: a batch window, a raise that ends by itself "
-                   "after this day (YYYY-MM-DD)")
-    p.add_argument("--end-batch-window", action="store_true", help="end the batch window now")
+    p.add_argument("--until", help="with --max-in-uat / --max-open-prs: a batch window on this computer, a raise that "
+                   "ends by itself after this day (YYYY-MM-DD) or moment (YYYY-MM-DDTHH:MM)")
+    p.add_argument("--end-batch-window", action="store_true", help="end the batch window now (both limits' windows "
+                   "on this computer, and an older one in haam.config.json)")
     p.add_argument("--required-fields", help="board fields every new issue must get on create, comma-separated "
                    "(e.g. 'Area,Kind,Code check'); empty clears the requirement. Needs --human")
     p.add_argument("--required-epic-fields", help="board fields every new epic must get (default: the issue list "
@@ -6549,7 +8683,7 @@ def main():
     p.add_argument("--tool", help="claim: agent tool, e.g. 'Claude Code'")
     p.add_argument("--machine", help="claim: which computer, e.g. 'desktop'")
     p.add_argument("--branch", help="claim: branch name")
-    p.add_argument("--for", dest="for_", choices=["build", "assess", "spec", "spike"],
+    p.add_argument("--for", dest="for_", choices=["build", "assess", "spec", "spike", "verify"],
                    help="claim: what this chat is about to do (default build)")
     p.add_argument("--claim", help="release/status: this chat's claim id (printed by claim, and in its comment)")
     p.add_argument("--force", action="store_true", help="claim: allow a non-Ready issue (bugs); status: move an issue "
@@ -6600,8 +8734,45 @@ def main():
     p.add_argument("--merged-only", action="store_true", help="/release: never merge, only finish an already-merged PR")
     p.add_argument("--workflow", default="deploy.yml", help="the deploy workflow file")
     p.add_argument("--live", action="store_true", help="the human confirmed it's live (manual deploys)")
+    p.add_argument("--deployed", help="with --live: the commit the deploy took (default: origin's main now); every "
+                   "release it contains is closed")
+    p.add_argument("--plan", action="store_true", help="show what ship would do (the release's exact changes, in "
+                   "order, what is left out and why, clashes, files, protected areas, migrations); change nothing")
+    p.add_argument("--first", action="append", metavar="ID", help="grouping release: put this change in first (repeat "
+                   "for an order); a passed change it clashes with is left out")
+    p.add_argument("--without", action="append", metavar="ID", help="grouping release: leave this passed change out "
+                   "of the release (it stays passed for the next one)")
     p.add_argument("--no-deploy", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_ship)
+
+    p = common(sub.add_parser("cadence", help="whether a release (or a target's build) is due by the owner's cadence"))
+    p.add_argument("--built", metavar="TARGET", help="record the owner's build of this release target (with --human)")
+    p.add_argument("--sha", help="with --built: the commit the build took (default: origin's main now)")
+    p.add_argument("--human", action="store_true", help="the owner said the build is done, in this session")
+    p.set_defaults(func=cmd_cadence)
+
+    p = common(sub.add_parser("lane", help="uat: agents-verify: who checks this ticket, agents or the owner, and why"))
+    p.add_argument("issue", help="issue number (#12)")
+    p.add_argument("--branch", help="the ticket's branch, when it isn't named after the issue")
+    p.set_defaults(func=cmd_lane)
+
+    p = common(sub.add_parser("handover", help="/uat: hand a built ticket over by its lane (verifier or owner)"))
+    p.add_argument("issue", help="issue number (#12)")
+    p.add_argument("--branch", help="the ticket's branch, when it isn't named after the issue")
+    p.add_argument("--claim", help="this chat's build claim id (when it isn't on the branch)")
+    p.add_argument("--body-file", help="the 3-5 line summary for the comment")
+    p.set_defaults(func=cmd_handover)
+
+    p = common(sub.add_parser("verify-result", help="the verifier's verdict, with its own marks (never the owner's)"))
+    p.add_argument("issue", help="issue number (#12)")
+    p.add_argument("--verdict", required=True, choices=["verified", "not-verified", "needs-owner"])
+    p.add_argument("--head", required=True, help="the commit you verified: the branch's tip on GitHub")
+    p.add_argument("--claim", required=True, help="your verify claim's id (issue claim <n> --for verify)")
+    p.add_argument("--body-file", help="the card (verified), the findings one per line (not-verified)")
+    p.add_argument("--reason", help="needs-owner: why the owner must test it")
+    p.add_argument("--tool", help="your agent tool and model, e.g. 'Claude Code, <model>'")
+    p.add_argument("--branch", help="the ticket's branch, when it isn't named after the issue")
+    p.set_defaults(func=cmd_verify_result)
 
     p = common(sub.add_parser("protected", help="list changed files in protected areas (human-review, never the no-UAT lane)"))
     p.add_argument("--base", help="compare with this ref (default: origin/main)")
@@ -6645,8 +8816,10 @@ def main():
     p.add_argument("--explain", action="store_true", help="show every option and its trade-off")
     p.add_argument("--apply", action="store_true", help="sync GitHub: variables, required checks, production approval")
     p.add_argument("--human", action="store_true", help="the owner chose these settings in this session (/haam-settings)")
-    p.add_argument("--until", help="with --set max_in_uat=N / max_open_prs=N: a batch window that ends by itself "
-                   "after this day (YYYY-MM-DD)")
+    p.add_argument("--until", help="with --set on a limit (max_in_uat, max_open_prs, max_review_rounds, max_pr_lines): "
+                   "a window on this computer that counts at once and ends by itself after this day (YYYY-MM-DD) or "
+                   "at this moment (YYYY-MM-DDTHH:MM, local time); haam.config.json keeps the normal value")
+    p.add_argument("--clear-window", action="append", metavar="KEY", help="end a limit's window early (repeat for more)")
     p.add_argument("--recommend", action="store_true", help="suggest the limits for your team (changes nothing)")
     p.add_argument("--flow", choices=["test-first", "checks-first"], help="recommend: the testing order (default: "
                    "this project's setting)")
@@ -6680,9 +8853,16 @@ def main():
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("exclusive", help="run a heavy command when no other one is running on this machine")
-    p.add_argument("who", help="who is asking, for the others' messages, e.g. 'chat A, #12'")
+    p.add_argument("who", nargs="?", help="who is asking, for the others' messages, e.g. 'chat A, #12'")
     p.add_argument("--timeout", type=float, default=60, help="minutes to wait before giving up (exit 124)")
     p.add_argument("--quiet", type=float, default=10, help="seconds with no other heavy run before starting")
+    p.add_argument("--max-run", type=float, default=None,
+                   help=f"minutes the command may run before it and everything it started are stopped (exit "
+                        f"{RUN_CEILING_EXIT}); a run sent to the other machine gets {REMOTE_MAX_RUN_MINUTES:g} unless given")
+    p.add_argument("--report", action="store_true",
+                   help="no command: per day, how long runs here waited for the machine and ran (from the run log)")
+    p.add_argument("--days", type=int, default=7, help="--report: how many days back (default 7)")
+    p.add_argument("--json", action="store_true", help="--report: as JSON")
     p.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command, e.g. -- make check")
     p.set_defaults(func=cmd_exclusive)
 
@@ -6700,6 +8880,10 @@ def main():
     p.add_argument("--linear-email")
     p.add_argument("--apply", action="store_true")
     p.set_defaults(func=cmd_invite)
+
+    p = sub.add_parser("changeover", help="finish the gate's changeover (gates.yml on pull_request_target alone)")
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_changeover)
 
     p = common(sub.add_parser("doctor", help="check setup status"))
     p.add_argument("--role", choices=["admin", "developer"], default="developer")

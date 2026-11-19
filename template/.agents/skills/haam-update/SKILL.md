@@ -13,7 +13,7 @@ Target version: $ARGUMENTS (empty = latest release)
 
 ## 1. Where are we?
 1. `python3 tools/haam/haam.py version --check`: current project version and latest release.
-2. If already on the target version, say so and stop.
+2. If already on the target version, run `python3 tools/haam/haam.py doctor`. If it says the gate's changeover is half done, finish it on a branch (`git switch -c chore/haam-gate-changeover`, then `python3 tools/haam/haam.py changeover --apply`, commit, push and open a PR: main's copy of the gate judges it). Otherwise say so and stop.
 3. `git switch -c chore/haam-<target-version>` from an up-to-date default branch.
 
 ## 2. Get the new kit (outside the project)

@@ -16,12 +16,13 @@ make dev
 - Feature-Flag: keines / <wie man es einschaltet>
 
 ## Testfälle
-| # | AC | Schritte | Erwartetes Ergebnis | Bestanden? |
-|---|---|---|---|---|
-| 1 | AC1 | 1. … 2. … | … | [ ] |
-| 2 | AC2 | | | [ ] |
-| 3 | Grenzfall | | | [ ] |
-| 4 | Regression | Die Haupt-Journey von Anfang bis Ende durchspielen: <beschreiben> | Funktioniert wie vorher | [ ] |
+<!-- Where: wo sich jeder Fall zeigen lässt. `test`: ein Testlauf, ein lokaler Lauf oder eine Testumgebung · `simulator`: ein Simulator oder Emulator · `device`: nur ein echtes Telefon oder ein anderes echtes Gerät · `person`: das Urteil eines Menschen (neues Design oder neuer Text, Gefühl oder Geschwindigkeit, eine Anmeldung oder Zahlung bei einem Drittanbieter). Mit `uat: agents-verify` führt ein unabhängiger Agent die `test`- und `simulator`-Fälle aus, und nur die übrigen kommen zum Product Owner. Eine Zelle, die etwas anderes sagt, zählt als die des Product Owners. -->
+| # | AC | Schritte | Erwartetes Ergebnis | Where | Bestanden? |
+|---|---|---|---|---|---|
+| 1 | AC1 | 1. … 2. … | … | <test / simulator / device / person> | [ ] |
+| 2 | AC2 | | | | [ ] |
+| 3 | Grenzfall | | | | [ ] |
+| 4 | Regression | Die Haupt-Journey von Anfang bis Ende durchspielen: <beschreiben> | Funktioniert wie vorher | | [ ] |
 
 ## Nicht Teil dieses Tests
 - 
@@ -29,7 +30,6 @@ make dev
 ## Vorabprüfung durch den Agenten (Agent pre-check)
 <!-- Vom Agenten ausgefüllt: was er selbst geprüft hat (Tests, `make e2e`, ein Browser-Tool) und was er gesehen hat. -->
 - **Fully verified by the agent:** no  <!-- „yes“ nur unter den Regeln in /uat Schritt 3; dann kann der Product Owner es mit „pass all verified“ bestehen lassen -->
-- **Needs a person:** yes (<warum>)  <!-- mit `uat: agents-verify`: „no“ nur unter den Regeln in /uat Schritt 3; dann prüft es ein unabhängiger Agent statt des Product Owners -->
 - **Verified at:** <der Commit mit 40 Zeichen, von dem deine Nachweise stammen>
 - **Risk:** <low | medium | high>: <eine Zeile>
 - **Undo:** <wie man es rückgängig macht>

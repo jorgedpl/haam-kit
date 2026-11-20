@@ -16,12 +16,13 @@ make dev
 - Feature flag: geen / <hoe je hem aanzet>
 
 ## Testgevallen
-| # | AC | Stappen | Verwacht resultaat | Geslaagd? |
-|---|---|---|---|---|
-| 1 | AC1 | 1. … 2. … | … | [ ] |
-| 2 | AC2 | | | [ ] |
-| 3 | Randgeval | | | [ ] |
-| 4 | Regressie | Doorloop het hoofdtraject van begin tot eind: <beschrijf> | Werkt zoals voorheen | [ ] |
+<!-- Where: waar elk geval te laten zien is. `test`: een testrun, een lokale run of een testomgeving · `simulator`: een simulator of emulator · `device`: alleen een echte telefoon of een ander echt apparaat · `person`: het oordeel van een mens (nieuw ontwerp of nieuwe tekst, gevoel of snelheid, een aanmelding of betaling bij een derde partij). Met `uat: agents-verify` voert een onafhankelijke agent de `test`- en `simulator`-gevallen uit, en alleen de andere komen bij de product owner. Een cel die iets anders zegt, telt als die van de product owner. -->
+| # | AC | Stappen | Verwacht resultaat | Where | Geslaagd? |
+|---|---|---|---|---|---|
+| 1 | AC1 | 1. … 2. … | … | <test / simulator / device / person> | [ ] |
+| 2 | AC2 | | | | [ ] |
+| 3 | Randgeval | | | | [ ] |
+| 4 | Regressie | Doorloop het hoofdtraject van begin tot eind: <beschrijf> | Werkt zoals voorheen | | [ ] |
 
 ## Niet in scope voor deze test
 - 
@@ -29,7 +30,6 @@ make dev
 ## Controle vooraf door de agent (Agent pre-check)
 <!-- Ingevuld door de agent: wat hij zelf gecontroleerd heeft (tests, `make e2e`, een browsertool) en wat hij zag. -->
 - **Fully verified by the agent:** no  <!-- "yes" alleen volgens de regels in /uat stap 3; dan kan de product owner het goedkeuren met "pass all verified". -->
-- **Needs a person:** yes (<waarom>)  <!-- met `uat: agents-verify`: "no" alleen volgens de regels in /uat stap 3; dan controleert een onafhankelijke agent het in plaats van de product owner -->
 - **Verified at:** <de commit van 40 tekens waar je bewijs vandaan komt>
 - **Risk:** <low | medium | high>: <één regel>
 - **Undo:** <hoe je het ongedaan maakt>

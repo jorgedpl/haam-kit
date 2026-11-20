@@ -16,12 +16,13 @@ make dev
 - Feature flag: none / <how to turn on>
 
 ## Test cases
-| # | AC | Steps | Expected result | Pass? |
-|---|---|---|---|---|
-| 1 | AC1 | 1. … 2. … | … | [ ] |
-| 2 | AC2 | | | [ ] |
-| 3 | Edge | | | [ ] |
-| 4 | Regression | Run the main journey end to end: <describe> | Works as before | [ ] |
+<!-- Where: where each case can be shown. `test`: a test run, a local run or a test environment · `simulator`: a simulator or emulator · `device`: only a real phone or other device · `person`: a person's judgement (new design or wording, feel or speed, a third-party sign-in or payment). With `uat: agents-verify` an independent agent runs the `test` and `simulator` cases, and only the others come to the owner. A cell that says anything else counts as the owner's. -->
+| # | AC | Steps | Expected result | Where | Pass? |
+|---|---|---|---|---|---|
+| 1 | AC1 | 1. … 2. … | … | <test / simulator / device / person> | [ ] |
+| 2 | AC2 | | | | [ ] |
+| 3 | Edge | | | | [ ] |
+| 4 | Regression | Run the main journey end to end: <describe> | Works as before | | [ ] |
 
 ## Not in scope for this test
 - 
@@ -29,7 +30,6 @@ make dev
 ## Agent pre-check
 <!-- Filled by the agent: what it checked itself (tests, `make e2e`, a browser tool) and what it saw. -->
 - **Fully verified by the agent:** no  <!-- "yes" only under the rules in /uat step 3; then the owner can pass it with "pass all verified" -->
-- **Needs a person:** yes (<why>)  <!-- with `uat: agents-verify`: "no" only under the rules in /uat step 3; then an independent agent verifies it instead of the owner -->
 - **Verified at:** <the 40-character commit your evidence is from>
 - **Risk:** <low | medium | high>: <one line>
 - **Undo:** <how to undo it>

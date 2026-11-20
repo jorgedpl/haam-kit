@@ -812,8 +812,8 @@ class TestGitHub(ToolTestCase):
         self.assertEqual(env["reviewers"], [{"type": "User", "id": 583231}])
         created = [r["args"][2] for r in writes if r["args"][:2] == ["label", "create"]]
         self.assertEqual(sorted(created), ["ai-review-overruled", "epic-build", "gate-override", "human-review",
-                                           "owner-test", "spot-check", "uat:skip", "verified-by-agents",
-                                           "verify-failed", "verifying"])     # the last five: uat agents-verify
+                                           "owner-test", "partly-verified", "spot-check", "uat:skip",
+                                           "verified-by-agents", "verify-failed", "verifying"])   # uat agents-verify
         patch = [json.loads(r["body"]) for r in writes if "PATCH" in r["args"] and r["body"] and "allow_auto_merge" in r["body"]]
         self.assertEqual(patch, [{"allow_auto_merge": True}])           # the no-UAT lane's auto-merge
         # Secrets are never set by the tool
@@ -1820,6 +1820,38 @@ class TestLinkedIssues(unittest.TestCase):
         self.assertIsNone(mod.branch_issue("spike/12-x", 13))
 
 
+class TestPlanCases(unittest.TestCase):
+    """The plan's `Where` column, as the agents' lane reads it."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("haam_mod", TOOL)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def test_the_kits_own_template_gives_an_agent_nothing_until_a_builder_says_so(self):
+        template = TOOL.parents[2] / "docs" / "templates" / "uat-plan.md"
+        files = [template] + sorted((TOOL.parents[2] / "i18n").glob("*/docs/templates/uat-plan.md"))
+        self.assertEqual(len(files), 7)
+        for f in files:                                    # every language keeps the column the tool looks for
+            cases = self.mod.plan_cases(f.read_text())
+            self.assertEqual([(c["n"], c["where"]) for c in cases], [("1", ""), ("2", ""), ("3", ""), ("4", "")], f)
+
+    def test_where_each_case_can_be_shown(self):
+        f = self.mod.plan_cases
+        self.assertIsNone(f("# Plan\n\n| # | AC | Steps | Pass? |\n|---|---|---|---|\n| 1 | AC1 | do | [ ] |\n"))
+        text = ("## Test cases\n<!-- note -->\n| # | AC | Steps | Expected | **Where** | Pass? |\n|--|--|--|--|:--|--|\n"
+                "| 1 | AC1 | a \\| b | c | `test` | [ ] |\n| 2a | AC2 | x | y | Simulator: API 35 image | [ ] |\n"
+                "| 3 | AC3 | x | y | device (a chip read) | [ ] |\n| 4 | AC4 | x | y | person | [ ] |\n"
+                "| 5 | AC5 | x | y | testing by hand | [ ] |\n| 6 | AC6 | x | y | | [ ] |\n\n| 9 | another table | test |\n")
+        self.assertEqual([(c["n"], c["where"], c["note"]) for c in f(text)],
+                         [("1", "test", ""), ("2a", "simulator", "api 35 image"), ("3", "device", "a chip read"),
+                          ("4", "person", ""), ("5", "", "testing by hand"), ("6", "", "")])
+        self.assertEqual(self.mod.say_cases(f(text)[:2]), "cases 1, 2a")
+        self.assertEqual(self.mod.say_cases(f(text)[2:5], True),
+                         "cases 3 (device: a chip read), 4 (person), 5 (the plan doesn't say where)")
+
+
 class TestHelpers(unittest.TestCase):
     def setUp(self):
         import importlib.util
@@ -2758,8 +2790,10 @@ class TestAgentsVerify(ToolTestCase):
         return json.loads(self.tool("issue", "create", "--stream", "bug", "--title", title, "--status", status,
                                     "--json").stdout)["number"]
 
-    def build(self, n, files=None, needs="no", msg=None, rename=None, plan=True, lines=True):
-        """The builder's branch on origin: a code commit, then the plan naming it under Agent pre-check."""
+    def build(self, n, files=None, cases=("test", "test"), msg=None, rename=None, plan=True, lines=True, also=()):
+        """The builder's branch on origin: a code commit, then the plan naming it under Agent pre-check. cases: where
+        each case of the plan can be shown (the `Where` column; None: a plan without that column); also: more code
+        commits before the plan, as (message, {path: text})."""
         branch = f"{n}-change"
         git(self.proj, "switch", "-q", "-c", branch, "origin/main")
         for path, text in (files or {"src/app.py": f"print('fixed {n}')\n"}).items():
@@ -2769,13 +2803,24 @@ class TestAgentsVerify(ToolTestCase):
             git(self.proj, "mv", *rename)
         git(self.proj, "add", "-A")
         git(self.proj, "commit", "-qm", msg or f"#{n}: fix")
+        for more_msg, more_files in also:
+            for path, text in more_files.items():
+                (self.proj / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.proj / path).write_text(text)
+            git(self.proj, "add", "-A")
+            git(self.proj, "commit", "-qm", more_msg)
         code_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj, capture_output=True,
                                   text=True).stdout.strip()
         if plan:
-            pre = [f"- **Needs a person:** {needs}"] + ([f"- **Verified at:** {code_sha}", "- **Risk:** low: one line",
-                                                        "- **Undo:** revert the commit"] if lines else [])
+            head_lines = [f"- **Verified at:** {code_sha}", "- **Risk:** low: one line",
+                          "- **Undo:** revert the commit"] if lines else []
+            table = ("| # | AC | Steps | Expected result | Pass? |\n|---|---|---|---|---|\n| 1 | AC1 | Risk: none \\| here | ok | [ ] |\n"
+                     if cases is None else
+                     "| # | AC | Steps | Expected result | Where | Pass? |\n|---|---|---|---|---|---|\n"
+                     + "".join(f"| {k} | AC{k} | do \\| it | see it | {where} | [ ] |\n"
+                               for k, where in enumerate(cases, 1)))
             (self.proj / f"docs/uat/GH-{n}-change.md").write_text(
-                "# UAT plan\n\n## Test cases\n| 1 | Risk: none here |\n\n## Agent pre-check\n" + "\n".join(pre) + "\n")
+                "# UAT plan\n\n## Test cases\n" + table + "\n## Agent pre-check\n" + "\n".join(head_lines) + "\n")
             git(self.proj, "add", "-A")
             git(self.proj, "commit", "-qm", f"#{n}: UAT plan")
         git(self.proj, "push", "-q", "origin", branch)
@@ -2831,31 +2876,39 @@ class TestAgentsVerify(ToolTestCase):
         r = self.lane(n)
         self.assertEqual((r["lane"], r["verification"]["verified"]), ("agents", False))
         self.assertEqual(self.tool("lane", str(n)).stdout.splitlines()[0],
-                         "agents: needs no person, and changes none of the owner's own areas")
+                         "agents: an agent can show every case (cases 1, 2), and it changes none of the owner's own areas")
         # The labels come first: owner-test, then uat-failed
         self.tool("issue", "label", str(n), "--add", "uat-failed", "--add", "owner-test")
         self.assertIn("owner-test", self.lane(n)["reason"])
         self.tool("issue", "label", str(n), "--remove", "owner-test", "--human")
         self.assertIn("uat-failed", self.lane(n)["reason"])
-        # An owner-test area, a file renamed out of one (by both names), a prototype's commits, the plan's line
+        # One of the owner's own areas, a file renamed out of one (by both names): the approval stays the owner's,
+        # after a verifier's run. A prototype's commits, a plan with no case for an agent, or that doesn't say: owner.
         a = self.ticket("Screen fix")
-        self.build(a, files={"apps/mobile/screen.txt": "changed\n"}, msg=f"#{a}: spike: keep the prototype")
-        self.assertEqual(self.lane(a)["reason"],
+        self.build(a, files={"apps/mobile/screen.txt": "changed\n"})
+        r = self.lane(a)
+        self.assertEqual((r["lane"], r["owner_cases"]), ("both", []))
+        self.assertEqual(r["approval"],
                          "changes phones (apps/mobile/screen.txt), one of the owner's own areas (owner_test_paths)")
         b = self.ticket("Move the screen")
         self.build(b, files={}, rename=("apps/mobile/screen.txt", "src/screen.txt"))
+        self.assertEqual(self.lane(b)["lane"], "both")
         self.assertIn("changes phones (apps/mobile/screen.txt", self.lane(b)["reason"])
         c = self.ticket("Kept prototype")
         self.build(c, msg=f"#{c}: spike: keep the prototype")
+        self.assertEqual(self.lane(c)["lane"], "owner")
         self.assertIn("built from a prototype", self.lane(c)["reason"])
         d = self.ticket("New page")
-        self.build(d, needs="yes (a new page layout)")
-        self.assertEqual(self.lane(d)["reason"], "needs a person: a new page layout")
-        e = self.ticket("No line")
-        self.build(e, needs="", lines=False)
-        self.assertIn("no line `Needs a person", self.lane(e)["reason"])
+        self.build(d, cases=["person (a new page layout)"])
+        self.assertEqual((self.lane(d)["lane"], self.lane(d)["reason"]),
+                         ("owner", "no case an agent can show: case 1 (person: a new page layout)"))
+        e = self.ticket("No column")
+        self.build(e, cases=None, lines=False)
+        self.assertEqual(self.lane(e)["lane"], "owner")
+        self.assertIn("no test cases with a `Where` column", self.lane(e)["reason"])
         f = self.ticket("No plan")
         self.build(f, plan=False)
+        self.assertEqual(self.lane(f)["lane"], "owner")
         self.assertIn("no UAT plan", self.lane(f)["reason"])
         # A branch's own copy of the settings doesn't count: the lane reads main's
         g = self.ticket("Turn it off on the branch")
@@ -2886,13 +2939,14 @@ class TestAgentsVerify(ToolTestCase):
         # The owner's lane: UAT, as today, with the reason in the first line
         o = self.ticket("New page")
         t2 = self.claim(o, "build", "Claude Code")
-        branch, head = self.build(o, needs="yes (a new page)")
+        branch, head = self.build(o, cases=["person (a new page)"])
         res = json.loads(self.tool("handover", str(o), "--claim", t2, "--json").stdout)
         self.assertEqual((res["lane"], res["status"]), ("owner", "UAT"))
         self.assertEqual(self.issue(o)["status"], "UAT")
         self.assertNotIn("verifying", self.issue(o)["labels"])
         first = self.comments(o)[-1].splitlines()[0]
-        self.assertEqual(first, f"🧪 Ready for UAT · your test: needs a person: a new page · branch `{branch}` · head {head}")
+        self.assertEqual(first, "🧪 Ready for UAT · your test: no case an agent can show: case 1 (person: a new page) "
+                                f"· branch `{branch}` · head {head}")
         self.assertIn("@octocat", self.comments(o)[-1])
 
     def build_again(self, n, branch):
@@ -2998,7 +3052,8 @@ class TestAgentsVerify(ToolTestCase):
         self.assertTrue(self.lane(n)["verification"]["verified"])
         # K4: a later push to docs/uat/ only still counts; a code change ends the verification
         git(self.proj, "switch", "-q", branch)
-        (self.proj / f"docs/uat/GH-{n}-change.md").write_text("# plan\n\n## Agent pre-check\n- **Needs a person:** no\n")
+        plan_file = self.proj / f"docs/uat/GH-{n}-change.md"
+        plan_file.write_text(plan_file.read_text() + "\nA note on the plan's wording.\n")
         git(self.proj, "commit", "-qam", "plan wording")
         git(self.proj, "push", "-q", "origin", branch)
         self.assertTrue(self.lane(n)["verification"]["verified"])
@@ -3089,6 +3144,246 @@ class TestAgentsVerify(ToolTestCase):
         self.tool("settings", "--set", "uat=owner-decides", "--human")
         self.push_main("lane off")
         self.assertEqual(self.lane(n)["lane"], "owner")
+
+    # ---- The lines that must hold (kit issue #24): what was missing after the first build of the lane
+
+    def labels(self, n):
+        return self.issue(n)["labels"]
+
+    def shipping(self):
+        """The tickets `ship --all --plan` would put in the next release."""
+        out = self.tool("ship", "--all", "--plan", "--json", check=False).stdout
+        return [x["key"] for x in (json.loads(out) if out.strip().startswith("{") else {}).get("in") or []]
+
+    def test_rework_after_the_owners_failed_test_stays_the_owners_without_its_label(self):
+        """The owner's failed test stays the owner's. The label uat-failed comes off when the rework is handed over
+        for UAT again (`issue status <n> UAT`), so the lane reads the `❌ UAT failed` comment, not only the label."""
+        self.lane_on()
+        n = self.ticket()
+        token = self.claim(n, "build", "Claude Code")
+        branch, head = self.build(n)
+        self.assertEqual(self.lane(n)["lane"], "agents")
+        # The owner tested it (pulled back, or in the shadow start) and it failed: /test records it this way
+        self.tool("issue", "comment", str(n), "--body", "❌ UAT failed\n- [ ] step 2: expected a total, saw 0")
+        self.tool("issue", "label", str(n), "--add", "uat-failed")
+        self.assertIn("uat-failed", self.lane(n)["reason"])
+        # The rework is handed over for UAT again: the label goes
+        self.tool("issue", "status", str(n), "UAT", "--claim", token)
+        self.assertNotIn("uat-failed", self.labels(n))
+        r = self.lane(n)
+        self.assertEqual(r["lane"], "owner")
+        self.assertIn("failed the owner's test", r["reason"])
+        res = json.loads(self.tool("handover", str(n), "--claim", token, "--json").stdout)
+        self.assertEqual((res["lane"], res["status"]), ("owner", "UAT"))
+        self.assertNotIn("verifying", self.labels(n))
+        # Rework after the verifier's own verdict is another matter: it goes back to a verifier
+        m, _, mbranch, mhead = self.handed("Sent back by the verifier")
+        self.verify(m, "not-verified", mhead, self.claim(m))
+        self.assertIn("verify-failed", self.labels(m))
+        self.assertEqual(self.lane(m)["lane"], "agents")
+        res = json.loads(self.tool("handover", str(m), "--branch", mbranch, "--json").stdout)
+        self.assertEqual((res["lane"], res["status"]), ("agents", "In Review"))
+
+    def test_one_owner_ticket_makes_the_whole_branch_the_owners(self):
+        """A branch shared by several tickets ships as one: a ticket the owner pulled back, or failed, makes every
+        ticket on that branch the owner's, so a verification of the others can't ship its code."""
+        self.lane_on()
+        a, b = self.ticket("Fix the export"), self.ticket("Fix the import")
+        ta = self.claim(a, "build", "Claude Code")
+        tb = self.run_json("issue", "claim", str(b), "--for", "build", "--tool", "Claude Code", "--branch",
+                           f"{a}-change", tool=self.installed_tool())["claim"]
+        branch, head = self.build(a, also=[(f"#{b}: fix the import", {"src/import.py": "print('import')\n"})])
+        self.assertEqual((self.lane(a)["lane"], self.lane(b)["lane"]), ("agents", "agents"))
+        self.tool("handover", str(a), "--claim", ta)
+        self.tool("handover", str(b), "--claim", tb)
+        self.verify(a, "verified", head, self.claim(a))
+        self.assertTrue(self.lane(a)["verification"]["verified"])
+        self.assertEqual(self.shipping(), [f"#{a}"])
+        self.tool("issue", "label", str(b), "--add", "owner-test")              # `test <b> myself`
+        r = self.lane(a)
+        self.assertEqual(r["lane"], "owner")
+        self.assertEqual(r["reason"], f"shares its branch with #{b}, which is the owner's test (label owner-test)")
+        self.assertEqual(self.shipping(), [])                                    # no release takes its code
+        # The other ticket failed the owner's test: the same
+        self.tool("issue", "label", str(b), "--remove", "owner-test", "--human")
+        self.assertEqual(self.lane(a)["lane"], "agents")
+        self.tool("issue", "comment", str(b), "--body", "❌ UAT failed\n- [ ] step 1")
+        r = self.lane(a)
+        self.assertEqual(r["lane"], "owner")
+        self.assertIn(f"shares its branch with #{b}", r["reason"])
+        self.assertIn("failed the owner's test", r["reason"])
+        # A ticket of the branch that is closed (shipped earlier, or cancelled) holds nothing back
+        st = self.gh()
+        st["issues"][str(b)]["state"] = "CLOSED"
+        self.state.write_text(json.dumps(st))
+        self.assertEqual(self.lane(a)["lane"], "agents")
+
+    def test_switched_off_ship_ignores_the_agents_marks_and_no_verdict_is_the_owners_pass(self):
+        """K6's last line, and the first line that must hold: with the lane off, `ship` takes no verified ticket; and
+        no verdict of a verifier ever writes the owner's marks (`uat`, `uat-passed`, `uat:skip`)."""
+        self.lane_on()
+        n, _, _, head = self.handed()
+        self.verify(n, "verified", head, self.claim(n))
+        m, _, _, mhead = self.handed("Sent back")
+        self.verify(m, "not-verified", mhead, self.claim(m))
+        o, _, _, ohead = self.handed("Needs the owner")
+        self.verify(o, "needs-owner", ohead, self.claim(o), reason="a person must look at it")
+        st = self.gh()
+        self.assertEqual({x["context"] for x in st.get("statuses", [])}, {"agent-verified"})
+        for k in (n, m, o):
+            for lab in ("uat-passed", "uat:skip"):
+                self.assertNotIn(lab, self.labels(k))
+        self.assertEqual(list((st.get("prs") or {}).values()), [])                    # and nothing was opened or merged
+        js = json.loads(self.tool("ship", "--all", "--plan", "--json").stdout)
+        self.assertEqual({x["key"]: x["checked"] for x in js["in"]}, {f"#{n}": "verified"})
+        self.tool("settings", "--set", "uat=owner-decides", "--human")
+        self.push_main("lane off")
+        self.assertEqual(self.lane(n)["lane"], "owner")
+        self.assertEqual(self.shipping(), [])
+        self.assertIn("Nothing has passed", self.tool("ship", "--all", "--plan", check=False).stdout)
+
+    # ---- By case (the owner's word of 20 Nov 2026): an agent runs every case a test run or a simulator can show
+
+    SIM = "the phone simulator, API 35 image"
+
+    def statuses(self):
+        return [(x["context"], x["state"]) for x in self.gh().get("statuses", [])]
+
+    def test_the_lane_goes_by_case(self):
+        self.lane_on()
+        a = self.ticket("Every case in a test run or a simulator")
+        self.build(a, cases=["test", "simulator (API 35 image)", "tests", "emulator"])
+        r = self.lane(a)
+        self.assertEqual((r["lane"], [c["where"] for c in r["agent_cases"]], r["owner_cases"]),
+                         ("agents", ["test", "simulator", "test", "simulator"], []))
+        b = self.ticket("Some cases need a real phone or a person")
+        self.build(b, cases=["test", "simulator", "device (a chip read)", "person (new wording)", "phone"])
+        r = self.lane(b)
+        self.assertEqual((r["lane"], [c["n"] for c in r["agent_cases"]], [c["n"] for c in r["owner_cases"]]),
+                         ("both", ["1", "2"], ["3", "4", "5"]))
+        self.assertEqual(r["reason"], "a verifier runs cases 1, 2; cases 3 (device: a chip read), 4 (person: new "
+                                      "wording), 5 (device) are the owner's")
+        self.assertTrue(self.tool("lane", str(b)).stdout.startswith("agents, then owner: a verifier runs cases 1, 2"))
+        c = self.ticket("Nothing an agent can show")
+        self.build(c, cases=["device", "person"])
+        self.assertEqual((self.lane(c)["lane"], self.lane(c)["reason"]),
+                         ("owner", "no case an agent can show: cases 1 (device), 2 (person)"))
+        # A cell that doesn't say one of the four words is the owner's: nothing is given to an agent by a guess
+        d = self.ticket("A cell that says something else")
+        self.build(d, cases=["test", "anywhere", "<test | simulator | device | person>", ""])
+        r = self.lane(d)
+        self.assertEqual((r["lane"], [c["n"] for c in r["agent_cases"]], [c["n"] for c in r["owner_cases"]]),
+                         ("both", ["1"], ["2", "3", "4"]))
+        self.assertIn("2 (the plan doesn't say where)", r["reason"])
+        # One of the owner's own areas: an agent still runs every case it can, and the approval stays the owner's
+        e = self.ticket("In one of the owner's own areas")
+        self.build(e, files={"apps/mobile/screen.txt": "fixed\n"}, cases=["test", "simulator"])
+        r = self.lane(e)
+        self.assertEqual((r["lane"], [c["n"] for c in r["agent_cases"]], r["owner_cases"]), ("both", ["1", "2"], []))
+        self.assertEqual(r["reason"], "a verifier runs cases 1, 2; the approval is the owner's: it changes phones "
+                                      "(apps/mobile/screen.txt), one of the owner's own areas (owner_test_paths)")
+
+    def test_a_partly_verified_ticket_sends_only_its_other_cases_to_the_owner(self):
+        self.lane_on()
+        n, _, branch, head = self.handed("Fix the scan screen", cases=["test", "simulator", "device (a chip read)"])
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "In Review")                                   # a verifier first
+        self.assertIn("verifying", iss["labels"])
+        self.assertIn("Lane: agents, then the owner. A verifier runs cases 1 (test), 2 (simulator). For the owner "
+                      "afterwards: case 3 (device: a chip read).", self.comments(n)[-1])
+        v = self.claim(n)
+        p = self.verify(n, "verified", head, v, check=False)                           # the simulator's case, confirmed
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--simulator", p.stderr)
+        res = json.loads(self.run_tool("verify-result", str(n), "--verdict", "verified", "--head", head, "--claim", v,
+                                       "--tool", "Codex, model-x", "--simulator", self.SIM, "--body-file", self.card(),
+                                       "--json", tool=self.installed_tool()).stdout)
+        self.assertEqual((res["verdict"], res["status"], res["agent_cases"], res["owner_cases"]),
+                         ("partly-verified", "UAT", ["1", "2"], ["3"]))
+        record = next(b for b in self.comments(n) if b.startswith("🔎"))
+        self.assertTrue(record.startswith(
+            f"🔎 Partly verified by agents · branch `{branch}` · head {head} · claim {v} · Codex, model-x\n\n"
+            "Verified by an agent: cases 1 (test), 2 (simulator).\nFor the owner: case 3 (device: a chip read). "
+            "The verified cases aren't asked again.\n\n"
+            f"Simulator: case 2 ran in {self.SIM}, not on a device.\n\nWhat changed"))
+        self.assertIn('<!-- haam-verify {"agent": ["1", "2"], "owner": ["3"], "approval": ""} -->', record)
+        self.assertIn("@octocat", record)
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "UAT")                                         # the owner's part waits there
+        self.assertIn("partly-verified", iss["labels"])
+        for lab in ("verifying", "verified-by-agents", "uat-passed", "uat:skip", "claimed"):
+            self.assertNotIn(lab, iss["labels"])
+        self.assertEqual(self.statuses(), [("agent-verified", "pending")])              # never a pass, never `uat`
+        st = self.lane(n)["verification"]
+        self.assertEqual((st["verified"], st["partly"], st["agent_cases"], st["owner_cases"]),
+                         (False, True, ["1", "2"], ["3"]))
+        p = self.tool("issue", "label", str(n), "--add", "partly-verified", check=False)
+        self.assertIn("verify-result", p.stderr)                                       # only the verifier's tool
+        # `ship` takes nothing on an agent's partial run: it says what is still the owner's
+        self.assertEqual(self.shipping(), [])
+        self.assertIn(f"Left out: #{n}: partly verified by agents (claim {v}); still yours to test: case 3",
+                      self.tool("ship", "--all", "--plan").stdout)
+        self.assertIn("is partly verified by agents at its head already",
+                      self.tool("issue", "claim", str(n), "--for", "verify", check=False).stderr)
+        # The owner tests their case and passes: the ticket ships on their pass, and the release says who checked what
+        self.tool("checkout-pr", str(n))
+        self.tool("checkout-pr", "--back")
+        self.tool("publish", str(n), "--human")
+        self.assertIn(f"· #{n}: cases 1, 2 verified by agents (claim {v}), the rest by you",
+                      self.tool("ship", "--all", "--plan").stdout)
+        js = json.loads(self.tool("ship", "--all", "--plan", "--json").stdout)
+        self.assertEqual([(x["key"], x["checked"], x["partly_verified"][f"#{n}"]["agent"]) for x in js["in"]],
+                         [(f"#{n}", "passed", ["1", "2"])])
+        self.tool("ship", "--all", "--human", "--wait", "0", check=False)
+        rel = [x for x in self.gh()["prs"].values() if x["headRefName"].startswith("release/")]
+        self.assertEqual(len(rel), 1)
+        self.assertRegex(rel[0]["body"], rf"#{n}: Fix the scan screen \| `{head[:8]}` \| Tested and passed by @\S+ on \S+ "
+                                         rf"\(their part: case 3\); cases 1, 2 verified by agents \(claim {v}\) on ")
+
+    def test_a_later_push_ends_a_partial_verification_too(self):
+        self.lane_on()
+        n, _, branch, head = self.handed(cases=["test", "device"])
+        self.verify(n, "verified", head, self.claim(n))
+        self.assertTrue(self.lane(n)["verification"]["partly"])
+        git(self.proj, "switch", "-q", branch)
+        (self.proj / "src/app.py").write_text("print('again')\n")
+        git(self.proj, "commit", "-qam", "more code")
+        git(self.proj, "push", "-q", "origin", branch)
+        git(self.proj, "switch", "-q", "main")
+        st = self.lane(n)["verification"]
+        self.assertFalse(st["partly"])
+        self.assertIn("moved on since the partly verified commit", st["why"])
+        self.claim(n)                                                       # /next offers it for verification again
+
+    def test_an_owners_area_keeps_their_approval_and_a_verifier_can_hand_a_case_over(self):
+        self.lane_on()
+        n, _, _, head = self.handed("Fix the screen's total", files={"apps/mobile/screen.txt": "fixed\n"})
+        self.assertEqual(self.issue(n)["status"], "In Review")              # a verifier runs what can be run
+        v = self.claim(n)
+        self.verify(n, "verified", head, v)
+        record = next(b for b in self.comments(n) if b.startswith("🔎"))
+        self.assertIn("Verified by an agent: cases 1 (test), 2 (test).\nFor the owner: their own approval (it changes "
+                      "phones (apps/mobile/screen.txt), one of the owner's own areas (owner_test_paths)).", record)
+        self.assertEqual(self.issue(n)["status"], "UAT")
+        self.assertNotIn("verified-by-agents", self.labels(n))
+        self.assertEqual(self.statuses(), [("agent-verified", "pending")])
+        self.assertEqual(self.shipping(), [])                               # only the owner's own pass ships it
+        self.assertIn(f"Left out: #{n}: partly verified by agents (claim {v}); still yours to test: your own approval",
+                      self.tool("ship", "--all", "--plan").stdout)
+        # A case the plan gave to an agent turns out to need a real device: the verifier hands it over, with the reason
+        m, _, _, mhead = self.handed("Fix the export")
+        mv = self.claim(m)
+        more = ["--tool", "Codex, model-x", "--body-file", self.card()]
+        run = lambda *a: self.run_tool("verify-result", str(m), "--verdict", "verified", "--head", mhead, "--claim", mv,
+                                       *more, *a, tool=self.installed_tool(), check=False)
+        self.assertIn("--reason is required", run("--owner-cases", "2").stderr)
+        self.assertIn("isn't a case the plan gives to an agent", run("--owner-cases", "9", "--reason", "x").stderr)
+        self.assertIn("needs-owner", run("--owner-cases", "1,2", "--reason", "x").stderr)
+        self.assertEqual(run("--owner-cases", "2", "--reason", "it needs a real camera").returncode, 0)
+        record = next(b for b in self.comments(m) if b.startswith("🔎"))
+        self.assertIn("Verified by an agent: case 1 (test).\nFor the owner: case 2 (the verifier: it needs a real "
+                      "camera).", record)
+        self.assertEqual((self.issue(m)["status"], "partly-verified" in self.labels(m)), ("UAT", True))
 
 
 def git_status(cwd):

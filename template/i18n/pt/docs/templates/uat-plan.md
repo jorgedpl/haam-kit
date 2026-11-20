@@ -16,12 +16,13 @@ make dev
 - Feature flag: nenhuma / <como ativar>
 
 ## Casos de teste
-| # | AC | Passos | Resultado esperado | Passou? |
-|---|---|---|---|---|
-| 1 | AC1 | 1. … 2. … | … | [ ] |
-| 2 | AC2 | | | [ ] |
-| 3 | Caso-limite | | | [ ] |
-| 4 | Regressão | Percorra a jornada principal de ponta a ponta: <descreva> | Funciona como antes | [ ] |
+<!-- Where: onde cada caso pode ser mostrado. `test`: uma execução de testes, uma execução local ou um ambiente de teste · `simulator`: um simulador ou emulador · `device`: só um telefone de verdade ou outro dispositivo real · `person`: o julgamento de uma pessoa (design ou texto novos, sensação ou velocidade, um login ou um pagamento de terceiros). Com `uat: agents-verify`, um agente independente executa os casos `test` e `simulator`, e só os demais chegam ao product owner. Uma célula que diga outra coisa conta como do product owner. -->
+| # | AC | Passos | Resultado esperado | Where | Passou? |
+|---|---|---|---|---|---|
+| 1 | AC1 | 1. … 2. … | … | <test / simulator / device / person> | [ ] |
+| 2 | AC2 | | | | [ ] |
+| 3 | Caso-limite | | | | [ ] |
+| 4 | Regressão | Percorra a jornada principal de ponta a ponta: <descreva> | Funciona como antes | | [ ] |
 
 ## Fora do escopo deste teste
 - 
@@ -29,7 +30,6 @@ make dev
 ## Pré-verificação do agente (Agent pre-check)
 <!-- Preenchida pelo agente: o que ele mesmo verificou (testes, `make e2e`, uma ferramenta de navegador) e o que observou. -->
 - **Fully verified by the agent:** no  <!-- verificado por completo pelo agente: "yes" só sob as regras do passo 3 do /uat; nesse caso, o product owner pode aprovar com "pass all verified" -->
-- **Needs a person:** yes (<por quê>)  <!-- com `uat: agents-verify`: "no" só sob as regras do passo 3 do /uat; nesse caso, um agente independente o verifica no lugar do product owner -->
 - **Verified at:** <o commit de 40 caracteres de onde vêm suas evidências>
 - **Risk:** <low | medium | high>: <uma linha>
 - **Undo:** <como desfazer>

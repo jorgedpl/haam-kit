@@ -30,8 +30,8 @@ TRANSLATED = [
 
 # Text the skills or workflows look for, so it stays in English in every language.
 LITERALS = {
-    "docs/templates/uat-plan.md": ["**Fully verified by the agent:** no", "**Needs a person:**", "**Verified at:**",
-                                   "**Risk:**", "**Undo:**"],
+    "docs/templates/uat-plan.md": ["**Fully verified by the agent:** no", "**Verified at:**", "**Risk:**", "**Undo:**",
+                                   "| Where |", "<test / simulator / device / person>"],
     ".github/pull_request_template.md": ["Refs #"],
 }
 

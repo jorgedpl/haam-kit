@@ -6,6 +6,27 @@ Each release lists **Migration** steps when a project needs to do more than run 
 
 ## [Unreleased]
 
+The agents' lane of 1.20.0 (`uat: agents-verify`), changed before anyone used it (issue #24): its field project's owner asked for it to go by case. "Test whatever can be tested in simulators: if it is the full ticket, be it; if it is part of the ticket, be it too."
+
+### Changed
+- **The agents' lane goes by case, not by ticket.** Each test case of a UAT plan says where it can be shown, in a new `Where` column: `test` (a test run, a local run or a test environment), `simulator` (a simulator or emulator), `device` (only a real phone or other device) or `person` (a person's judgement: new design or wording, feel or speed). The verifier runs every `test` and `simulator` case. If that is every case, the ticket is verified and needs no test of the owner's, as before. If some cases need a real device or a person, the ticket is **partly verified**: only those cases go to the owner, and the verified ones aren't asked again. A cell that says anything else, or nothing, counts as the owner's, and so does a plan without the column. The plan's line `Needs a person:` is gone: the cases say it.
+- **"Anything on a device is the owner's" is no longer a rule of the lane.** A phone app's change takes the lane like any other, case by case: what a simulator shows, an agent runs; what needs the real device stays the owner's.
+- **`owner_test_paths` now keeps the owner's own approval, not the whole test.** A change under one of those areas still goes to a verifier first, which runs every case an agent can show and records it; the ticket is then partly verified and waits in `UAT` for the owner's own pass, with the verifier's record as evidence.
+- **A partly verified ticket has its own marks:** the label `partly-verified`, a `🔎 Partly verified by agents` comment that lists *Verified by an agent* and *For the owner* (and carries the case numbers for tools in a hidden `haam-verify` line), status `UAT`, and the commit status `agent-verified` as `pending`, never `success`. It is never the owner's pass and never ships by itself.
+- **`haam.py lane <ID>`** now answers `agents`, `agents, then owner` (`both` in `--json`) or `owner`, with the cases on each side. `owner` as a whole: the label `owner-test`, rework after the owner's failed test, commits kept from a prototype, no plan, a plan without the `Where` column, or no case an agent can show.
+- **`haam.py verify-result --verdict verified`** records a full or a partial verification by what is left for the owner. New: `--owner-cases <numbers> --reason "<why>"` hands the owner a case the plan gave to an agent (a verifier never takes one of the owner's), and `--simulator "<which>"` is required when the plan has `simulator` cases: it names where they ran.
+- **`ship`** takes a partly verified ticket only on the owner's own pass. Until then `ship --plan` names it under *Left out* with what is still theirs ("partly verified by agents (claim …); still yours to test: case 3"), also when nothing else has passed. Once passed, it goes in with the owner's passes, the plan says which cases an agent verified, and the release PR's table says "Tested and passed by @owner on <date> (their part: case 3); cases 1, 2 verified by agents (claim <id>) on <date>".
+- `/verify`, `/uat`, `/test`, `/next`, `/haam-settings`, AGENTS.md, GATES.md (G4) and the UAT plan template say the same, in every language the kit has. `metrics` counts partly verified tickets.
+
+### Fixed
+- **Rework after the owner's failed test stays the owner's, also once its label is gone.** `issue status <n> UAT` takes `uat-failed` off a rework handed over again, and the lane read only the label: such a ticket could then be handed to a verifier. The lane now reads the `❌ UAT failed` comment as well.
+- **One owner's ticket makes its whole branch the owner's.** A branch shared by several tickets ships as one, but the lane looked at one ticket: with one of them pulled back (`owner-test`) or failed by the owner, a verification of another could still ship the branch. The lane now reads the other open tickets the branch's commits name (`#12: …`) and the one it is named after.
+
+### Migration
+- `haam.py update`, then `python3 tools/haam/haam.py github --apply` for the new label `partly-verified`.
+- UAT plans need the `Where` column for the lane to give any case to an agent; a plan without it is the owner's test, as it was before the lane.
+- If you listed an app under `owner_test_paths` only because it runs on a device, you can take it off the list (`settings --set owner_test_paths=<area>= --human`): its `device` cases stay yours case by case.
+
 ## [1.20.0] - 2026-11-19
 
 Fixes and features from a busy test-first project with two Macs and many agent chats: its machine-lock and gate changes, brought up from its copy with their tests, and what its owner asked for next.

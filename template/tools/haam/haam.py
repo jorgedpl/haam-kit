@@ -121,8 +121,9 @@ DEFAULT_CONFIG = {
     "ci": "every-pr",            # every-pr | local | off
     "nightly": "on",             # on | off: the full check and dependency audit on main every night
     "uat": "owner-decides",      # owner-decides | always | bugs-skip | agents-verify
-    # uat: agents-verify. Areas that always keep the owner's own test, as {area name: [path patterns]}
-    # (settings --set owner_test_paths=<area>=<pattern>,<pattern> --human). Everything else may be verified by agents.
+    # uat: agents-verify. Areas that always keep the owner's own approval, as {area name: [path patterns]}
+    # (settings --set owner_test_paths=<area>=<pattern>,<pattern> --human). A verifier still runs every case there that
+    # an agent can show; everywhere else, a ticket whose every case an agent can show needs no test of the owner's.
     "owner_test_paths": {},
     "agents_verify_shadow": 10,  # the first N verified tickets still go to the owner's test too (0: off)
     "deploy_approval": "each",   # each: you approve every production deploy; automatic: deploys start on merge
@@ -190,11 +191,14 @@ SETTINGS = [
         "bugs-skip": "When you triage a bug, it's marked uat:skip unless you say test: it then merges once the checks "
                      "and reviews pass, without your test. Features still come to you; protected areas always do. "
                      "Fast for bug fixes; you rely on the tests and the reviews to catch a wrong fix.",
-        "agents-verify": "A change that needs no person to judge it (its plan says `Needs a person: no`) and touches "
-                         "none of your owner_test_paths is verified by an independent agent at the handed-over "
-                         "commit, with its own marks (never your pass). You are told, can pull any ticket back "
-                         "(`test <ID> myself`), and it ships only on your `ship`. The rest come to you as today. "
-                         "Needs owner_test_paths and the GitHub tracker."}),
+        "agents-verify": "By case: each case of a plan says where it can be shown (test, simulator, device, person). "
+                         "An independent agent runs every case a test run or a simulator can show, at the "
+                         "handed-over commit, with its own marks (never your pass). If that is every case, the "
+                         "ticket needs no test of yours; otherwise it is partly verified and only the cases that "
+                         "need a real device or a person's judgement come to you. A change under your "
+                         "owner_test_paths keeps your own approval after the agent's run. You are told, can pull "
+                         "any ticket back (`test <ID> myself`), and nothing ships without your `ship`. Needs "
+                         "owner_test_paths and the GitHub tracker."}),
     ("Testing", "agents_verify_shadow", int, "uat: agents-verify starts in shadow: this many verified tickets "
      "still come to your test too, so you can compare. 0: off.", {}),
     ("Grouping", "grouping", ["per-issue", "per-epic", "release"], "How changes become pull requests.", {
@@ -270,6 +274,7 @@ GITHUB_LABELS = [
     # uat: agents-verify (issue labels; `github --apply` creates them)
     ("verifying", "BFD4F2", "Handed over: waiting for an independent agent to verify it (uat: agents-verify)"),
     ("verified-by-agents", "0E8A16", "Verified by an independent agent at its head; not the owner's pass"),
+    ("partly-verified", "FEF2C0", "An agent verified the cases an agent can show; the rest waits for the owner"),
     ("verify-failed", "D93F0B", "The verifier sent it back: rework first, then verify again"),
     ("owner-test", "FBCA04", "The owner tests this one themselves; only the owner removes it"),
     ("spot-check", "C5DEF5", "A verified ticket picked for a second verification on another model"),
@@ -2015,7 +2020,8 @@ HUMAN_LABELS = {"agent-ready": "agent-ready is added only after a human approves
                 "uat:skip": "uat:skip (no UAT, merges by itself) is the owner's decision",
                 "mode:prototype": "mode:prototype (an agent builds a prototype first) is the owner's decision",
                 "mode:epic-build": "mode:epic-build (one agent builds the whole epic) is the owner's decision",
-                "verified-by-agents": "verified-by-agents is recorded only by `haam.py verify-result`"}
+                "verified-by-agents": "verified-by-agents is recorded only by `haam.py verify-result`",
+                "partly-verified": "partly-verified is recorded only by `haam.py verify-result`"}
 # Moving into these needs a human decision (they're done through human-only skills)
 HUMAN_STATUSES = {"Done", "Parked", "Canceled"}
 PROJECT_TOKEN_SECRET = "HAAM_PROJECT_TOKEN"
@@ -3795,6 +3801,8 @@ def verified_release_items(root, cfg, data, args):
     verification still covers the branch's tip (the agent-verified status on the verified commit), its lane is still
     `agents` against today's main, it has no owner-test, and it wasn't verified during the shadow start (then only
     the owner's own pass ships it). Each one kept out is named with its reason."""
+    for v in (data.get("passed") or {}).values():
+        v.pop("partly", None)  # read again on every run, from the tickets' own records
     if cfg.get("tracker") != "github":
         return [], []
     lcfg = lane_config(root)
@@ -3816,11 +3824,12 @@ def verified_release_items(root, cfg, data, args):
         if key in passed or key in taken or key in without or (wanted and key not in wanted):
             continue
         labels = [l["name"] if isinstance(l, dict) else l for l in it.get("labels") or []]
-        d = lane_details(root, lcfg, it["number"], labels=labels)
+        comments = issue_comments(repo, it["number"])
+        d = lane_details(root, lcfg, it["number"], labels=labels, comments=comments)
         if d["lane"] != "agents":
             left.append({"key": key, "why": f"verified by agents, but it's your test now: {d['reason']}"})
             continue
-        st = verification_state(root, lcfg, it["number"], labels, issue_comments(repo, it["number"]), d["head"])
+        st = verification_state(root, lcfg, it["number"], labels, comments, d["head"])
         if not st["verified"]:
             left.append({"key": key, "why": f"not verified any more: {st['why']}"})
             continue
@@ -3831,6 +3840,27 @@ def verified_release_items(root, cfg, data, args):
                             "by": None, "on": (st["at"] or "")[:10], "labels": [l for l in labels if l == "human-review"],
                             "verified": {"claim": st["claim"], "tool": st["tool"], "at": st["at"],
                                          "risk": (d.get("plan_fields") or {}).get("risk")}}))
+    # Partly verified: an agent's run never ships a ticket by itself. One the owner passed goes in on their pass, and
+    # the release says which cases an agent verified; one they haven't passed yet is named, with what waits for them.
+    c, o, _ = run(["gh", "issue", "list", "-R", repo, "--state", "open", "--label", PARTLY_LABEL, "--limit", "200",
+                   "--json", "number,title,labels"])
+    for it in (json.loads(o) if c == 0 and o else []):
+        key = f"#{it['number']}"
+        if key in taken or key in without or (wanted and key not in wanted):
+            continue
+        rec = (verdict_records(issue_comments(repo, it["number"])) or [None])[-1]
+        if not rec or rec["verdict"] != "partly":
+            continue
+        rest = "; ".join(x for x in (("case " if len(rec["owner_cases"]) == 1 else "cases ")
+                                     + ", ".join(rec["owner_cases"]) if rec["owner_cases"] else "",
+                                     "your own approval" if rec["approval"] else "") if x) or "the rest"
+        mine = next((v for k, v in passed.items() if key == k or key in (v.get("issues") or [])), None)
+        if mine is None:
+            left.append({"key": key, "why": f"partly verified by agents (claim {rec['claim']}); still yours to "
+                                            f"test: {rest}"})
+        elif verified_head_counts(root, rec["head"], mine.get("sha")):
+            mine.setdefault("partly", {})[key] = {"claim": rec["claim"], "at": rec["at"], "agent": rec["agent_cases"],
+                                                  "owner": rec["owner_cases"], "approval": bool(rec["approval"])}
     return items, left
 
 
@@ -3838,7 +3868,14 @@ def how_checked(v):
     """The release table's wording: the owner's pass, or the agents' verification. Never one for the other."""
     if v.get("verified"):
         return f"Verified by agents (claim {v['verified'].get('claim') or '?'}) on {v.get('on') or '?'}"
-    return f"Tested and passed by @{v.get('by') or '?'} on {v.get('on') or '?'}"
+    passed = f"Tested and passed by @{v.get('by') or '?'} on {v.get('on') or '?'}"
+    for key, part in (v.get("partly") or {}).items():
+        theirs = "; ".join(x for x in (("case " if len(part["owner"]) == 1 else "cases ") + ", ".join(part["owner"])
+                                       if part["owner"] else "", "their own approval" if part["approval"] else "") if x)
+        passed += (f" ({key if len(v.get('issues') or []) > 1 else 'their part'}: {theirs or 'the rest'}); "
+                   f"{'case' if len(part['agent']) == 1 else 'cases'} {', '.join(part['agent'])} verified by agents "
+                   f"(claim {part['claim'] or '?'}) on {(part['at'] or '?')[:10]}")
+    return passed
 
 
 def print_release_plan(comp, args, awaiting):
@@ -3846,7 +3883,8 @@ def print_release_plan(comp, args, awaiting):
     plan = {"in": [{"key": k, "issues": v["issues"], "title": v["title"], "sha": v["sha"], "by": v.get("by"),
                     "on": v.get("on"), "checked": "verified" if v.get("verified") else "passed",
                     **({"claim": v["verified"].get("claim"), "risk": v["verified"].get("risk")} if v.get("verified")
-                       else {})} for k, v in comp["included"]],
+                       else {}), **({"partly_verified": v["partly"]} if v.get("partly") else {})}
+                   for k, v in comp["included"]],
             "left_out": comp["left_out"], "clashes": comp["clashes"], "question": clash_question(comp["clashes"]),
             "files": comp["files"], "protected": comp["protected"], "migrations": comp["migrations"],
             "base": comp["base_sha"], "waiting_for_deploy": [r["pr"] for r in awaiting]}
@@ -3863,7 +3901,9 @@ def print_release_plan(comp, args, awaiting):
         if v.get("verified"):
             continue
         print(f"  {i}. {' '.join(v['issues'])}: {v['title']} · tested {v['sha'][:8]}"
-              + (f" · passed by @{v['by']} on {v['on']}" if v.get("by") else ""))
+              + (f" · passed by @{v['by']} on {v['on']}" if v.get("by") else "")
+              + "".join(f" · {k}: {'case' if len(x['agent']) == 1 else 'cases'} {', '.join(x['agent'])} verified by "
+                        f"agents (claim {x['claim']}), the rest by you" for k, x in (v.get("partly") or {}).items()))
     ver = [(i, v) for i, (_, v) in enumerate(comp["included"], 1) if v.get("verified")]
     if ver:
         print("Verified by agents, not passed by you (`ship without <IDs>` leaves any out):")
@@ -4135,7 +4175,8 @@ def ship_release(args, root, cfg):
             if not items:
                 return result("nothing to ship", 0, f"{INFO} Nothing has passed since the last release."
                               + (" Waiting for the deploy of " + ", ".join(f"release PR #{r['pr']}" for r in awaiting)
-                                 if awaiting else ""))
+                                 if awaiting else "")
+                              + "".join(f"\n{WARN} Left out: {x['key']}: {x['why']}" for x in vleft))
             try:
                 comp = release_composition(root, cfg, items, [show_ref(issue_ref(cfg, x)) for x in (args.first or [])])
             except RuntimeError as e:
@@ -5076,7 +5117,8 @@ def cmd_metrics(args):
     rows, queues = [], {k: [] for k, _, _, _ in QUEUES}
     to_done = {"all": [], "stream:bug": [], "stream:feature": [], "stream:idea": []}
     reruns, failures, found_in_uat, bugs_later, judge = [], 0, 0, [], {"decided": 0, "malformed": 0, "escalated": 0}
-    ver = {"handed_over": 0, "verified": [], "not_verified": 0, "sent_back": [], "needs_owner": [], "pulled_back": [],
+    ver = {"handed_over": 0, "verified": [], "partly_verified": [], "not_verified": 0, "sent_back": [],
+           "needs_owner": [], "pulled_back": [],
            "pulled_back_failed": [], "hours": []}
     closed_at = {i["number"]: iso_time(i["closedAt"]) for i in issues if i.get("closedAt")}
     for iss in issues:
@@ -5107,7 +5149,8 @@ def cmd_metrics(args):
             ver["handed_over"] += 1
             if vm["first_verdict"] and vm["first_verdict"] >= vm["handed"]:
                 ver["hours"].append(hours(vm["handed"], vm["first_verdict"]))
-        for key, verdict in (("verified", "verified"), ("sent_back", "not-verified"), ("needs_owner", "needs-owner")):
+        for key, verdict in (("verified", "verified"), ("partly_verified", "partly"), ("sent_back", "not-verified"),
+                             ("needs_owner", "needs-owner")):
             if verdict in vm["verdicts"]:
                 ver[key].append(iss["number"])
         ver["not_verified"] += vm["verdicts"].count("not-verified")
@@ -5189,7 +5232,8 @@ def metrics_text(res):
     if vf.get("handed_over") or vf.get("verified"):
         nums = lambda xs: f" (#{', #'.join(str(n) for n in xs[:8])})" if xs else ""
         lines += [c("1", "\nVerified by agents (uat: agents-verify)"),
-                  f"  Handed to a verifier: {vf['handed_over']}   ·   verified: {len(vf['verified'])}{nums(vf['verified'])}",
+                  f"  Handed to a verifier: {vf['handed_over']}   ·   verified: {len(vf['verified'])}{nums(vf['verified'])}"
+                  f"   ·   partly verified: {len(vf.get('partly_verified') or [])}{nums(vf.get('partly_verified') or [])}",
                   f"  Not verified: {vf['not_verified']} verdict(s) on {len(vf['sent_back'])} ticket(s)   ·   "
                   f"needs your test: {len(vf['needs_owner'])}{nums(vf['needs_owner'])}",
                   f"  Pulled back after a verification: {len(vf['pulled_back'])}{nums(vf['pulled_back'])}, "
@@ -7730,24 +7774,36 @@ def cmd_production(args):
 
 
 # ----------------------------------------------------------------------------- uat: agents-verify (the verify lane)
-# A change that needs no person to judge it, and touches none of the owner's own areas (owner_test_paths), is verified
-# by an independent agent at the handed-over commit instead of waiting in UAT. Its marks are its own (the commit status
-# `agent-verified`, the label `verified-by-agents`, a 🔎 comment), never the owner's (`uat`, `uat-passed`, `uat:skip`),
-# and it ships only on the owner's `ship`. `issue_lane`, `verification_state` and `verified_head_counts` are what
-# `ship` and the gate's helpers call.
+# By case: each case of a UAT plan says where it can be shown (the `Where` column: test, simulator, device, person).
+# An independent agent runs every case a test run or a simulator can show, at the handed-over commit. If that is every
+# case, and the change is in none of the owner's own areas (owner_test_paths), the ticket is verified and doesn't wait
+# in UAT; otherwise it is partly verified, and only the rest (the cases a real device or a person must judge, or the
+# owner's approval of their own area) goes to the owner. The marks are the lane's own (the commit status
+# `agent-verified`, the labels `verified-by-agents` and `partly-verified`, a 🔎 comment), never the owner's (`uat`,
+# `uat-passed`, `uat:skip`), and nothing ships without the owner's `ship`. `lane_details`, `verification_state` and
+# `verified_head_counts` are what `ship` and the gate's helpers call.
 
 OWNER_TEST_LABEL = "owner-test"
-LANE_LABEL_NAMES = {"verifying", "verified-by-agents", "verify-failed", OWNER_TEST_LABEL, "spot-check"}
+PARTLY_LABEL = "partly-verified"
+LANE_LABEL_NAMES = {"verifying", "verified-by-agents", PARTLY_LABEL, "verify-failed", OWNER_TEST_LABEL, "spot-check"}
 LANE_KEYS = ("uat", "owner_test_paths", "agents_verify_shadow", "max_review_rounds")
 VERIFY_CLAIM_WHAT = " to verify it"
 READY_VERIFY_MARK, READY_UAT_MARK = "🧪 Ready for verification", "🧪 Ready for UAT"
 VERIFIED_MARK, NOT_VERIFIED_MARK, NEEDS_OWNER_MARK = "🔎 Verified by agents", "🔎 Not verified", "🔎 Needs your test"
+PARTLY_MARK = "🔎 Partly verified by agents"
+PARTLY_DATA = re.compile(r"<!-- haam-verify (\{.*\}) -->")    # the cases, for tools (a project's lists, `ship`)
+SIMULATOR_MARK = "Simulator: "
+# Where a case of a plan can be shown (the plan's `Where` column). An agent runs the first two kinds.
+WHERE_WORDS = {"test": "test", "tests": "test", "simulator": "simulator", "emulator": "simulator",
+               "device": "device", "phone": "device", "person": "person"}
+AGENT_PLACES = ("test", "simulator")
+TICKETS_OF_A_COMMIT = re.compile(r"^\s*((?:#\d+[\s,&+]*)+):")      # "#12: fix", "#12 #13: fix both"
 PULLED_BACK_MARK = "↩️ Pulled back"
 VERIFIED_CONTEXT = "agent-verified"
 VERIFY_DOCS_ONLY = ("docs/uat/", "docs/changes/")   # a tip that differs from the verified commit only here still counts
 SPOT_CHECK_EVERY = 10
 SPIKE_COMMIT = re.compile(r"^(?:\S+:\s*)?spike:", re.I)     # as the gate reads a kept prototype's commits
-PLAN_KEYS = (("needs_person", "Needs a person"), ("verified_at", "Verified at"), ("risk", "Risk"), ("undo", "Undo"))
+PLAN_KEYS = (("verified_at", "Verified at"), ("risk", "Risk"), ("undo", "Undo"))
 OTHER_PHASES = (" to assess it", " to write its spec", " to build a prototype", VERIFY_CLAIM_WHAT)
 
 
@@ -7836,7 +7892,7 @@ def find_plan(root, ref, branch, head):
 
 
 def plan_lines(text):
-    """The Agent pre-check lines of a UAT plan: {needs_person, verified_at, risk, undo} (those it has)."""
+    """The Agent pre-check lines of a UAT plan: {verified_at, risk, undo} (those it has)."""
     text = text or ""
     m = re.search(r"(?m)^#+ .*Agent pre-check.*$", text)
     if m:
@@ -7851,6 +7907,107 @@ def plan_lines(text):
     return out
 
 
+def plan_cases(text):
+    """The plan's test cases and where each can be shown: [{n, where, note}], from the table whose header has a
+    `Where` column. where: test or simulator (an agent runs it), device or person (the owner's), or "" when the cell
+    says something else or nothing, which counts as the owner's. None when the plan has no such table."""
+    col, num, out = None, 0, None
+    for line in (text or "").splitlines():
+        if not line.lstrip().startswith("|"):
+            if out is not None:
+                break
+            continue
+        cells = [x.strip() for x in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        plain = [x.strip("`* ").lower() for x in cells]
+        if out is None:
+            if "where" in plain:
+                col, out = plain.index("where"), []
+                num = plain.index("#") if "#" in plain else 0
+            continue
+        if all(set(x) <= set("-: ") for x in cells) or col >= len(cells):
+            continue
+        raw = plain[col]
+        m = re.match(r"[a-z]+", raw)
+        where = WHERE_WORDS.get(m.group(0), "") if m and "<" not in raw else ""
+        note = raw[m.end():].strip(" :-()") if where else raw
+        out.append({"n": (cells[num].strip("`* ") if num < len(cells) else "") or str(len(out) + 1), "where": where,
+                    "note": note})
+    return out
+
+
+def say_cases(cases, places=False):
+    """"case 3" or "cases 1, 2, 4"; with places, each with where it can be shown: "cases 3 (device), 5 (person)"."""
+    if not cases:
+        return "no case"
+    def one(c):
+        if not places:
+            return c["n"]
+        what = (c["where"] or "the plan doesn't say where") + (f": {c['note']}" if c["note"] and c["where"] else "")
+        return f"{c['n']} ({what})"
+    return ("case " if len(cases) == 1 else "cases ") + ", ".join(one(c) for c in cases)
+
+
+def read_issue_comments(repo, number):
+    """The issue's comments, or an error: the lane never decides on comments it couldn't read."""
+    code, out, err = run(["gh", "issue", "view", str(number), "-R", repo, "--json", "comments"])
+    try:
+        if code == 0 and out:
+            return json.loads(out).get("comments") or []
+    except json.JSONDecodeError:
+        pass
+    raise RuntimeError(f"Couldn't read the comments of #{number}: {(err or out or '').strip()[:160]}")
+
+
+def owner_test_failed(comments):
+    """Whether the owner's own test of this ticket ever failed: a comment with a line that starts `❌ UAT failed`.
+    The label uat-failed comes off when the rework is handed over for UAT again, so the label alone doesn't say."""
+    return any(re.search(rf"(?m)^\s*{re.escape(FAILED_MARK)}", c.get("body") or "") for c in comments or [])
+
+
+def branch_tickets(subjects, branch, number):
+    """The other tickets a branch carries: the one it is named after and those its commits are for (`#12: …`)."""
+    found = []
+    lead = branch_issue(branch, number)
+    if isinstance(lead, int):
+        found.append(lead)
+    for subject in subjects:
+        m = TICKETS_OF_A_COMMIT.match(subject)
+        for n in re.findall(r"#(\d+)", m.group(1)) if m else []:
+            if int(n) not in found:
+                found.append(int(n))
+    return [n for n in found if n != number]
+
+
+def owner_ticket_on_branch(root, repo, others, head):
+    """What another open ticket on the same branch means for this one, as (kind, why). A branch ships as one, so
+    ("owner", …): that ticket is the owner's test (pulled back, or it failed their test), and so is the whole branch;
+    ("part", …): its own plan has cases only the owner can judge, so this ticket waits for the owner's pass too."""
+    part = ""
+    for n in others:
+        code, out, err = run(["gh", "issue", "view", str(n), "-R", repo, "--json", "labels,state,comments"])
+        if code != 0 and not re.search(r"(?i)not found|could not resolve", err or out or ""):
+            raise RuntimeError(f"Couldn't read #{n}, which is on the same branch: {(err or out or '').strip()[:160]}")
+        try:
+            data = json.loads(out) if code == 0 and out else {}
+        except json.JSONDecodeError:
+            data = {}
+        if not data or (data.get("state") or "").upper() != "OPEN":
+            continue                       # not an issue here, or closed: shipped earlier or cancelled
+        labels = [x.get("name") for x in data.get("labels") or []]
+        if OWNER_TEST_LABEL in labels:
+            return "owner", f"#{n}, which is the owner's test (label {OWNER_TEST_LABEL})"
+        if UAT_FAILED_LABEL in labels or owner_test_failed(data.get("comments")):
+            return "owner", f"#{n}, which failed the owner's test"
+        own = sorted(x for x in git_out(root, "ls-tree", "--name-only", head, "docs/uat/").splitlines()
+                     if x.rsplit("/", 1)[-1].startswith(f"{file_id(n)}-") and x.endswith(".md"))
+        if own and not part:
+            cases = plan_cases(git_out(root, "show", f"{head}:{own[0]}"))
+            mine = [c for c in cases or [] if c["where"] not in AGENT_PLACES]
+            if cases is None or mine:
+                part = f"#{n}, whose plan has cases for the owner" + (f" ({say_cases(mine, True)})" if mine else "")
+    return ("part", part) if part else ("", "")
+
+
 def issue_labels(repo, number):
     code, out, err = run(["gh", "issue", "view", str(number), "-R", repo, "--json", "labels"])
     if code != 0:
@@ -7858,10 +8015,13 @@ def issue_labels(repo, number):
     return [x.get("name") for x in (json.loads(out or "{}").get("labels") or [])]
 
 
-def lane_details(root, cfg, number, labels=None, branch=None, head=None, base=None):
-    """issue_lane with what it read: {lane, reason, branch, head, files, plan, plan_fields}."""
+def lane_details(root, cfg, number, labels=None, branch=None, head=None, base=None, comments=None):
+    """issue_lane with what it read: {lane, reason, branch, head, files, plan, plan_fields, agent_cases, owner_cases,
+    approval}. The lane goes by case. agents: an agent can show every case, and nothing else is the owner's. both: a
+    verifier runs agent_cases, and then the owner has their part (owner_cases: the cases only a real device or a
+    person can judge; approval: why the approval is theirs whatever the cases say). owner: nothing for a verifier."""
     d = {"issue": number, "lane": "owner", "reason": "", "branch": branch, "head": head, "files": [], "plan": None,
-         "plan_fields": {}}
+         "plan_fields": {}, "agent_cases": [], "owner_cases": [], "approval": ""}
 
     def owner(why):
         d["reason"] = why
@@ -7875,6 +8035,10 @@ def lane_details(root, cfg, number, labels=None, branch=None, head=None, base=No
         return owner("label owner-test: the owner tests it themselves")
     if "uat-failed" in labels:
         return owner("label uat-failed: rework after the owner's failed test stays the owner's")
+    repo = cfg["github_repo"]
+    if owner_test_failed(read_issue_comments(repo, number) if comments is None else comments):
+        return owner("it failed the owner's test (a `❌ UAT failed` comment): rework after the owner's failed test "
+                     "stays the owner's")
     if not branch or not head:
         found, target, _ = find_branch(root, cfg, number, branch)
         if not found:
@@ -7886,31 +8050,54 @@ def lane_details(root, cfg, number, labels=None, branch=None, head=None, base=No
             return owner(f"can't read the tip of {found}")
     base = base or default_base(root)
     d["files"] = files = branch_files(root, base, head)
-    for area, pats in owner_test_areas(cfg).items():
-        hits = protected_matches(pats, files)
-        if hits:
-            more = f" and {len(hits) - 1} more" if len(hits) > 1 else ""
-            return owner(f"changes {area} ({hits[0]}{more}), one of the owner's own areas (owner_test_paths)")
     subjects = git_out(root, "log", "--format=%s", f"{base}..{head}").splitlines()
     if any(SPIKE_COMMIT.match(s) for s in subjects):
         return owner("built from a prototype (spike: commits)")
     d["plan"], text = find_plan(root, number, branch, head)
-    d["plan_fields"] = fields = plan_lines(text)
-    need = fields.get("needs_person") or ""
-    if re.match(r"(?i)yes\b", need):
-        why = re.sub(r"(?i)^yes\b[\s:,-]*", "", need).strip()
-        return owner(f"needs a person: {why.strip('()') or 'the plan says so'}")
-    if not re.match(r"(?i)no\b", need):
-        return owner("the plan has no line `Needs a person: yes (<why>)` or `no`" if d["plan"] else
-                     "no UAT plan on the branch (docs/uat/), so no `Needs a person:` line")
-    d["lane"] = "agents"
-    d["reason"] = "needs no person, and changes none of the owner's own areas"
+    d["plan_fields"] = plan_lines(text)
+    if not d["plan"]:
+        return owner("no UAT plan on the branch (docs/uat/), so nothing says where each case can be shown")
+    cases = plan_cases(text)
+    if not cases:
+        return owner(f"the plan ({d['plan']}) has no test cases with a `Where` column (test, simulator, device or "
+                     "person), so nothing says what an agent can show")
+    d["agent_cases"] = mine = [c for c in cases if c["where"] in AGENT_PLACES]
+    d["owner_cases"] = theirs = [c for c in cases if c["where"] not in AGENT_PLACES]
+    if not mine:
+        return owner(f"no case an agent can show: {say_cases(theirs, True)}")
+    kind, other = owner_ticket_on_branch(root, repo, branch_tickets(subjects, branch, number), head)
+    if kind == "owner":
+        return owner(f"shares its branch with {other}")
+    why = []
+    for area, pats in owner_test_areas(cfg).items():
+        hits = protected_matches(pats, files)
+        if hits:
+            more = f" and {len(hits) - 1} more" if len(hits) > 1 else ""
+            why.append(f"changes {area} ({hits[0]}{more}), one of the owner's own areas (owner_test_paths)")
+    if kind == "part":
+        why.append(f"shares its branch with {other}")
+    d["approval"] = "; ".join(why)
+    if not theirs and not why:
+        d["lane"] = "agents"
+        d["reason"] = f"an agent can show every case ({say_cases(mine)}), and it changes none of the owner's own areas"
+        return d
+    d["lane"] = "both"
+    d["reason"] = (f"a verifier runs {say_cases(mine)}"
+                   + (f"; {say_cases(theirs, True)} {'is' if len(theirs) == 1 else 'are'} the owner's" if theirs else "")
+                   + (f"; the approval is the owner's: it {d['approval']}" if why else ""))
     return d
 
 
+def owner_part(owner_cases, approval):
+    """What is left for the owner after the verifier's run, in words."""
+    return "; ".join(x for x in (say_cases(owner_cases, True) if owner_cases else "",
+                                 f"their own approval (it {approval})" if approval else "") if x)
+
+
 def issue_lane(root, cfg, number, labels=None, branch=None, head=None, base=None):
-    """Who checks this ticket: ("agents", why) or ("owner", the first reason that applies). cfg: lane_config(root).
-    Reads the branch's changed files against the base (default origin/main), so fetch first."""
+    """Who checks this ticket: ("agents", why), ("both", why: a verifier first, then the owner's part) or ("owner",
+    the first reason that applies). cfg: lane_config(root). Reads the branch's changed files against the base
+    (default origin/main), so fetch first."""
     d = lane_details(root, cfg, number, labels=labels, branch=branch, head=head, base=base)
     return d["lane"], d["reason"]
 
@@ -7920,15 +8107,24 @@ def verdict_records(comments):
     out = []
     for c in comments:
         body = c.get("body") or ""
-        verdict = ("verified" if body.startswith(VERIFIED_MARK) else "not-verified" if body.startswith(NOT_VERIFIED_MARK)
+        verdict = ("verified" if body.startswith(VERIFIED_MARK) else "partly" if body.startswith(PARTLY_MARK)
+                   else "not-verified" if body.startswith(NOT_VERIFIED_MARK)
                    else "needs-owner" if body.startswith(NEEDS_OWNER_MARK) else None)
         if not verdict:
             continue
         first = body.splitlines()[0]
         get = lambda pat: (re.search(pat, first) or [None, ""])[1]
+        data = {}
+        if verdict == "partly":
+            try:
+                data = json.loads((PARTLY_DATA.search(body) or [None, "{}"])[1])
+            except json.JSONDecodeError:
+                data = {}
         out.append({"verdict": verdict, "branch": get(r"branch `([^`]+)`"), "head": get(r"· head ([0-9a-f]{7,40})"),
                     "claim": get(r"· claim ([0-9a-f]{6,})"), "tool": get(r"· claim [0-9a-f]{6,} · (.+)$").strip(),
                     "at": c.get("createdAt"), "shadow": "\n\nShadow start: " in body,
+                    "agent_cases": [str(x) for x in data.get("agent") or []],
+                    "owner_cases": [str(x) for x in data.get("owner") or []], "approval": data.get("approval") or "",
                     "reason": get(r"^🔎 Needs your test: (.*?) · branch") if verdict == "needs-owner" else ""})
     return out
 
@@ -7958,15 +8154,30 @@ def verification_state(root, cfg, number, labels, comments, head):
     """Whether the ticket counts as verified by agents at the branch's `head` now: {verified, why, verified_at, claim,
     tool, at}. Needs the verdict comment, the label, no owner-test, a head the verification still covers
     (verified_head_counts) and the agent-verified status on the verified commit. shadow: verified during the shadow
-    start (agents_verify_shadow), so the owner still tests it and only their pass ships it."""
+    start (agents_verify_shadow), so the owner still tests it and only their pass ships it. partly: an agent verified
+    agent_cases at this head and the rest (owner_cases, approval) waits for the owner; never `verified`."""
     recs = verdict_records(comments)
     rec = recs[-1] if recs else None
     st = {"verified": False, "why": "", "verified_at": None, "claim": None, "tool": None, "at": None,
-          "shadow": False}
+          "shadow": False, "partly": False, "agent_cases": [], "owner_cases": [], "approval": ""}
     if rec and rec["verdict"] == "verified":
         st.update(verified_at=rec["head"], claim=rec["claim"], tool=rec["tool"], at=rec["at"], shadow=rec["shadow"])
     if OWNER_TEST_LABEL in labels:
         st["why"] = "pulled back: the owner tests it (owner-test)"
+    elif rec and rec["verdict"] == "partly":
+        if PARTLY_LABEL not in labels:
+            st["why"] = f"no label {PARTLY_LABEL}"
+        elif not verified_head_counts(root, rec["head"], head):
+            st["why"] = (f"the branch moved on since the partly verified commit {rec['head'][:8]} (now "
+                         f"{(head or '?')[:8]}): it needs verifying again")
+        else:
+            st.update(partly=True, verified_at=rec["head"], claim=rec["claim"], tool=rec["tool"], at=rec["at"],
+                      agent_cases=rec["agent_cases"], owner_cases=rec["owner_cases"], approval=rec["approval"])
+            rest = "; ".join(x for x in (("case " if len(rec["owner_cases"]) == 1 else "cases ")
+                                         + ", ".join(rec["owner_cases"]) if rec["owner_cases"] else "",
+                                         "the owner's own approval" if rec["approval"] else "") if x)
+            st["why"] = (f"partly verified by agents at {rec['head'][:8]} (claim {rec['claim']}): "
+                         f"{rest or 'the rest'} waits for the owner's test")
     elif not rec or rec["verdict"] != "verified":
         st["why"] = ("sent back by the verifier (verify-failed)" if rec and rec["verdict"] == "not-verified"
                      else "the verifier asked for the owner's test" if rec and rec["verdict"] == "needs-owner"
@@ -8027,6 +8238,16 @@ def verify_claim_refusal(cfg, iss):
                                            head)["verified"]:
             return None
         return f"#{n} is verified by agents at its head already."
+    if PARTLY_LABEL in labels and "verifying" not in labels and iss["status"] == "UAT":
+        # A later push ended the partial verification: the agent's cases are run again at the new head
+        root = find_repo_root(Path.cwd())
+        run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=root)
+        branch, target, _ = find_branch(root, lcfg, n)
+        head = git_out(root, "rev-parse", "--verify", "--quiet", target) if branch else ""
+        if head and not verification_state(root, lcfg, n, labels, issue_comments(lcfg["github_repo"], n),
+                                           head)["partly"]:
+            return None
+        return f"#{n} is partly verified by agents at its head already: the rest is the owner's."
     if "verifying" not in labels or iss["status"] != "In Review":
         return (f"#{n} isn't waiting for a verifier (status {iss['status'] or '-'}, no label verifying). "
                 "/uat hands a ticket over with `haam.py handover`.")
@@ -8063,20 +8284,22 @@ def lane_start(args, what):
 
 
 def cmd_lane(args):
-    """Who checks this ticket under uat: agents-verify: `agents` (an independent verifier) or `owner` (the owner's own
-    test), with the first reason that applies; and whether a verification still counts."""
+    """Who checks this ticket under uat: agents-verify, by case: `agents` (an independent verifier runs every case),
+    `agents, then owner` (the verifier's cases first, then the owner's part) or `owner` (the owner's own test, with
+    the first reason that applies); and whether a verification, full or partial, still counts."""
     root, cfg, lcfg, number, repo = lane_start(args, "lane")
     try:
-        d = lane_details(root, lcfg, number, branch=args.branch)
-        if d["lane"] == "agents":
-            d["verification"] = verification_state(root, lcfg, number, issue_labels(repo, number),
-                                                    issue_comments(repo, number), d["head"])
+        on = setting_value(lcfg, "uat") == "agents-verify"
+        labels, comments = (issue_labels(repo, number), read_issue_comments(repo, number)) if on else ([], [])
+        d = lane_details(root, lcfg, number, labels=labels, branch=args.branch, comments=comments)
+        if d["lane"] != "owner":
+            d["verification"] = verification_state(root, lcfg, number, labels, comments, d["head"])
     except RuntimeError as e:
         sys.exit(str(e))
     if args.json:
         print(json.dumps(d, indent=2))
         return
-    print(f"{d['lane']}: {d['reason']}")
+    print(f"{'agents, then owner' if d['lane'] == 'both' else d['lane']}: {d['reason']}")
     if d.get("branch") and d.get("head"):
         print(f"   branch {d['branch']} at {d['head'][:8]}" + (f" · plan {d['plan']}" if d.get("plan") else ""))
     v = d.get("verification")
@@ -8085,8 +8308,9 @@ def cmd_lane(args):
 
 
 def cmd_handover(args):
-    """/uat's hand-over (GitHub Projects): the lane decides where a built ticket goes. agents: status In Review, label
-    verifying and `🧪 Ready for verification`; owner: status UAT and `🧪 Ready for UAT` with the reason."""
+    """/uat's hand-over (GitHub Projects): the lane decides where a built ticket goes. agents, or agents then owner:
+    status In Review, label verifying and `🧪 Ready for verification` (with what is left for the owner afterwards);
+    owner: status UAT and `🧪 Ready for UAT` with the reason."""
     root, cfg, lcfg, number, repo = lane_start(args, "handover")
     board = GHProject(cfg)
     try:
@@ -8112,7 +8336,7 @@ def cmd_handover(args):
     plan = d["plan"] or find_plan(root, number, branch, head)[0]
     f = d["plan_fields"]
     owner = cfg.get("product_owner_github")
-    if d["lane"] == "agents":
+    if d["lane"] != "owner":
         bad = []
         if not re.fullmatch(r"[0-9a-f]{40}", (f.get("verified_at") or "").lower()):
             bad.append("`Verified at: <the 40-character commit your evidence is from>`")
@@ -8128,13 +8352,17 @@ def cmd_handover(args):
                      + "; ".join(bad))
         try:
             edit_issue_labels(repo, number, add=["verifying"],
-                              remove=[x for x in ("verify-failed", "verified-by-agents") if x in iss["labels"]])
+                              remove=[x for x in ("verify-failed", "verified-by-agents", PARTLY_LABEL)
+                                      if x in iss["labels"]])
         except RuntimeError as e:
             sys.exit(f"Couldn't label #{number}: {e}")
         board.set_option(iss, "Status", "In Review")
         status = "In Review"
         body = (f"{READY_VERIFY_MARK} · branch `{branch}` · head {head}\n\n"
-                f"Lane: agents ({d['reason']}). Risk: {f['risk']}. Undo: {f['undo']}.\nPlan: `{plan}`"
+                + (f"Lane: agents ({d['reason']})." if d["lane"] == "agents" else
+                   f"Lane: agents, then the owner. A verifier runs {say_cases(d['agent_cases'], True)}. For the owner "
+                   f"afterwards: {owner_part(d['owner_cases'], d['approval'])}.")
+                + f" Risk: {f['risk']}. Undo: {f['undo']}.\nPlan: `{plan}`"
                 + (f"\n\n{summary}" if summary else ""))
     else:
         board.set_option(iss, "Status", "UAT")
@@ -8148,13 +8376,15 @@ def cmd_handover(args):
     if code != 0:
         sys.exit(f"Couldn't comment on #{number}: {(err or out)[:200]}")
     res = {"issue": number, "lane": d["lane"], "reason": d["reason"], "status": status, "branch": branch, "head": head,
-           "plan": plan}
+           "plan": plan, "agent_cases": [c["n"] for c in d["agent_cases"]],
+           "owner_cases": [c["n"] for c in d["owner_cases"]], "approval": d["approval"]}
     if args.json:
         print(json.dumps(res, indent=2))
         return
     print(f"{OK} #{number} → {status} ({d['lane']}: {d['reason']})")
-    print("   A verifier takes it: /work verify, or /next." if d["lane"] == "agents" else
-          f"   The owner tests it: /test {number}")
+    print(f"   The owner tests it: /test {number}" if d["lane"] == "owner" else
+          "   A verifier takes it: /work verify, or /next."
+          + ("" if d["lane"] == "agents" else " Then the owner: " + owner_part(d["owner_cases"], d["approval"]) + "."))
 
 
 def checklist(text):
@@ -8178,7 +8408,8 @@ def verified_ticket_count(repo, exclude=None):
 
 
 def cmd_verify_result(args):
-    """The verifier's verdict, recorded with its own marks (never the owner's): verified, not-verified or needs-owner."""
+    """The verifier's verdict, recorded with its own marks (never the owner's): verified (in full, or partly when
+    something is left for the owner), not-verified or needs-owner."""
     root, cfg, lcfg, number, repo = lane_start(args, "verify-result")
     verdict = args.verdict
     card = Path(args.body_file).read_text().strip() if args.body_file else ""
@@ -8218,12 +8449,37 @@ def cmd_verify_result(args):
     head = tip
     run(["git", "fetch", "--quiet", "origin", branch], cwd=root)
     try:
-        lane, why = issue_lane(root, lcfg, number, labels=iss["labels"], branch=branch, head=head)
+        ld = lane_details(root, lcfg, number, labels=iss["labels"], branch=branch, head=head, comments=comments)
     except RuntimeError as e:
         sys.exit(str(e))
+    lane, why = ld["lane"], ld["reason"]
     if lane == "owner":
         sys.exit(f"#{number}'s lane is owner ({why}): the owner tests it. Release your claim: "
                  f"issue release {number} --claim {args.claim}")
+    # By case: the verifier ran the cases an agent can show. It may hand a case to the owner (it turned out to need a
+    # real device or a person), never take one from them.
+    ran, theirs = list(ld["agent_cases"]), list(ld["owner_cases"])
+    handed = [x.strip().lstrip("#") for x in (getattr(args, "owner_cases", None) or "").split(",") if x.strip()]
+    if handed:
+        if verdict != "verified":
+            sys.exit("--owner-cases goes with --verdict verified: the cases you ran pass, and these are the owner's.")
+        unknown = [x for x in handed if x not in [c["n"] for c in ran]]
+        if unknown:
+            sys.exit(f"--owner-cases: {', '.join(unknown)} isn't a case the plan gives to an agent "
+                     f"({say_cases(ran)}). A case the plan gives to the owner stays the owner's.")
+        if not (args.reason or "").strip():
+            sys.exit("--reason is required with --owner-cases: why those cases need a real device or a person")
+        theirs += [dict(c, where="the verifier", note=" ".join(args.reason.split())) for c in ran if c["n"] in handed]
+        ran = [c for c in ran if c["n"] not in handed]
+        if not ran:
+            sys.exit("That leaves no case you verified: the verdict is needs-owner, with the reason.")
+    ran_in = " ".join((getattr(args, "simulator", None) or "").split())
+    sims = [c for c in ran if c["where"] == "simulator"]
+    if verdict == "verified" and sims and not ran_in:
+        sys.exit(f"The plan says a simulator or emulator shows {say_cases(sims)}. Run them there and name it with "
+                 "--simulator \"<the simulator or emulator you ran them in>\"; a case that needs a real device goes "
+                 "to the owner with --owner-cases <numbers> --reason \"<why>\".")
+    partly = verdict == "verified" and (lane == "both" or bool(handed))
     rounds = sum(1 for r in verdict_records(comments) if r["verdict"] == "not-verified")
     max_rounds = int(setting_value(lcfg, "max_review_rounds") or 2)
     if verdict != "needs-owner" and rounds >= max_rounds:
@@ -8240,7 +8496,25 @@ def cmd_verify_result(args):
     owner = cfg.get("product_owner_github")
     when = time.strftime("%Y-%m-%d")
     res = {"issue": number, "verdict": verdict, "branch": branch, "head": head, "claim": args.claim}
-    if verdict == "verified":
+    if partly:
+        # The agent's part is done; the rest is the owner's. Never the status the release reads as verified.
+        gh_api("POST", f"repos/{repo}/statuses/{head}", {
+            "state": "pending", "context": VERIFIED_CONTEXT,
+            "description": f"Partly verified by agents (claim {args.claim}) on {when}: the rest is the owner's"[:140]})
+        rest = owner_part(theirs, ld["approval"])
+        data = {"agent": [c["n"] for c in ran], "owner": [c["n"] for c in theirs], "approval": ld["approval"]}
+        body = (f"{PARTLY_MARK}{tail}\n\nVerified by an agent: {say_cases(ran, True)}.\nFor the owner: {rest}. "
+                "The verified cases aren't asked again."
+                + (f"\n\n{SIMULATOR_MARK}{say_cases(sims)} ran in {ran_in}, not on a device." if sims else "")
+                + f"\n\n{card}\n\n<!-- haam-verify {json.dumps(data)} -->" + (f"\n\n@{owner}" if owner else ""))
+        add = [PARTLY_LABEL]
+        remove = [x for x in ("verifying", "verify-failed", "verified-by-agents", "spot-check", CLAIMED_LABEL)
+                  if x in labels]
+        extra = []
+        status = "UAT"
+        res.update(verdict="partly-verified", agent_cases=data["agent"], owner_cases=data["owner"],
+                   approval=ld["approval"])
+    elif verdict == "verified":
         nth = verified_ticket_count(repo, exclude=number) + 1
         shadow_n = int(setting_value(lcfg, "agents_verify_shadow") or 0)
         shadow = nth <= shadow_n
@@ -8251,6 +8525,8 @@ def cmd_verify_result(args):
         if code != 0:
             sys.exit(f"Couldn't record the verification on the commit: {(err or '')[:200]}")
         body = f"{VERIFIED_MARK}{tail}\n\n{card}"
+        if sims:
+            body += f"\n\n{SIMULATOR_MARK}{say_cases(sims)} ran in {ran_in}, not on a device."
         if shadow:
             body += (f"\n\nShadow start: verified ticket {nth} of {shadow_n}. The owner still tests it, as before "
                      f"(`/test {number}`), so the two can be compared." + (f" @{owner}" if owner else ""))
@@ -8258,7 +8534,7 @@ def cmd_verify_result(args):
             body += (f"\n\nSpot-check: every {SPOT_CHECK_EVERY}th verified ticket is verified again by a second "
                      "verifier on another model (label `spot-check`).")
         add = ["verified-by-agents"] + (["spot-check"] if spot_new else [])
-        remove = [x for x in ("verifying", "verify-failed", CLAIMED_LABEL) if x in labels]
+        remove = [x for x in ("verifying", "verify-failed", PARTLY_LABEL, CLAIMED_LABEL) if x in labels]
         if "spot-check" in labels:
             remove.append("spot-check")          # the second verification is done
         status = "UAT" if shadow else "In Review"
@@ -8269,7 +8545,8 @@ def cmd_verify_result(args):
                                                          "description": f"Not verified (claim {args.claim}) on {when}"})
         body = f"{NOT_VERIFIED_MARK}{tail}\n\n{checklist(card)}"
         add = ["verify-failed"]
-        remove = [x for x in ("verifying", "verified-by-agents", "spot-check", CLAIMED_LABEL) if x in labels]
+        remove = [x for x in ("verifying", "verified-by-agents", PARTLY_LABEL, "spot-check", CLAIMED_LABEL)
+                  if x in labels]
         extra = sum((["--remove-assignee", a] for a in iss["assignees"]), [])
         status = "Ready"
         res["round"] = rounds + 1
@@ -8280,7 +8557,7 @@ def cmd_verify_result(args):
         body = (f"{NEEDS_OWNER_MARK}: {reason}{tail}" + (f"\n\n{card}" if card else "")
                 + (f"\n\n@{owner}" if owner else ""))
         add = [OWNER_TEST_LABEL]
-        remove = [x for x in ("verifying", "spot-check", CLAIMED_LABEL) if x in labels]
+        remove = [x for x in ("verifying", PARTLY_LABEL, "spot-check", CLAIMED_LABEL) if x in labels]
         extra = []
         status = "UAT"
     code, out, err = run(["gh", "issue", "comment", str(number), "-R", repo, "--body", body])
@@ -8293,12 +8570,15 @@ def cmd_verify_result(args):
     if iss["status"] != status:
         board.set_option(iss, "Status", status)
     run(["gh", "issue", "comment", str(number), "-R", repo, "--body",
-         f"{RELEASE_MARK} ({args.claim}) · verdict {verdict}" + (f" · status {status}" if status != iss["status"] else "")])
+         f"{RELEASE_MARK} ({args.claim}) · verdict {res['verdict']}"
+         + (f" · status {status}" if status != iss["status"] else "")])
     res["status"] = status
     if args.json:
         print(json.dumps(res, indent=2))
         return
-    print(f"{OK} #{number}: {verdict} at {head[:8]} → {status}; claim {args.claim} released")
+    print(f"{OK} #{number}: {res['verdict']} at {head[:8]} → {status}; claim {args.claim} released")
+    if partly:
+        print(f"   Verified by an agent: {say_cases(ran)}. For the owner: {owner_part(theirs, ld['approval'])}.")
     if res.get("shadow"):
         print(f"   Shadow start ({res['nth']} of {setting_value(lcfg, 'agents_verify_shadow')}): the owner tests it too.")
     if res.get("spot_check"):
@@ -8751,7 +9031,8 @@ def main():
     p.add_argument("--human", action="store_true", help="the owner said the build is done, in this session")
     p.set_defaults(func=cmd_cadence)
 
-    p = common(sub.add_parser("lane", help="uat: agents-verify: who checks this ticket, agents or the owner, and why"))
+    p = common(sub.add_parser("lane", help="uat: agents-verify: who checks this ticket's cases, an agent or the owner, "
+                                           "and why"))
     p.add_argument("issue", help="issue number (#12)")
     p.add_argument("--branch", help="the ticket's branch, when it isn't named after the issue")
     p.set_defaults(func=cmd_lane)
@@ -8769,7 +9050,11 @@ def main():
     p.add_argument("--head", required=True, help="the commit you verified: the branch's tip on GitHub")
     p.add_argument("--claim", required=True, help="your verify claim's id (issue claim <n> --for verify)")
     p.add_argument("--body-file", help="the card (verified), the findings one per line (not-verified)")
-    p.add_argument("--reason", help="needs-owner: why the owner must test it")
+    p.add_argument("--reason", help="needs-owner: why the owner must test it; with --owner-cases: why those cases")
+    p.add_argument("--owner-cases", help="verified: cases the plan gave to an agent that turned out to need a real "
+                                         "device or a person, comma-separated; they go to the owner (with --reason)")
+    p.add_argument("--simulator", help="verified, when the plan gives cases to a simulator: the simulator or emulator "
+                                       "you ran them in")
     p.add_argument("--tool", help="your agent tool and model, e.g. 'Claude Code, <model>'")
     p.add_argument("--branch", help="the ticket's branch, when it isn't named after the issue")
     p.set_defaults(func=cmd_verify_result)

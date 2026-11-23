@@ -234,8 +234,14 @@ if a[:2] == ["issue", "edit"]:
         i["labels"] = [l for l in i["labels"] if l != x]
     save(); sys.exit(0)
 if a[:2] == ["issue", "view"]:
+    i = st["issues"].get(a[2]) or {}
     out({"comments": [{"body": c["body"], "createdAt": c.get("createdAt", "2026-01-01T00:00:00Z")}
-                      for c in st["comments"] if c["issue"] == int(a[2])]})
+                      for c in st["comments"] if c["issue"] == int(a[2])],
+         "labels": [{"name": x} for x in i.get("labels", [])], "state": i.get("state"), "title": i.get("title")})
+if a[:2] == ["issue", "list"]:
+    want, state = opts(a, "--label"), opt(a, "--state", "open")
+    out([{"number": int(k), "title": i["title"], "labels": [{"name": x} for x in i["labels"]]} for k, i in st["issues"].items()
+         if all(x in i["labels"] for x in want) and (state == "all" or i["state"] == state.upper())])
 if a[:2] == ["issue", "comment"]:
     import datetime
     st["comments"].append({"issue": int(a[2]), "body": opt(a, "--body"),

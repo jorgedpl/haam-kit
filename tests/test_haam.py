@@ -30,6 +30,10 @@ def git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
+def git_out(cwd, *args):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
 class ToolTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="haam-test-"))
@@ -76,7 +80,11 @@ const pr = Object.assign({ number: 7, title: '#12: Bump deps', head: { ref: '12-
 const issue = (n) => scenario.issues[n] === undefined ? null : Object.assign({ state: 'open', labels: [] },
   Array.isArray(scenario.issues[n]) ? { labels: scenario.issues[n] } : scenario.issues[n]);
 const github = {
-  paginate: async (fn) => fn === 'files' ? scenario.files : fn === 'pulls' ? [pr] : fn === 'commits' ? (scenario.commits || []) : [],
+  // Every label was added by the owner unless the scenario names another login (the gate counts only the owner's).
+  paginate: async (fn, params) => fn === 'files' ? scenario.files : fn === 'pulls' ? [pr] : fn === 'commits' ? (scenario.commits || [])
+    : fn === 'events' ? (params.issue_number === pr.number ? pr.labels.map(l => l.name) : (issue(params.issue_number) || { labels: [] }).labels)
+        .map(name => ({ event: 'labeled', label: { name }, actor: { login: scenario.labeller || 'octo-owner', type: 'User' } }))
+    : fn === 'comments' ? (scenario.comments || []) : [],
   rest: {
     pulls: { get: async () => ({ data: pr }), listFiles: 'files', list: 'pulls', listCommits: 'commits' },
     issues: { get: async ({ issue_number }) => {
@@ -84,15 +92,16 @@ const github = {
                 if (!i) throw new Error('Not Found');
                 return { data: Object.assign({}, i, { labels: i.labels.map(n => ({ name: n })) }) };
               },
-              listComments: 'comments', removeLabel: async () => {}, createComment: async () => {},
+              listComments: 'comments', listEvents: 'events', removeLabel: async () => {}, createComment: async () => {},
               addLabels: async (x) => calls.labels.push(...x.labels) },
-    repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify(Object.assign({ tracker: scenario.tracker },
+    repos: { getContent: async () => ({ data: { content: Buffer.from(JSON.stringify(Object.assign({ tracker: scenario.tracker,
+                 product_owner_github: scenario.owner === undefined ? 'octo-owner' : scenario.owner },
                  scenario.protected ? { protected_paths: scenario.protected } : {},
                  scenario.uat ? { uat: scenario.uat } : {}))).toString('base64') } }),
              createCommitStatus: async (x) => calls.statuses.push(x), listCommitStatusesForRef: 'statuses' },
   },
 };
-const context = { repo: { owner: 'o', repo: 'r' }, eventName: scenario.event || 'pull_request',
+const context = { repo: { owner: 'o', repo: 'r' }, eventName: scenario.event || 'pull_request_target',
   payload: scenario.event === 'issues' ? { action: 'unlabeled', issue: { number: 12 } }
                                        : { action: 'labeled', pull_request: { number: 7 } } };
 process.env.REVIEW_MODE = scenario.review || '';
@@ -231,7 +240,7 @@ class TestRepository(unittest.TestCase):
     def test_override_comment_satisfies_the_gate(self):
         """The comment /override posts must be one gates.yml accepts, and one that starts a gate run."""
         gates = (KIT / ".github/workflows/gates.yml").read_text()
-        js = re.search(r"comments\.find\(c =>\s*/(.+?)/\.test\(c\.body\)\)", gates).group(1)
+        js = re.search(r"comments\.filter\(c =>\s*/(.+?)/\.test\(c\.body\)\)", gates).group(1)
         accepts = re.compile(js.replace("\\/", "/"))
         triggers = re.findall(r"startsWith\(github\.event\.comment\.body, '([^']+)'\)", gates)
         skill = (KIT / ".agents/skills/override/SKILL.md").read_text()
@@ -646,6 +655,61 @@ class TestAgentsDoctorDev(ToolTestCase):
         self.run_tool("ci-settings", "--review", "github", "--human", tool=tool)
         self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["review"], "github")
 
+    def test_settings_window_counts_at_once_everywhere_and_ends_by_itself(self):
+        import datetime
+        self.install()
+        tool = self.installed_tool()
+        self.run_tool("config", "--product", "Acme", "--max-in-uat", "10", tool=tool)
+        win = self.proj / ".git" / "haam-settings-window.json"
+        cfg_before = (self.proj / "haam.config.json").read_text()
+        day = str(datetime.date.today() + datetime.timedelta(days=5))
+        self.assertNotEqual(self.run_tool("settings", "--set", "max_in_uat=100", "--until", day, tool=tool,
+                                          check=False).returncode, 0)                 # the owner's choice only
+        self.run_tool("settings", "--set", "max_in_uat=100", "--until", day, "--human", tool=tool)
+        self.assertEqual((self.proj / "haam.config.json").read_text(), cfg_before)     # the file isn't touched
+        w = json.loads(win.read_text())["max_in_uat"]
+        self.assertEqual((w["value"], w["until"]), (100, day))
+        self.assertTrue(w["set_at"])
+        res = json.loads(self.run_tool("settings", "--json", tool=tool).stdout)
+        row = next(r for r in res["settings"] if r["key"] == "max_in_uat")
+        self.assertEqual((row["value"], row["configured"], row["window"]["until"]), (100, 10, day))
+        self.assertIn(f"max_in_uat 100 until {day}", self.run_tool("settings", tool=tool).stdout)
+        self.assertIn(f"Settings window on this computer: max_in_uat 100 until {day}",
+                      self.run_tool("doctor", tool=tool, check=False).stdout)
+        # An agent's worktree reads it too (the common git dir), but can't open or end one
+        git(self.proj, "worktree", "add", "-q", "-b", "agent-x", str(self.tmp / "wt"))
+        res = json.loads(self.run_tool("settings", "--json", tool=tool, cwd=self.tmp / "wt").stdout)
+        self.assertEqual(next(r for r in res["settings"] if r["key"] == "max_in_uat")["value"], 100)
+        for args in (("--set", "max_in_uat=5", "--until", day), ("--clear-window", "max_in_uat")):
+            p = self.run_tool("settings", *args, "--human", tool=tool, cwd=self.tmp / "wt", check=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("agent's worktree", p.stderr)
+        # A date and time (local); not in the past; only for the limits
+        tomorrow = str(datetime.date.today() + datetime.timedelta(days=1))
+        self.run_tool("settings", "--set", "max_pr_lines=900", "--until", f"{tomorrow} 08:30", "--human", tool=tool)
+        self.assertEqual(json.loads(win.read_text())["max_pr_lines"]["until"], f"{tomorrow}T08:30")
+        for args in (("--set", "max_in_uat=5", "--until", "2020-01-01"), ("--set", "max_in_uat=5", "--until", "soon"),
+                     ("--set", "flow=checks-first", "--until", day), ("--clear-window", "flow"),
+                     ("--set", "max_in_uat=5", "--set", "ci=off", "--until", day)):
+            self.assertNotEqual(self.run_tool("settings", *args, "--human", tool=tool, check=False).returncode, 0, args)
+        p = self.run_tool("settings", "--set", "flow=checks-first", "--until", day, "--human", tool=tool, check=False)
+        self.assertIn("only for the limits", p.stderr)
+        # An ended window is ignored, and dropped on the next write
+        data = json.loads(win.read_text())
+        data["max_in_uat"]["until"] = "2020-01-01T10:00"
+        win.write_text(json.dumps(data))
+        res = json.loads(self.run_tool("settings", "--json", tool=tool).stdout)
+        self.assertEqual(next(r for r in res["settings"] if r["key"] == "max_in_uat")["value"], 10)
+        self.assertEqual(list(res["windows"]), ["max_pr_lines"])
+        self.run_tool("settings", "--set", "max_open_prs=40", "--until", day, "--human", tool=tool)
+        self.assertEqual(sorted(json.loads(win.read_text())), ["max_open_prs", "max_pr_lines"])
+        # Ended early, one at a time
+        self.run_tool("settings", "--clear-window", "max_pr_lines", "--clear-window", "max_open_prs", "--human",
+                      tool=tool)
+        self.assertFalse(win.exists())
+        self.assertEqual(json.loads(self.run_tool("settings", "--json", tool=tool).stdout)["windows"], {})
+        self.assertEqual((self.proj / "haam.config.json").read_text(), cfg_before)
+
     def test_dev_keeps_the_repositorys_own_git_hooks(self):
         self.install()
         hooks = self.proj / ".git/hooks"
@@ -747,7 +811,9 @@ class TestGitHub(ToolTestCase):
         env = next(json.loads(r["body"]) for r in writes if any(x.endswith("environments/production") for x in r["args"]))
         self.assertEqual(env["reviewers"], [{"type": "User", "id": 583231}])
         created = [r["args"][2] for r in writes if r["args"][:2] == ["label", "create"]]
-        self.assertEqual(sorted(created), ["ai-review-overruled", "epic-build", "gate-override", "human-review", "uat:skip"])
+        self.assertEqual(sorted(created), ["ai-review-overruled", "epic-build", "gate-override", "human-review",
+                                           "owner-test", "spot-check", "uat:skip", "verified-by-agents",
+                                           "verify-failed", "verifying"])     # the last five: uat agents-verify
         patch = [json.loads(r["body"]) for r in writes if "PATCH" in r["args"] and r["body"] and "allow_auto_merge" in r["body"]]
         self.assertEqual(patch, [{"allow_auto_merge": True}])           # the no-UAT lane's auto-merge
         # Secrets are never set by the tool
@@ -1188,6 +1254,26 @@ class TestGitHubProjects(ToolTestCase):
         self.tool("issue", "status", str(m), "In Review")
         git(self.proj, "switch", "-q", "main")
 
+    def test_handing_rework_over_again_clears_uat_failed_and_names_the_round(self):
+        self.setup_board()
+        n = json.loads(self.tool("issue", "create", "--stream", "bug", "--title", "Crash", "--status", "Ready",
+                                 "--json").stdout)["number"]
+        labels = lambda: self.gh_state()["issues"][str(n)]["labels"]  # noqa: E731
+        # A first hand-over isn't rework: nothing to remove, no round
+        res = json.loads(self.tool("issue", "status", str(n), "UAT", "--json").stdout)
+        self.assertNotIn("rework_round", res)
+        self.assertNotIn("rework", res["message"])
+        for rnd in (1, 2):    # each failed test sends it back; each hand-over after it is the next round
+            self.tool("issue", "comment", str(n), "--body", "❌ UAT failed\n- [ ] step 2: expected a total, saw 0")
+            self.tool("issue", "label", str(n), "--add", "uat-failed")
+            self.tool("issue", "status", str(n), "Ready")
+            self.assertIn("uat-failed", labels())
+            res = json.loads(self.tool("issue", "status", str(n), "UAT", "--json").stdout)
+            self.assertEqual(res["rework_round"], rnd)
+            self.assertIn(f"`🔁 Rework, round {rnd}`", res["message"])
+            self.assertNotIn("uat-failed", labels())    # in UAT again: nothing reads it as "not fixed yet"
+            self.assertEqual(json.loads(self.tool("issue", "view", str(n), "--json").stdout)["issue"]["status"], "UAT")
+
     def test_a_claim_from_a_chat_that_died_is_listed_and_released_only_when_the_owner_allows(self):
         self.setup_board()
         origin = self.tmp / "origin.git"
@@ -1369,11 +1455,22 @@ class TestGitHubProjects(ToolTestCase):
         self.assertNotEqual(self.tool("config", "--max-in-uat", "30", "--until", future, check=False).returncode, 0)
         self.tool("config", "--max-in-uat", "30", "--until", future, "--human")
         cfg = json.loads((self.proj / "haam.config.json").read_text())
-        self.assertEqual((cfg["max_in_uat"], cfg["batch_window"]), (2, {"until": future, "max_in_uat": 30}))
+        self.assertEqual(cfg["max_in_uat"], 2)                              # the normal limit stays as it is...
+        self.assertNotIn("batch_window", cfg)
+        win = self.proj / ".git" / "haam-settings-window.json"           # ...the raise is on this computer
+        self.assertEqual(json.loads(win.read_text())["max_in_uat"]["value"], 30)
         res = json.loads(self.tool("capacity", "--json").stdout)
         self.assertEqual(res["max_in_uat"], 30)
         self.assertFalse(res["hold"])
         self.assertIn(f"Batch window until {future}", self.tool("capacity").stdout)
+        w = json.loads(win.read_text())
+        w["max_in_uat"]["until"] = "2020-01-01"
+        win.write_text(json.dumps(w))
+        self.assertTrue(json.loads(self.tool("capacity", "--json").stdout)["hold"])
+        # An older batch window in haam.config.json still counts until its last day
+        cfg["batch_window"] = {"until": future, "max_in_uat": 30}
+        (self.proj / "haam.config.json").write_text(json.dumps(cfg))
+        self.assertFalse(json.loads(self.tool("capacity", "--json").stdout)["hold"])
         cfg["batch_window"]["until"] = "2020-01-01"
         (self.proj / "haam.config.json").write_text(json.dumps(cfg))
         self.assertTrue(json.loads(self.tool("capacity", "--json").stdout)["hold"])
@@ -1383,6 +1480,59 @@ class TestGitHubProjects(ToolTestCase):
         self.assertEqual(json.loads(self.tool("capacity", "--json").stdout)["max_in_uat"], 12)
         self.tool("config", "--end-batch-window", "--human")
         self.assertNotIn("batch_window", json.loads((self.proj / "haam.config.json").read_text()))
+        self.assertFalse(win.exists())
+        self.assertTrue(json.loads(self.tool("capacity", "--json").stdout)["hold"])
+
+    def test_settings_change_from_a_busy_main_folder_goes_in_a_pr(self):
+        """The main folder has a test branch checked out with an unsaved change: the settings change is made in a
+        temporary worktree of origin/main and opened as a PR, and the main folder's files stay as they were."""
+        origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        git(self.proj, "remote", "set-url", "origin", str(origin))
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "adopt HAAM")
+        git(self.proj, "push", "-q", "-u", "origin", "main")
+        git(self.proj, "switch", "-q", "-c", "12-test")                 # checkout-pr for a /test
+        (self.proj / "README.md").write_text("# Example\nwork in progress\n")
+        before = {"status": git_status(self.proj), "config": (self.proj / "haam.config.json").read_text()}
+        res = json.loads(self.tool("settings", "--set", "max_in_uat=100", "--set", "review=local", "--human",
+                                   "--json").stdout)
+        pr = res["settings_pr"]
+        self.assertTrue(pr["url"], pr)
+        self.assertRegex(pr["branch"], r"^chore/haam-settings-\d{8}-\d{4}$")
+        self.assertIn("12-test", pr["why"])
+        # The main folder is untouched: same branch, same unsaved change, same settings file
+        self.assertEqual(subprocess.run(["git", "branch", "--show-current"], cwd=self.proj, capture_output=True,
+                                        text=True).stdout.strip(), "12-test")
+        self.assertEqual(git_status(self.proj), before["status"])
+        self.assertEqual((self.proj / "haam.config.json").read_text(), before["config"])
+        # The branch on origin has the commit, made from main
+        show = lambda *a: subprocess.run(["git", *a], cwd=origin, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(show("log", "-1", "--format=%s", pr["branch"]),
+                         "chore: haam settings max_in_uat=100, review=local")
+        self.assertEqual(show("rev-parse", f"{pr['branch']}~1"), show("rev-parse", "main"))
+        cfg = json.loads(show("show", f"{pr['branch']}:haam.config.json"))
+        self.assertEqual((cfg["max_in_uat"], cfg["review"]), (100, "local"))
+        # ...and its PR says what changed
+        made = [p for p in self.gh_state()["prs"].values() if p.get("headRefName") == pr["branch"]]
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0]["title"], "chore: haam settings max_in_uat=100, review=local")
+        self.assertIn("| `max_in_uat` | 10 | 100 |", made[0]["body"])
+        # The temporary worktree and its local branch are gone
+        wts = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=self.proj, capture_output=True,
+                             text=True).stdout
+        self.assertEqual(wts.count("worktree "), 1)
+        self.assertEqual(subprocess.run(["git", "branch", "--list", "chore/*"], cwd=self.proj, capture_output=True,
+                                        text=True).stdout.strip(), "")
+        # Back on a clean main: today's behaviour, the change is written in the folder (and again with it unsaved)
+        (self.proj / "README.md").write_text("# Example\n")
+        git(self.proj, "switch", "-q", "main")
+        for n in ("7", "8"):
+            res = json.loads(self.tool("settings", "--set", f"max_in_uat={n}", "--human", "--json").stdout)
+            self.assertIsNone(res["settings_pr"])
+            self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["max_in_uat"], int(n))
+        self.assertEqual(len([p for p in self.gh_state()["prs"].values()
+                              if str(p.get("headRefName")).startswith("chore/")]), 1)
 
     def test_settings_recommend_sizes_the_limits(self):
         r = json.loads(self.tool("settings", "--recommend", "--builders", "2", "--chats", "3", "--testing-hours", "5",
@@ -1676,6 +1826,14 @@ class TestHelpers(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("haam_mod", TOOL)
         self.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.mod)
+
+    def test_release_order_is_by_issue_number_as_a_number(self):
+        """#852 before #1879 (as text, "#1879" sorts first); --first goes before everything, in the order given."""
+        items = [("#1879", {"issues": ["#1879"]}), ("#852", {"issues": ["#852"]}), ("#90", {"issues": ["#1200", "#90"]}),
+                 ("APP-7", {"issues": ["APP-7"]})]
+        self.assertEqual([k for k, _ in self.mod.release_order(items)], ["APP-7", "#90", "#852", "#1879"])
+        self.assertEqual([k for k, _ in self.mod.release_order(items, ["#1879", "#852"])],
+                         ["#1879", "#852", "APP-7", "#90"])
 
     def test_required_fields_for(self):
         cfg = {"required_issue_fields": ["Area", "Kind", "Code check"]}
@@ -2177,6 +2335,147 @@ class TestWorktrees(ToolTestCase):
                                capture_output=True, text=True).stdout.split()
         self.assertTrue({"a.txt", "b.txt"} <= set(files))
 
+    def release_project(self, deploy_manual=False):
+        """A GitHub Projects project with grouping release, its origin and the fake gh; returns (tool, state)."""
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        state = self.tmp / "gh-state.json"
+        env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(state),
+               "FAKE_GH_ORIGIN": str(self.origin), "HAAM_POLL_SECONDS": "0"}
+        tool = lambda *a, **kw: self.run_tool(*a, tool=self.installed_tool(), env=env, **kw)
+        tool("config", "--tracker", "github", "--github-repo", "example-org/example-app", "--team-key", "ACM")
+        tool("settings", "--set", "grouping=release", "--set", "worktree_cleanup=manual", "--human")
+        if deploy_manual:
+            tool("config", "--deploy", "manual", "--human")
+        tool("github-project", "--apply")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", "config")
+        git(self.proj, "push", "-q", "origin", "main")
+        return tool, state
+
+    def pass_change(self, tool, title, files):
+        """An issue in UAT whose branch writes `files` ({name: text}), tested and passed by the owner."""
+        n = json.loads(tool("issue", "create", "--stream", "bug", "--title", title, "--status", "UAT",
+                            "--json").stdout)["number"]
+        git(self.proj, "switch", "-q", "-c", f"{n}-fix", "main")
+        for name, text in files.items():
+            (self.proj / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.proj / name).write_text(text)
+            git(self.proj, "add", name)
+        git(self.proj, "commit", "-qm", f"#{n}: fix")
+        git(self.proj, "push", "-q", "-u", "origin", f"{n}-fix")
+        git(self.proj, "switch", "-q", "main")
+        tool("checkout-pr", str(n))
+        tool("checkout-pr", "--back")
+        tool("publish", str(n), "--human", "--json")
+        return n
+
+    def test_release_plan_and_a_clash_the_owner_decides(self):
+        """B3: `ship --plan` shows the exact release with no side effects; two passed changes that clash stop the
+        release with a question instead of the sort order picking; --first answers it."""
+        tool, state = self.release_project()
+        a = self.pass_change(tool, "Fix A", {"shared.txt": "from A\n", "a.txt": "A\n"})
+        b = self.pass_change(tool, "Fix B", {"shared.txt": "from B\n"})
+        c = self.pass_change(tool, "Fix C", {"c.txt": "C\n", "db/migrations/001.sql": "create table t();\n"})
+        before = state.read_text()
+        heads = git_out(self.origin, "for-each-ref", "--format=%(refname)", "refs/heads")
+        plan = tool("ship", "--all", "--plan", check=False)
+        self.assertEqual(plan.returncode, 3, plan.stdout + plan.stderr)          # a clash: the owner's word is needed
+        self.assertIn(f"1. #{a}: Fix A", plan.stdout)
+        self.assertIn(f"2. #{c}: Fix C", plan.stdout)
+        self.assertIn(f"#{b} and #{a} change the same lines", plan.stdout)
+        self.assertIn("db/migrations/001.sql", plan.stdout)
+        self.assertIn("Looks like database migrations", plan.stdout)
+        js = json.loads(tool("ship", "--all", "--plan", "--json", check=False).stdout)
+        self.assertEqual([x["key"] for x in js["in"]], [f"#{a}", f"#{c}"])
+        self.assertEqual(js["clashes"], [{"key": f"#{b}", "with": f"#{a}"}])
+        self.assertEqual(state.read_text(), before, "the plan changed nothing on GitHub")
+        self.assertEqual(git_out(self.origin, "for-each-ref", "--format=%(refname)", "refs/heads"), heads)
+        self.assertFalse((self.proj / ".haam/release-plan").exists())
+
+        res = tool("ship", "--all", "--human", check=False)                       # never left to the sort order
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("Two passed changes clash", res.stdout)
+        self.assertFalse(json.loads(state.read_text()).get("prs"))
+
+        plan = tool("ship", "--all", "--plan", "--first", str(b), check=False)
+        self.assertEqual(plan.returncode, 0, plan.stdout + plan.stderr)
+        self.assertIn(f"1. #{b}: Fix B", plan.stdout)
+        self.assertIn(f"Left out: #{a}: clashes with #{b}, which you put first", plan.stdout)
+        res = tool("ship", "--all", "--human", "--first", str(b), check=False)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        rel = [p for p in json.loads(state.read_text())["prs"].values() if p["state"] == "MERGED"]
+        self.assertEqual(rel[0]["title"].split(":")[0], f"#{b} #{c}")
+        self.assertIn(f"Not in this release: #{a}", rel[0]["body"])
+        tested = json.loads((self.proj / ".haam/tested.json").read_text())
+        self.assertEqual(list(tested["passed"]), [f"#{a}"], "A is still passed, for after its rebase")
+
+    def test_a_new_release_while_an_earlier_one_waits_for_its_deploy(self):
+        """B2: with deploy manual, a merged release waiting for the owner's deploy doesn't hold up the next one, and
+        one `--live` closes every release the deployed commit contains."""
+        tool, state = self.release_project(deploy_manual=True)
+        a = self.pass_change(tool, "Fix A", {"a.txt": "A\n"})
+        res = tool("ship", "--all", "--human", check=False)
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)              # merged, waiting for the deploy
+        b = self.pass_change(tool, "Fix B", {"b.txt": "B\n"})
+        plan = tool("ship", "--all", "--plan", check=False)
+        self.assertIn("Merged and waiting for the deploy", plan.stdout)
+        self.assertIn(f"1. #{b}: Fix B", plan.stdout)
+        self.assertNotIn(f"#{a}: Fix A", plan.stdout)
+        res = tool("ship", "--all", "--human", check=False)
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("Release PR opened with", res.stdout)
+        prs = json.loads(state.read_text())["prs"]
+        self.assertEqual(sorted(p["state"] for p in prs.values()), ["MERGED", "MERGED"])
+        res = tool("ship", "--all", "--human", check=False)                       # nothing new: still waiting
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("Nothing new has passed", res.stdout)
+        res = tool("ship", "--all", "--human", "--live", check=False)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Live: release PRs", res.stdout)
+        st = json.loads(state.read_text())
+        for n in (a, b):
+            self.assertEqual(st["issues"][str(n)]["state"], "CLOSED")
+        tested = json.loads((self.proj / ".haam/tested.json").read_text())
+        self.assertFalse(tested.get("passed"))
+        self.assertFalse(tested.get("awaiting_live"))
+
+    def test_cadence_says_when_a_release_or_a_build_is_due(self):
+        """B1: a release is due at release_after_passed passed changes, or when the oldest waited release_after_days;
+        a release target counts the changes touching its paths since its last build. Nothing is changed."""
+        tool, state = self.release_project()
+        tool("settings", "--set", "release_after_passed=2", "--set", "release_after_days=3", "--human")
+        tool("config", "--release-target", "app=apps/phone/**", "--human")
+        git(self.proj, "commit", "-qam", "cadence")
+        git(self.proj, "push", "-q", "origin", "main")
+        a = self.pass_change(tool, "Fix A", {"apps/phone/a.txt": "A\n"})
+        rep = json.loads(tool("cadence", "--json").stdout)
+        self.assertFalse(rep["due"], rep)
+        self.assertEqual(rep["passed"], [f"#{a}"])
+        self.assertEqual(rep["targets"][0]["count"], 1)
+        self.assertFalse(rep["targets"][0]["due"])
+        b = self.pass_change(tool, "Fix B", {"apps/phone/b.txt": "B\n", "web.txt": "w\n"})
+        out = tool("cadence").stdout
+        self.assertIn("A release is due", out)
+        self.assertIn("2 changes passed", out)
+        self.assertIn("app: 2 change(s)", out)
+        self.assertIn("a build is due", out)
+        p = tool("cadence", "--built", "app", check=False)
+        self.assertNotEqual(p.returncode, 0)                                     # the owner's word: --human
+        tool("cadence", "--built", "app", "--human")
+        rep = json.loads(tool("cadence", "--json").stdout)
+        self.assertEqual(rep["targets"][0]["count"], 2, "passed changes not built yet still count")
+        # One change, waiting 5 days: due by age.
+        tf = self.proj / ".haam/tested.json"
+        data = json.loads(tf.read_text())
+        data["passed"].pop(f"#{b}")
+        data["passed"][f"#{a}"]["on"] = time.strftime("%Y-%m-%d", time.localtime(time.time() - 5 * 86400))
+        tf.write_text(json.dumps(data))
+        rep = json.loads(tool("cadence", "--json").stdout)
+        self.assertTrue(rep["due"], rep)
+        self.assertIn("waited 5 days", rep["reasons"][0])
+        self.assertFalse(json.loads(state.read_text()).get("prs"), "cadence changed nothing on GitHub")
+
     def test_config_owner_flags_need_human(self):
         tool = self.installed_tool()
         self.run_tool("config", "--product", "Acme", "--team-key", "ACM", "--github-repo", "example-org/example-app",
@@ -2414,6 +2713,382 @@ class TestExclusive(ToolTestCase):
                          ["make (check|test-integration)"])
         self.run_tool("config", "--clear-heavy-runs")
         self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["heavy_runs"], [])
+
+
+class TestAgentsVerify(ToolTestCase):
+    """uat: agents-verify: the lane rule, the hand-over, the verifier's own marks, a later push, pulling back."""
+
+    def setUp(self):
+        super().setUp()
+        self.origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
+        git(self.proj, "remote", "set-url", "origin", str(self.origin))
+        bin_dir = self.tmp / "bin"
+        install_fake_gh_projects(bin_dir)
+        self.state = self.tmp / "gh-state.json"
+        self.env = {**self.env, "PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}", "FAKE_GH_STATE": str(self.state),
+                    "FAKE_GH_ORIGIN": str(self.origin)}
+        self.install()
+        self.tool("config", "--product", "Acme", "--tracker", "github", "--team-key", "ACM",
+                  "--github-repo", "example-org/example-app", "--owner", "octocat")
+        self.tool("github-project", "--apply")
+        (self.proj / "apps/mobile").mkdir(parents=True)
+        (self.proj / "apps/mobile/screen.txt").write_text("a screen\n")
+        (self.proj / "src").mkdir()
+        (self.proj / "src/app.py").write_text("print('hi')\n")
+        self.push_main("adopt HAAM")
+
+    def tool(self, *args, **kw):
+        return self.run_tool(*args, tool=self.installed_tool(), **kw)
+
+    def gh(self):
+        return json.loads(self.state.read_text())
+
+    def push_main(self, msg):
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", msg)
+        git(self.proj, "push", "-q", "-u", "origin", "main")
+
+    def lane_on(self, shadow=0, *more):
+        self.tool("settings", "--set", "grouping=release", "--set", "owner_test_paths=phones=apps/mobile/**", "--set", "uat=agents-verify",
+                  "--set", f"agents_verify_shadow={shadow}", *more, "--human")
+        self.push_main("settings: agents verify")
+
+    def ticket(self, title="Fix the export", status="Ready"):
+        return json.loads(self.tool("issue", "create", "--stream", "bug", "--title", title, "--status", status,
+                                    "--json").stdout)["number"]
+
+    def build(self, n, files=None, needs="no", msg=None, rename=None, plan=True, lines=True):
+        """The builder's branch on origin: a code commit, then the plan naming it under Agent pre-check."""
+        branch = f"{n}-change"
+        git(self.proj, "switch", "-q", "-c", branch, "origin/main")
+        for path, text in (files or {"src/app.py": f"print('fixed {n}')\n"}).items():
+            (self.proj / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.proj / path).write_text(text)
+        if rename:
+            git(self.proj, "mv", *rename)
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", msg or f"#{n}: fix")
+        code_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj, capture_output=True,
+                                  text=True).stdout.strip()
+        if plan:
+            pre = [f"- **Needs a person:** {needs}"] + ([f"- **Verified at:** {code_sha}", "- **Risk:** low: one line",
+                                                        "- **Undo:** revert the commit"] if lines else [])
+            (self.proj / f"docs/uat/GH-{n}-change.md").write_text(
+                "# UAT plan\n\n## Test cases\n| 1 | Risk: none here |\n\n## Agent pre-check\n" + "\n".join(pre) + "\n")
+            git(self.proj, "add", "-A")
+            git(self.proj, "commit", "-qm", f"#{n}: UAT plan")
+        git(self.proj, "push", "-q", "origin", branch)
+        git(self.proj, "switch", "-q", "main")
+        return branch, self.tip(branch)
+
+    def tip(self, branch):
+        return subprocess.run(["git", "rev-parse", branch], cwd=self.origin, capture_output=True, text=True).stdout.strip()
+
+    def lane(self, n):
+        return self.run_json("lane", str(n), tool=self.installed_tool())
+
+    def issue(self, n):
+        return self.run_json("issue", "view", str(n), tool=self.installed_tool())["issue"]
+
+    def comments(self, n):
+        return [c["body"] for c in self.gh()["comments"] if c["issue"] == n]
+
+    def claim(self, n, phase="verify", tool="Codex"):
+        return self.run_json("issue", "claim", str(n), "--for", phase, "--tool", tool, tool=self.installed_tool())["claim"]
+
+    def handover(self, n, check=True):
+        return self.tool("handover", str(n), "--json", check=check)
+
+    def test_settings_refuse_the_lane_without_the_owner_or_the_areas(self):
+        p = self.tool("settings", "--set", "uat=agents-verify", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--human", p.stderr)
+        p = self.tool("settings", "--set", "uat=agents-verify", "--human", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("needs owner_test_paths", p.stderr)
+        p = self.tool("settings", "--set", "owner_test_paths=gates=AGENTS.md", "--set", "uat=agents-verify", "--human",
+                      check=False)
+        self.assertIn("needs grouping release", p.stderr)
+        self.tool("settings", "--set", "owner_test_paths=phones=apps/mobile/**,apps/watch/**", "--set", "grouping=release",
+                  "--set", "owner_test_paths=gates=AGENTS.md", "--set", "uat=agents-verify", "--human")
+        cfg = json.loads((self.proj / "haam.config.json").read_text())
+        self.assertEqual(cfg["owner_test_paths"], {"phones": ["apps/mobile/**", "apps/watch/**"], "gates": ["AGENTS.md"]})
+        self.assertEqual(cfg["uat"], "agents-verify")
+        p = self.tool("settings", "--set", "owner_test_paths=", "--human", check=False)    # can't empty it while on
+        self.assertIn("needs owner_test_paths", p.stderr)
+        self.tool("settings", "--set", "owner_test_paths=gates=", "--human")                # one area out
+        self.assertEqual(json.loads((self.proj / "haam.config.json").read_text())["owner_test_paths"],
+                         {"phones": ["apps/mobile/**", "apps/watch/**"]})
+        self.assertIn("owner_test_paths   phones: apps/mobile/**, apps/watch/**", self.tool("settings").stdout)
+
+    def test_lane_reasons_in_order(self):
+        n = self.ticket()
+        self.build(n)
+        self.assertEqual(self.lane(n)["lane"], "owner")                                  # the lane is off
+        self.assertIn("uat is owner-decides", self.lane(n)["reason"])
+        self.lane_on()
+        r = self.lane(n)
+        self.assertEqual((r["lane"], r["verification"]["verified"]), ("agents", False))
+        self.assertEqual(self.tool("lane", str(n)).stdout.splitlines()[0],
+                         "agents: needs no person, and changes none of the owner's own areas")
+        # The labels come first: owner-test, then uat-failed
+        self.tool("issue", "label", str(n), "--add", "uat-failed", "--add", "owner-test")
+        self.assertIn("owner-test", self.lane(n)["reason"])
+        self.tool("issue", "label", str(n), "--remove", "owner-test", "--human")
+        self.assertIn("uat-failed", self.lane(n)["reason"])
+        # An owner-test area, a file renamed out of one (by both names), a prototype's commits, the plan's line
+        a = self.ticket("Screen fix")
+        self.build(a, files={"apps/mobile/screen.txt": "changed\n"}, msg=f"#{a}: spike: keep the prototype")
+        self.assertEqual(self.lane(a)["reason"],
+                         "changes phones (apps/mobile/screen.txt), one of the owner's own areas (owner_test_paths)")
+        b = self.ticket("Move the screen")
+        self.build(b, files={}, rename=("apps/mobile/screen.txt", "src/screen.txt"))
+        self.assertIn("changes phones (apps/mobile/screen.txt", self.lane(b)["reason"])
+        c = self.ticket("Kept prototype")
+        self.build(c, msg=f"#{c}: spike: keep the prototype")
+        self.assertIn("built from a prototype", self.lane(c)["reason"])
+        d = self.ticket("New page")
+        self.build(d, needs="yes (a new page layout)")
+        self.assertEqual(self.lane(d)["reason"], "needs a person: a new page layout")
+        e = self.ticket("No line")
+        self.build(e, needs="", lines=False)
+        self.assertIn("no line `Needs a person", self.lane(e)["reason"])
+        f = self.ticket("No plan")
+        self.build(f, plan=False)
+        self.assertIn("no UAT plan", self.lane(f)["reason"])
+        # A branch's own copy of the settings doesn't count: the lane reads main's
+        g = self.ticket("Turn it off on the branch")
+        self.build(g, files={"haam.config.json": json.dumps({**json.loads((self.proj / "haam.config.json").read_text()),
+                                                             "owner_test_paths": {}})})
+        self.assertEqual(self.lane(g)["lane"], "agents")
+        # Every other value of uat: the owner's, as before
+        for value in ("always", "bugs-skip", "owner-decides"):
+            self.tool("settings", "--set", f"uat={value}", "--human")
+            self.push_main(f"uat {value}")
+            self.assertEqual(self.lane(g)["lane"], "owner", value)
+
+    def test_handover_by_lane(self):
+        self.lane_on()
+        n = self.ticket()
+        token = self.claim(n, "build", "Claude Code")
+        branch, head = self.build(n, lines=False)
+        p = self.tool("handover", str(n), "--claim", token, check=False)                 # the four lines first
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Verified at", p.stderr)
+        branch, head = self.build_again(n, branch)
+        res = json.loads(self.tool("handover", str(n), "--claim", token, "--json").stdout)
+        self.assertEqual((res["lane"], res["status"]), ("agents", "In Review"))
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "In Review")
+        self.assertIn("verifying", iss["labels"])
+        self.assertTrue(self.comments(n)[-1].startswith(f"🧪 Ready for verification · branch `{branch}` · head {head}"))
+        # The owner's lane: UAT, as today, with the reason in the first line
+        o = self.ticket("New page")
+        t2 = self.claim(o, "build", "Claude Code")
+        branch, head = self.build(o, needs="yes (a new page)")
+        res = json.loads(self.tool("handover", str(o), "--claim", t2, "--json").stdout)
+        self.assertEqual((res["lane"], res["status"]), ("owner", "UAT"))
+        self.assertEqual(self.issue(o)["status"], "UAT")
+        self.assertNotIn("verifying", self.issue(o)["labels"])
+        first = self.comments(o)[-1].splitlines()[0]
+        self.assertEqual(first, f"🧪 Ready for UAT · your test: needs a person: a new page · branch `{branch}` · head {head}")
+        self.assertIn("@octocat", self.comments(o)[-1])
+
+    def build_again(self, n, branch):
+        """The builder adds the plan's four lines (a docs commit on top)."""
+        git(self.proj, "switch", "-q", branch)
+        code_sha = subprocess.run(["git", "rev-parse", "HEAD~1"], cwd=self.proj, capture_output=True, text=True).stdout.strip()
+        plan = self.proj / f"docs/uat/GH-{n}-change.md"
+        plan.write_text(plan.read_text() + f"- **Verified at:** {code_sha}\n- **Risk:** medium: the export\n"
+                        "- **Undo:** revert the commit\n")
+        git(self.proj, "commit", "-qam", f"#{n}: plan lines")
+        git(self.proj, "push", "-q", "origin", branch)
+        git(self.proj, "switch", "-q", "main")
+        return branch, self.tip(branch)
+
+    def handed(self, title="Fix the export", **kw):
+        n = self.ticket(title)
+        token = self.claim(n, "build", "Claude Code")
+        branch, head = self.build(n, **kw)
+        self.tool("handover", str(n), "--claim", token)
+        return n, token, branch, head
+
+    def card(self, text="What changed: the export.\nRisk: low.\nChecked: the tests.\nNot checked: -.\nUndo: revert."):
+        f = self.tmp / "card.md"
+        f.write_text(text)
+        return str(f)
+
+    def verify(self, n, verdict, head, claim, check=True, cwd=None, **kw):
+        args = ["verify-result", str(n), "--verdict", verdict, "--head", head, "--claim", claim, "--tool",
+                kw.get("tool", "Codex, model-x")]
+        if verdict != "needs-owner" or kw.get("card"):
+            args += ["--body-file", self.card(kw.get("card") or "What changed: the export.\n- one\n- two")]
+        if kw.get("reason"):
+            args += ["--reason", kw["reason"]]
+        return self.run_tool(*args, tool=self.installed_tool(), check=check, cwd=cwd)
+
+    def test_a_release_tells_the_two_kinds_of_pass_apart(self):
+        """K5: on the owner's ship, verified tickets join the release beside the ones the owner passed, listed apart,
+        each kind in its own words in the release's table; a pulled-back ticket stays out."""
+        self.lane_on()
+        v, _, vbranch, vhead = self.handed("Fix the export")
+        self.verify(v, "verified", vhead, self.claim(v))
+        p = self.ticket("Fix the import", status="UAT")
+        git(self.proj, "switch", "-q", "-c", f"{p}-import", "origin/main")
+        (self.proj / "import.txt").write_text("fixed\n")
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-qm", f"#{p}: fix")
+        git(self.proj, "push", "-q", "-u", "origin", f"{p}-import")
+        git(self.proj, "switch", "-q", "main")
+        self.tool("checkout-pr", str(p))
+        self.tool("checkout-pr", "--back")
+        self.tool("publish", str(p), "--human")
+        plan = self.tool("ship", "--all", "--plan").stdout
+        self.assertIn(f"#{p}: Fix the import", plan)
+        self.assertIn("Verified by agents, not passed by you", plan)
+        self.assertIn(f"#{v}: Fix the export · verified {vhead[:8]}", plan)
+        js = json.loads(self.tool("ship", "--all", "--plan", "--json").stdout)
+        self.assertEqual({x["key"]: x["checked"] for x in js["in"]}, {f"#{v}": "verified", f"#{p}": "passed"})
+        # Pulled back: it leaves the release
+        self.tool("issue", "label", str(v), "--add", "owner-test")
+        js = json.loads(self.tool("ship", "--all", "--plan", "--json").stdout)
+        self.assertEqual([x["key"] for x in js["in"]], [f"#{p}"])
+        self.tool("issue", "label", str(v), "--remove", "owner-test", "--human")
+        res = self.tool("ship", "--all", "--human", "--wait", "0", check=False)
+        rel = [x for x in self.gh()["prs"].values() if x["headRefName"].startswith("release/")]
+        self.assertEqual(len(rel), 1, res.stdout + res.stderr)
+        body = rel[0]["body"]
+        self.assertIn(f"#{v}: Fix the export | `{vhead[:8]}` | Verified by agents (claim", body)
+        self.assertIn(f"#{p}: Fix the import", body)
+        self.assertIn("Tested and passed by @", body)
+        # Switched off: ship ignores agent-verified
+        self.tool("settings", "--set", "uat=owner-decides", "--human")
+
+    def test_verify_result_marks_and_refusals(self):
+        self.lane_on()
+        n, build, branch, head = self.handed()
+        # Only a ticket waiting for a verifier can be claimed for it
+        o = self.ticket("Not handed over")
+        self.assertIn("isn't waiting for a verifier", self.tool("issue", "claim", str(o), "--for", "verify",
+                                                                check=False).stderr)
+        v = self.claim(n)
+        self.assertIn("build claim", self.verify(n, "verified", head, build, check=False).stderr)
+        self.assertIn("No verify claim", self.verify(n, "verified", head, "abcdef", check=False).stderr)
+        self.assertIn("isn't the tip", self.verify(n, "verified", "0" * 40, v, check=False).stderr)
+        wt = self.tmp / "on-branch"
+        git(self.proj, "worktree", "add", "-q", str(wt), branch)
+        self.assertIn(f"has {branch} checked out", self.verify(n, "verified", head, v, check=False, cwd=wt).stderr)
+        git(self.proj, "worktree", "remove", "--force", str(wt))
+        before = {json.dumps(x, sort_keys=True) for x in self.gh().get("statuses", [])}
+        self.verify(n, "verified", head, v)
+        st = self.gh()
+        new = [x for x in st.get("statuses", []) if json.dumps(x, sort_keys=True) not in before]
+        self.assertEqual([(x["context"], x["state"], x["sha"]) for x in new], [("agent-verified", "success", head)])
+        self.assertFalse(any(x["context"] == "uat" for x in st.get("statuses", [])))         # never the owner's pass
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "In Review")
+        self.assertIn("verified-by-agents", iss["labels"])
+        for lab in ("verifying", "uat-passed", "uat:skip", "claimed"):
+            self.assertNotIn(lab, iss["labels"])
+        verdict = next(b for b in self.comments(n) if b.startswith("🔎"))
+        self.assertTrue(verdict.startswith(f"🔎 Verified by agents · branch `{branch}` · head {head} · claim {v} · "
+                                           "Codex, model-x\n\nWhat changed"))
+        self.assertTrue(self.comments(n)[-1].startswith(f"🔓 Claim released ({v})"))
+        self.assertTrue(self.lane(n)["verification"]["verified"])
+        # K4: a later push to docs/uat/ only still counts; a code change ends the verification
+        git(self.proj, "switch", "-q", branch)
+        (self.proj / f"docs/uat/GH-{n}-change.md").write_text("# plan\n\n## Agent pre-check\n- **Needs a person:** no\n")
+        git(self.proj, "commit", "-qam", "plan wording")
+        git(self.proj, "push", "-q", "origin", branch)
+        self.assertTrue(self.lane(n)["verification"]["verified"])
+        self.assertIn("verified by agents at its head already",
+                      self.tool("issue", "claim", str(n), "--for", "verify", check=False).stderr)
+        (self.proj / "src/app.py").write_text("print('again')\n")
+        git(self.proj, "commit", "-qam", "more code")
+        git(self.proj, "push", "-q", "origin", branch)
+        git(self.proj, "switch", "-q", "main")
+        r = self.lane(n)
+        self.assertEqual(r["lane"], "agents")
+        self.assertFalse(r["verification"]["verified"])
+        self.assertIn("moved on since the verified commit", r["verification"]["why"])
+        self.claim(n)                                                       # /next offers it for verification again
+        # The lane is the owner's: refused
+        m, _, _, mhead = self.handed("Pulled back")
+        mv = self.claim(m)
+        self.tool("issue", "label", str(m), "--add", "owner-test")
+        self.assertIn("lane is owner", self.verify(m, "verified", mhead, mv, check=False).stderr)
+
+    def test_not_verified_rounds_then_needs_owner(self):
+        self.lane_on()
+        n, build, branch, head = self.handed()
+        for round_ in (1, 2):
+            v = self.claim(n)
+            self.verify(n, "not-verified", head, v)
+            iss = self.issue(n)
+            self.assertEqual((iss["status"], iss["assignees"]), ("Ready", []))
+            self.assertIn("verify-failed", iss["labels"])
+            self.assertNotIn("verifying", iss["labels"])
+            body = next(b for b in reversed(self.comments(n)) if b.startswith("🔎"))
+            self.assertTrue(body.startswith("🔎 Not verified · branch"))
+            self.assertIn("- [ ] one\n- [ ] two", body)
+            self.tool("handover", str(n), "--branch", branch)                     # the rework comes back to a verifier
+            self.assertNotIn("verify-failed", self.issue(n)["labels"])
+        v = self.claim(n)
+        p = self.verify(n, "verified", head, v, check=False)                      # after max_review_rounds (2)
+        self.assertIn("needs-owner", p.stderr)
+        self.verify(n, "needs-owner", head, v, reason="it keeps failing on the export")
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "UAT")
+        self.assertIn("owner-test", iss["labels"])
+        self.assertTrue(any(b.startswith("🔎 Needs your test: it keeps failing on the export · branch") for b in self.comments(n)))
+        self.assertEqual(self.lane(n)["lane"], "owner")
+        res = self.run_json("metrics", "--days", "30", tool=self.installed_tool())["verification"]
+        self.assertEqual((res["handed_over"], res["not_verified"], res["needs_owner"]), (1, 2, [n]))
+
+    def test_shadow_start_and_spot_check(self):
+        self.lane_on(shadow=1)
+        n, _, _, head = self.handed()
+        v = self.claim(n)
+        self.verify(n, "verified", head, v)
+        self.assertEqual(self.issue(n)["status"], "UAT")                           # the owner still tests it
+        self.assertIn("Shadow start: verified ticket 1 of 1", self.comments(n)[-2])
+        self.assertTrue(self.lane(n)["verification"]["shadow"])
+        # The tenth verified ticket is picked for a spot-check, by another model
+        st = self.gh()
+        for k in range(8):
+            st["issues"][str(900 + k)] = dict(st["issues"][str(n)], labels=["verified-by-agents"], state="CLOSED")
+        self.state.write_text(json.dumps(st))
+        m, _, _, mhead = self.handed("Tenth")
+        self.verify(m, "verified", mhead, self.claim(m))
+        iss = self.issue(m)
+        self.assertEqual(iss["status"], "In Review")                                # past the shadow start
+        self.assertIn("spot-check", iss["labels"])
+        v2 = self.claim(m, tool="Claude Code")
+        self.assertIn("another model", self.verify(m, "verified", mhead, v2, check=False).stderr)
+        self.verify(m, "verified", mhead, v2, tool="Claude Code, model-y")
+        self.assertNotIn("spot-check", self.issue(m)["labels"])
+
+    def test_pull_back_and_switching_off(self):
+        self.lane_on()
+        n, _, _, head = self.handed()
+        self.verify(n, "verified", head, self.claim(n))
+        self.assertEqual(self.lane(n)["lane"], "agents")
+        p = self.tool("issue", "label", str(n), "--add", "verified-by-agents", check=False)
+        self.assertIn("verify-result", p.stderr)                                    # only the verifier's tool adds it
+        self.tool("issue", "label", str(n), "--add", "owner-test")                   # `test <ID> myself`
+        iss = self.issue(n)
+        self.assertEqual(iss["status"], "UAT")
+        self.assertEqual(self.lane(n)["lane"], "owner")
+        self.assertTrue(self.comments(n)[-1].startswith("↩️ Pulled back"))
+        p = self.tool("issue", "label", str(n), "--remove", "owner-test", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Only the owner removes owner-test", p.stderr)
+        self.tool("issue", "label", str(n), "--remove", "owner-test", "--human")
+        self.assertEqual(self.lane(n)["lane"], "agents")
+        self.tool("settings", "--set", "uat=owner-decides", "--human")
+        self.push_main("lane off")
+        self.assertEqual(self.lane(n)["lane"], "owner")
 
 
 def git_status(cwd):
